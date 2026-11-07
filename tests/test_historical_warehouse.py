@@ -30,7 +30,7 @@ def _create_synthetic_bars(count: int = 50, start_dt: datetime = None) -> pd.Dat
             }
         )
     df = pd.DataFrame(data)
-    df.set_index("date", inplace=True)
+    df = df.set_index("date")
     return df
 
 

@@ -35,7 +35,7 @@ def _create_candidate_alert(symbol="NSE:TATAMOTORS", direction="BULLISH", obi_50
         environment="LIVE",
         is_live=True,
         option_type="CE",
-        metrics={},
+        metrics={"rvol": 2.0},
         extra_metrics={
             "l3_microstructure": {
                 "obi_50": obi_50,

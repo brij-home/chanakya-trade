@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     Funds,
     Holding,
@@ -152,7 +153,8 @@ class ShoonyaAPI(BrokerAPI):
             email=str(response.get("email") or ""),
             broker="SHOONYA",
         )
-        TOKEN_FILE.write_text(
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "token": self._token,
@@ -271,7 +273,7 @@ class ShoonyaAPI(BrokerAPI):
                 return result
         if not isinstance(result, dict):
             raise RuntimeError(f"Shoonya returned an unexpected response for {endpoint}")
-        if str(result.get("stat", "Ok")).lower() not in ("ok", "success"):
+        if str(result.get("stat", "")).lower() not in ("ok", "success"):
             message = result.get("emsg") or result.get("error") or "unknown broker error"
             if "session" in str(message).lower() or "invalid session" in str(message).lower():
                 self._token = ""
@@ -689,7 +691,7 @@ class ShoonyaAPI(BrokerAPI):
                     quantity=_int(row.get("qty")),
                     order_type=str(row.get("prctyp") or ""),
                     product=str(row.get("prd") or ""),
-                    status=status_map.get(status, status or "OPEN"),
+                    status=status_map.get(status, status or "UNKNOWN"),
                     price=_num(row.get("prc")) or None,
                     average_price=_num(row.get("avgprc")) or None,
                     filled_quantity=_int(row.get("fillshares")),

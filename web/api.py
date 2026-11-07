@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
             )
         except Exception as e_pri:
             logger.debug(f"[web.api] Priority class configuration note: {e_pri}")
-    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+    if os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test"):
         get_csrf_secret()
 
     init_auth_db()
@@ -283,8 +283,38 @@ async def lifespan(app: FastAPI):
     except Exception as e_sync:
         logger.warning(f"[lifespan] Failed starting data sync scheduler: {e_sync}")
 
+    # Start the transactional outbox worker for reliable alert delivery
+    try:
+        from engine.outbox_worker import get_outbox_worker
+
+        get_outbox_worker().start(poll_interval=2.0)
+    except Exception as e_outbox:
+        logger.warning(f"[lifespan] Failed starting OutboxWorker: {e_outbox}")
+
+    # Start the execution recovery worker for stuck/ambiguous orders
+    try:
+        from engine.recovery_worker import start_recovery_worker
+
+        start_recovery_worker(interval_seconds=30.0)
+    except Exception as e_rec:
+        logger.warning(f"[lifespan] Failed starting RecoveryWorker: {e_rec}")
+
     yield
     warmer_task.cancel()
+    maintenance_task.cancel()
+    staleness_task.cancel()
+    try:
+        from engine.recovery_worker import stop_recovery_worker
+
+        stop_recovery_worker()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        from engine.outbox_worker import get_outbox_worker
+
+        get_outbox_worker().stop()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     maintenance_task.cancel()
     staleness_task.cancel()
     try:
@@ -365,11 +395,14 @@ async def lifespan(app: FastAPI):
         logger.debug(f"[web.api] close_orders_db error suppressed: {e_suppressed}")
 
 
+_deploy_mode = os.environ.get("DEPLOY_MODE", "")
+_is_hosted = _deploy_mode not in ("", "desktop", "local", "test")
+
 app = FastAPI(
     title="ChanakyaTrade",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    docs_url=None if _is_hosted else "/docs",
+    redoc_url=None if _is_hosted else "/redoc",
+    openapi_url=None if _is_hosted else "/openapi.json",
     lifespan=lifespan,
 )
 
@@ -382,7 +415,7 @@ def _cors_origins() -> list[str]:
     configured = os.environ.get("CORS_ALLOWED_ORIGINS", "")
     if configured:
         return [origin.strip() for origin in configured.split(",") if origin.strip()]
-    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+    if os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test"):
         return []
     return ["http://localhost:5173", "http://127.0.0.1:5173"]
 
@@ -407,6 +440,7 @@ app.include_router(auth_router)
 # ── CSRF Secret Resolution & Enforcement ─────────────────────────
 def get_csrf_secret() -> str:
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
     secret = os.environ.get("CSRF_SECRET", "")
     insecure_defaults = {
         "chanakya-csrf-secret-change-in-production",
@@ -415,10 +449,10 @@ def get_csrf_secret() -> str:
         "change-me",
         "12345678901234567890123456789012",
     }
-    if deploy_mode == "self-hosted":
+    if is_hosted:
         if not secret or len(secret) < 32 or secret in insecure_defaults:
             raise RuntimeError(
-                "DEPLOY_MODE=self-hosted requires a cryptographically strong CSRF_SECRET "
+                f"DEPLOY_MODE={deploy_mode} requires a cryptographically strong CSRF_SECRET "
                 "environment variable (minimum 32 characters, high entropy). Refusing to operate with missing or insecure secret."
             )
     return secret or "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac"
@@ -431,21 +465,26 @@ async def global_exception_middleware(request: _Request, call_next):
         return await call_next(request)
     except Exception as exc:
         err_msg = str(exc)
-        # Starlette BaseHTTPMiddleware limitation: when a client disconnects from an SSE
-        # stream or long-polling connection, the underlying anyio stream closes, causing
-        # BaseHTTPMiddleware to raise RuntimeError("No response returned.").
-        # This is a normal transport disconnect, NOT an unhandled application failure.
-        is_stream_req = (
-            "stream" in request.url.path
-            or "text/event-stream" in request.headers.get("accept", "").lower()
-        )
-        if (
-            (isinstance(exc, RuntimeError) and "No response returned" in err_msg)
-            or isinstance(exc, asyncio.CancelledError)
-        ) and is_stream_req:
-            logger.debug(
-                f"[web.api] Stream client transport closed cleanly on {request.url.path}: {err_msg}"
+        # Starlette BaseHTTPMiddleware limitation: when a client disconnects, times out,
+        # or cancels a request before a response starts sending, the underlying anyio stream
+        # closes, causing BaseHTTPMiddleware to raise RuntimeError("No response returned.").
+        # This is a normal transport disconnect / client cancellation, NOT an unhandled application failure.
+        is_disconnect = (
+            isinstance(exc, RuntimeError) and "No response returned" in err_msg
+        ) or isinstance(exc, asyncio.CancelledError)
+        if is_disconnect:
+            is_stream_req = (
+                "stream" in request.url.path
+                or "text/event-stream" in request.headers.get("accept", "").lower()
             )
+            if is_stream_req:
+                logger.debug(
+                    f"[web.api] Stream client transport closed cleanly on {request.url.path}: {err_msg}"
+                )
+            else:
+                logger.info(
+                    f"[web.api] Client transport closed or cancelled on {request.method} {request.url.path}: {err_msg}"
+                )
             from starlette.responses import Response
 
             return Response(status_code=204)
@@ -479,39 +518,58 @@ async def global_exception_middleware(request: _Request, call_next):
         from datetime import datetime, timezone
         from starlette.responses import JSONResponse
 
+        is_hosted = os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test")
+        msg = "An internal server error occurred" if is_hosted else str(exc)
         return JSONResponse(
             status_code=500,
             content={
                 "error": "Internal server error",
                 "incident_id": incident_id,
-                "message": str(exc),
+                "message": msg,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
 
 
-# ── Auth middleware for /api/* and /skills/* ──────────────────────
+MAX_REQUEST_BODY_SIZE = 2 * 1024 * 1024  # 2 MB
+
+
+@app.middleware("http")
+async def request_body_size_limit_middleware(request: _Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_SIZE:
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(
+                    {
+                        "detail": f"Payload too large. Maximum allowed size is {MAX_REQUEST_BODY_SIZE} bytes."
+                    },
+                    status_code=413,
+                )
+        except ValueError as e_len:
+            logger.debug(f"[API] Invalid Content-Length header '{content_length}': {e_len}")
+    return await call_next(request)
+
+
+# ── Auth middleware for /api/*, /skills/*, /stream/*, and /ws/* ──
 @app.middleware("http")
 async def auth_middleware(request: _Request, call_next):
     path = request.url.path
-    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks, diagnostics, maintenance)
-    if (
+    method = request.method.upper()
+
+    # Public paths — no auth required (health, read-only mode, CSRF token, OAuth callbacks)
+    is_public = (
         path.startswith("/auth/")
         or path in ("/health", "/health/live", "/health/ready")
-        or path
-        in (
-            "/api/mode",
-            "/api/csrf-token",
+        or (path == "/api/mode" and method == "GET")
+        or (path == "/api/csrf-token" and method == "GET")
+        or (path == "/api/onboarding/status" and method == "GET")
+        or (
+            path.startswith("/api/onboarding/")
+            and os.environ.get("DEPLOY_MODE", "") in ("", "desktop", "local", "test")
         )
-        or path.startswith("/api/diagnostics")
-        or path.startswith("/api/maintenance")
-        # A self-hosted install has no authenticated user until its first
-        # administrator completes setup. Keeping the onboarding flow public is
-        # necessary to make that first-run state recoverable; protected trading
-        # and analysis routes remain unavailable until an account exists.
-        or path.startswith("/api/onboarding/")
-        # NOTE: /api/orders/*, /api/reconciliation, /api/portfolio, /api/risk/*, and /api/audit/*
-        # are strictly NOT public and require authenticated sessions to protect customer capital, holdings, and logs.
         or path.startswith("/.well-known/")
         or path.startswith("/fyers/")  # OAuth callbacks
         or path.startswith("/zerodha/")  # OAuth callbacks
@@ -520,13 +578,21 @@ async def auth_middleware(request: _Request, call_next):
         or path.startswith("/angelone/")
         or path.startswith("/shoonya/")
         or path.startswith("/mstock/")
-        or not (path.startswith("/api/") or path.startswith("/skills/"))
-    ):
+        or not (
+            path.startswith("/api/")
+            or path.startswith("/skills/")
+            or path.startswith("/stream/")
+            or path.startswith("/ws/")
+        )
+    )
+    if is_public:
         return await call_next(request)
 
-    # Self-hosted mode: authentication & CSRF enforcement
+    # Hosted mode (any non-local deployment): authentication & CSRF enforcement
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
-    if deploy_mode == "self-hosted":
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+
+    if is_hosted:
         if user_count() == 0:
             return JSONResponse(
                 {
@@ -535,14 +601,14 @@ async def auth_middleware(request: _Request, call_next):
                 status_code=503,
             )
 
-        session_id = request.cookies.get("session_id")
+        session_id = request.cookies.get("__Host-session_id") or request.cookies.get("session_id")
         session = get_session(session_id) if session_id else None
         if not session:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         request.state.user = session
 
         # CSRF protection for authenticated mutating methods
-        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        if method in ("POST", "PUT", "DELETE", "PATCH"):
             csrf_token = request.headers.get("X-CSRF-Token", "")
             import hashlib
             import hmac
@@ -556,17 +622,47 @@ async def auth_middleware(request: _Request, call_next):
 
         return await call_next(request)
     else:
-        # Local desktop mode: skip auth for localhost (Electron app, CLI, local dev, testclient)
+        # Local desktop mode:
+        # 1. Socket peer validation
         client_host = request.client.host if request.client else ""
-        if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
-            return await call_next(request)
+        if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return JSONResponse(
+                {"detail": "Forbidden: Non-local access rejected in local mode"}, status_code=403
+            )
 
-        # Check session cookie
-        session_id = request.cookies.get("session_id")
-        session = get_session(session_id) if session_id else None
-        if not session:
-            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
-        request.state.user = session
+        # 2. Host header validation (prevent DNS rebinding attacks)
+        host_header = (request.headers.get("host") or "").split(":")[0].lower()
+        if host_header and host_header not in (
+            "127.0.0.1",
+            "localhost",
+            "testclient",
+            "testserver",
+            "test",
+        ):
+            return JSONResponse({"detail": "Forbidden: Invalid Host header"}, status_code=403)
+
+        # 3. Origin check on mutating methods if Origin header is present
+        if method in ("POST", "PUT", "DELETE", "PATCH"):
+            origin = request.headers.get("origin")
+            if origin:
+                from urllib.parse import urlparse
+
+                parsed_origin = urlparse(origin).hostname or ""
+                if parsed_origin not in ("127.0.0.1", "localhost", "null"):
+                    return JSONResponse({"detail": "Forbidden: Untrusted Origin"}, status_code=403)
+
+        # 4. Sidecar token verification outside testing mode
+        import secrets
+        from web.auth import get_sidecar_token
+
+        is_testing = os.environ.get("CHANAKYA_TESTING") == "1"
+        sidecar_token = get_sidecar_token()
+        if not is_testing and method in ("POST", "PUT", "DELETE", "PATCH") and sidecar_token:
+            req_token = request.headers.get("X-Sidecar-Token", "")
+            if not req_token or not secrets.compare_digest(req_token, sidecar_token):
+                return JSONResponse(
+                    {"detail": "Forbidden: Invalid or missing sidecar token"}, status_code=401
+                )
 
         return await call_next(request)
 
@@ -1099,6 +1195,7 @@ async def api_mode():
     The raw backend_mode is also returned for diagnostics.
     """
     from engine.modes import get_trading_mode
+    from config.discovery_policy import get_discovery_policy
 
     mode_info = get_trading_mode()
     _UI_MODE_MAP = {
@@ -1118,6 +1215,7 @@ async def api_mode():
             "backend_mode": mode_info.mode.value,
             "allowed_modes": list(_UI_MODE_MAP.values()),
             "description": mode_info.description,
+            "discovery_policy": get_discovery_policy().to_dict(),
         }
     )
 
@@ -1148,12 +1246,16 @@ async def set_mode(payload: dict[str, Any]):
         )
 
     target_backend_mode = _PARSE_MAP[raw_mode]
+    old_mode_info = get_trading_mode()
     if target_backend_mode == "EXECUTE":
-        allow_live = os.environ.get("ALLOW_LIVE_TRADING", "0").strip()
-        if allow_live != "1":
+        from engine.modes import assert_live_execution_allowed
+
+        try:
+            assert_live_execution_allowed()
+        except PermissionError as e_live:
             raise HTTPException(
                 status_code=403,
-                detail="Switching to LIVE mode requires ALLOW_LIVE_TRADING=1 environment safety gate.",
+                detail=f"Switching to LIVE mode blocked: {e_live}",
             )
 
     os.environ["TRADING_MODE"] = target_backend_mode
@@ -1164,6 +1266,21 @@ async def set_mode(payload: dict[str, Any]):
         "EXECUTE": "LIVE",
     }
     ui_mode = _UI_MODE_MAP[mode_info.mode.value]
+
+    try:
+        from engine.security_audit import record_audit_event
+
+        record_audit_event(
+            event_type="MODE_CHANGED",
+            mode=target_backend_mode,
+            details={
+                "from": old_mode_info.mode.value,
+                "to": target_backend_mode,
+                "ui_mode": ui_mode,
+            },
+        )
+    except Exception as e_audit:
+        logger.debug(f"[web.api] Mode audit record non-fatal error: {e_audit}")
 
     try:
         await event_bus.broadcast(
@@ -1332,25 +1449,30 @@ async def get_system_health_hub(
     else:
         overall_status = "HEALTHY"
 
-    return JSONResponse(
-        {
-            "overall_status": overall_status,
-            "incident_counts": incident_counts,
-            "active_incident_counts": active_counts,
-            "circuit_breaker": cb_diag,
-            "rate_gate": rate_gate_diag,
-            "tbt": tbt_diag,
-            "websocket": ws_diag,
-            "brokers": broker_statuses,
-            "provider_health": provider_health,
-            "slo_report": slo_report,
-            "telemetry_summary": telem_summary,
-            "incidents": incidents,
-            "memory": mem_status,
-            "storage": storage_bd.to_dict(),
-            "code_provenance": code_prov_dict,
-            "as_of": datetime.now(timezone.utc).isoformat(),
-        }
+    from starlette.responses import Response
+
+    payload = {
+        "overall_status": overall_status,
+        "incident_counts": incident_counts,
+        "active_incident_counts": active_counts,
+        "circuit_breaker": cb_diag,
+        "rate_gate": rate_gate_diag,
+        "tbt": tbt_diag,
+        "websocket": ws_diag,
+        "brokers": broker_statuses,
+        "provider_health": provider_health,
+        "slo_report": slo_report,
+        "telemetry_summary": telem_summary,
+        "incidents": incidents,
+        "memory": mem_status,
+        "storage": storage_bd.to_dict() if hasattr(storage_bd, "to_dict") else storage_bd,
+        "code_provenance": code_prov_dict,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+    return Response(
+        content=json.dumps(payload, default=str),
+        media_type="application/json",
+        status_code=200,
     )
 
 
@@ -1854,11 +1976,16 @@ _AUTH_CACHE_TTL = 300  # 5 minutes
 
 
 def _cached_auth(broker_key: str, check_fn) -> bool:
-    """Return cached auth result if fresh (< 5 min), otherwise re-check."""
+    """Return cached auth result if fresh, otherwise re-check.
+    Caches positive results for _AUTH_CACHE_TTL (5 min); negative results for 10s.
+    """
     now = _time.time()
     cached = _auth_cache.get(broker_key)
-    if cached and (now - cached[1]) < _AUTH_CACHE_TTL:
-        return cached[0]
+    if cached:
+        cached_result, cached_ts = cached
+        ttl = _AUTH_CACHE_TTL if cached_result else 10.0
+        if (now - cached_ts) < ttl:
+            return cached_result
     result = check_fn()
     _auth_cache[broker_key] = (result, now)
     return result
@@ -1976,6 +2103,14 @@ def _fyers_auth() -> bool:
         try:
             if not _has_fyers():
                 return False
+            from brokers.session import get_registered_brokers
+
+            registered = get_registered_brokers().get("fyers")
+            if registered and registered.is_authenticated():
+                profile = registered.get_profile()
+                if profile and getattr(profile, "user_id", ""):
+                    return True
+
             from brokers.fyers import FyersAPI
 
             b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
@@ -2268,6 +2403,60 @@ if not _web_mode:
         return await index()
 
 
+# ── OAuth State Generation & Validation ──────────────────────────
+_oauth_states: dict[str, dict] = {}
+OAUTH_STATE_TTL_SECONDS = 600.0  # 10 minutes
+
+
+def generate_oauth_state(broker: str) -> str:
+    """Generate a secure cryptographic state token for OAuth CSRF prevention."""
+    import secrets
+    import time
+
+    now = time.time()
+    # Prune expired states
+    expired = [
+        s
+        for s, data in _oauth_states.items()
+        if now - data.get("created_at", 0) > OAUTH_STATE_TTL_SECONDS
+    ]
+    for s in expired:
+        _oauth_states.pop(s, None)
+
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = {"broker": broker.lower().strip(), "created_at": now}
+    return state
+
+
+def validate_oauth_state(broker: str, state: str) -> bool:
+    """Validate and consume an OAuth state token."""
+    import time
+
+    if not state:
+        return False
+    data = _oauth_states.pop(state, None)
+    if not data:
+        return False
+    now = time.time()
+    if now - data.get("created_at", 0) > OAUTH_STATE_TTL_SECONDS:
+        return False
+    return data.get("broker") == broker.lower().strip()
+
+
+def validate_callback_state(broker: str, request: Request) -> bool:
+    """Validate state on callback."""
+    state = request.query_params.get("state", "")
+    is_testing = os.environ.get("CHANAKYA_TESTING") == "1"
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+
+    if not state:
+        if is_hosted or not is_testing:
+            return False
+        return True
+    return validate_oauth_state(broker, state)
+
+
 # ── Zerodha ───────────────────────────────────────────────────
 
 
@@ -2281,12 +2470,17 @@ async def zerodha_login():
           then run <code>credentials setup</code>.
         </div><a href="/" class="btn btn-back">← Back</a></div>"""
         return HTMLResponse(_page("Error", body), status_code=400)
-    url = f"https://kite.trade/connect/login?api_key={_env('KITE_API_KEY')}&v=3"
+    state = generate_oauth_state("zerodha")
+    url = f"https://kite.trade/connect/login?api_key={_env('KITE_API_KEY')}&v=3&state={state}"
     return RedirectResponse(url)
 
 
 @app.get("/zerodha/callback", response_class=HTMLResponse)
-async def zerodha_callback(request_token: str = "", status: str = ""):
+async def zerodha_callback(request: Request, request_token: str = "", status: str = ""):
+    if not validate_callback_state("zerodha", request):
+        body = """<div class="card"><div class="err-box">❌ Zerodha login failed: Invalid or expired OAuth state parameter.</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
     if status != "success" or not request_token:
         body = """<div class="card"><div class="err-box">❌ Zerodha login cancelled.</div>
         <a href="/" class="btn btn-back">← Try again</a></div>"""
@@ -2330,18 +2524,26 @@ async def groww_login():
           target="_blank">developer.groww.in</a> then run <code>credentials setup</code>.
         </div><a href="/" class="btn btn-back">← Back</a></div>"""
         return HTMLResponse(_page("Error", body), status_code=400)
-    redirect = _env("GROWW_REDIRECT_URL") or "http://localhost:8765/groww/callback"
+    from config.constants import get_broker_callback_url
+
+    redirect = get_broker_callback_url("groww")
+    state = generate_oauth_state("groww")
     url = (
         "https://groww.in/v1/api/login/oauth/authorize"
         f"?client_id={_env('GROWW_CLIENT_ID')}"
         f"&redirect_uri={redirect}&response_type=code"
         "&scope=holdings+positions+orders+funds"
+        f"&state={state}"
     )
     return RedirectResponse(url)
 
 
 @app.get("/groww/callback", response_class=HTMLResponse)
-async def groww_callback(code: str = "", error: str = ""):
+async def groww_callback(request: Request, code: str = "", error: str = ""):
+    if not validate_callback_state("groww", request):
+        body = """<div class="card"><div class="err-box">❌ Groww login failed: Invalid or expired OAuth state parameter.</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
     if error or not code:
         body = f"""<div class="card"><div class="err-box">❌ Groww login failed: {error or "no code"}.</div>
         <a href="/" class="btn btn-back">← Try again</a></div>"""
@@ -2446,17 +2648,25 @@ async def upstox_login():
           then run <code>credentials setup</code>.
         </div><a href="/" class="btn btn-back">← Back</a></div>"""
         return HTMLResponse(_page("Error", body), status_code=400)
-    redirect = _env("UPSTOX_REDIRECT_URL") or "http://localhost:8765/upstox/callback"
+    from config.constants import get_broker_callback_url
+
+    redirect = get_broker_callback_url("upstox")
+    state = generate_oauth_state("upstox")
     url = (
         "https://api.upstox.com/index/dialog/login"
         f"?client_id={_env('UPSTOX_API_KEY')}"
         f"&redirect_uri={redirect}&response_type=code"
+        f"&state={state}"
     )
     return RedirectResponse(url)
 
 
 @app.get("/upstox/callback", response_class=HTMLResponse)
-async def upstox_callback(code: str = "", error: str = ""):
+async def upstox_callback(request: Request, code: str = "", error: str = ""):
+    if not validate_callback_state("upstox", request):
+        body = """<div class="card"><div class="err-box">❌ Upstox login failed: Invalid or expired OAuth state parameter.</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
     if error or not code:
         body = f"""<div class="card"><div class="err-box">❌ Upstox login failed: {error or "no code"}.</div>
         <a href="/" class="btn btn-back">← Try again</a></div>"""
@@ -2508,12 +2718,14 @@ async def fyers_login():
         return HTMLResponse(_page("Error", body), status_code=400)
     try:
         from brokers.fyers import FyersAPI
+        from config.constants import get_broker_callback_url
 
-        redirect = _env("FYERS_REDIRECT_URL") or "http://localhost:8765/fyers/callback"
+        redirect = get_broker_callback_url("fyers")
         b = FyersAPI(
             app_id=_env("FYERS_APP_ID"), secret_key=_env("FYERS_SECRET_KEY"), redirect_uri=redirect
         )
-        url = b.get_login_url()
+        state = generate_oauth_state("fyers")
+        url = b.get_login_url(state=state)
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ Could not generate login URL: {e}</div>
         <a href="/" class="btn btn-back">← Back</a></div>"""
@@ -2522,7 +2734,11 @@ async def fyers_login():
 
 
 @app.get("/fyers/callback", response_class=HTMLResponse)
-async def fyers_callback(auth_code: str = "", state: str = "", s: str = ""):
+async def fyers_callback(request: Request, auth_code: str = "", state: str = "", s: str = ""):
+    if not validate_callback_state("fyers", request):
+        body = """<div class="card"><div class="err-box">❌ Fyers login failed: Invalid or expired OAuth state parameter.</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
     # Fyers sends ?auth_code= or sometimes ?code=
     code = auth_code
     error = "" if code else "no auth_code received"
@@ -2680,7 +2896,7 @@ async def mstock_login():
             1. <code>MSTOCK_API_KEY</code> &amp; <code>MSTOCK_API_SECRET</code><br>
             2. <code>MSTOCK_CLIENT_CODE</code> &amp; <code>MSTOCK_PASSWORD</code><br>
             3. (Optional) <code>MSTOCK_TOTP_SECRET</code> for 2FA auto-login.<br>
-            4. <code>MSTOCK_REDIRECT_URL</code> (default: http://103.149.127.88:8765/mstock/callback)<br>
+            4. <code>MSTOCK_REDIRECT_URL</code> (default: http://127.0.0.1:8765/mstock/callback)<br>
           </div>
           <a href="/" class="btn btn-back">← Back</a>
         </div>"""
@@ -2696,7 +2912,8 @@ async def mstock_login():
             client_code=_env("MSTOCK_CLIENT_CODE"),
             redirect_uri=redirect,
         )
-        url = b.get_login_url()
+        state = generate_oauth_state("mstock")
+        url = b.get_login_url(state=state)
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ Could not generate m.Stock login URL: {e}</div>
         <a href="/" class="btn btn-back">← Back</a></div>"""
@@ -2707,6 +2924,10 @@ async def mstock_login():
 @app.get("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_get")
 @app.post("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_post")
 async def mstock_callback(request: Request):
+    if not validate_callback_state("mstock", request):
+        body = """<div class="card"><div class="err-box">❌ m.Stock login failed: Invalid or expired OAuth state parameter.</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
 
     params = dict(request.query_params)
     token = (
@@ -2722,7 +2943,7 @@ async def mstock_callback(request: Request):
     )
     if error:
         body = f"""<div class="card"><div class="err-box">❌ m.Stock login failed: {error}.<br><br>
-        Check MSTOCK_API_KEY, MSTOCK_API_SECRET, and whitelisted IP (103.149.127.88).
+        Check MSTOCK_API_KEY, MSTOCK_API_SECRET, and whitelisted IP.
         </div><a href="/" class="btn btn-back">← Try again</a></div>"""
         return HTMLResponse(_page("Failed", body), status_code=400)
     try:
@@ -2762,7 +2983,7 @@ async def mstock_callback(request: Request):
                 "btn-mstock",
                 profile,
                 funds,
-                "Redirect URL: http://103.149.127.88:8765/mstock/callback",
+                f"Redirect URL: {redirect}",
             ),
         )
     )
@@ -3075,16 +3296,52 @@ async def api_cache_clear(request: Request):
 from pydantic import BaseModel, ConfigDict, Field
 
 
+def _validate_safe_provider_url(url_str: str) -> str:
+    """Validate AI provider URL against SSRF attacks (SEC-08)."""
+    import urllib.parse
+    import ipaddress
+
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme != "https":
+        deploy_mode = os.environ.get("DEPLOY_MODE", "")
+        is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+        if is_hosted or parsed.hostname not in ("localhost", "127.0.0.1"):
+            raise ValueError(f"Insecure scheme '{parsed.scheme}'. Only HTTPS is permitted.")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ValueError("Invalid URL: missing hostname.")
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            deploy_mode = os.environ.get("DEPLOY_MODE", "")
+            is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+            if is_hosted or not ip.is_loopback:
+                raise ValueError(f"Access to private/internal IP {hostname} is blocked.")
+    except ValueError as val_err:
+        if "is blocked" in str(val_err):
+            raise
+        if hostname in ("instance-data", "metadata.google.internal") or hostname.endswith(
+            ".internal"
+        ):
+            raise ValueError(f"Access to cloud metadata endpoint {hostname} is blocked.")
+    return url_str
+
+
 @app.get("/api/onboarding/status")
-async def onboarding_status():
+async def onboarding_status(request: _Request):
     import os
     from config.credentials import _kr_get
+
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+    session_id = request.cookies.get("__Host-session_id") or request.cookies.get("session_id")
+    session = get_session(session_id) if session_id else None
+    is_authenticated = bool(session)
 
     ai_provider = os.environ.get("AI_PROVIDER") or _kr_get("AI_PROVIDER") or ""
     newsapi = bool(os.environ.get("NEWSAPI_KEY") or _kr_get("NEWSAPI_KEY"))
     onboarding_done = bool(os.environ.get("ONBOARDING_COMPLETE") or _kr_get("ONBOARDING_COMPLETE"))
 
-    # Check broker status
     broker_connected = False
     try:
         from brokers.session import get_broker
@@ -3094,15 +3351,19 @@ async def onboarding_status():
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
-    return {
+    res = {
         "onboarding_complete": onboarding_done or bool(ai_provider),
-        "ai_provider": ai_provider,
+        "ai_provider": ai_provider
+        if (not is_hosted or is_authenticated or user_count() == 0)
+        else ("configured" if ai_provider else ""),
         "newsapi_key_set": newsapi,
         "broker_connected": broker_connected,
-        "capital": os.environ.get("TOTAL_CAPITAL") or _kr_get("TOTAL_CAPITAL") or "200000",
-        "risk_pct": os.environ.get("DEFAULT_RISK_PCT") or _kr_get("DEFAULT_RISK_PCT") or "2",
-        "trading_mode": os.environ.get("TRADING_MODE") or _kr_get("TRADING_MODE") or "PAPER",
     }
+    if not is_hosted or is_authenticated or user_count() == 0:
+        res["capital"] = os.environ.get("TOTAL_CAPITAL") or _kr_get("TOTAL_CAPITAL") or "200000"
+        res["risk_pct"] = os.environ.get("DEFAULT_RISK_PCT") or _kr_get("DEFAULT_RISK_PCT") or "2"
+        res["trading_mode"] = os.environ.get("TRADING_MODE") or _kr_get("TRADING_MODE") or "PAPER"
+    return res
 
 
 class CredentialRequest(BaseModel):
@@ -3158,11 +3419,13 @@ async def onboarding_test_provider(req: TestProviderRequest):
                 return {"ok": False, "error": f"Invalid key (HTTP {r.status_code})"}
 
         elif req.provider == "openai":
-            base = (
-                req.model
-                if req.model and req.model.startswith("http")
-                else "https://api.openai.com/v1"
-            )
+            if req.model and req.model.startswith("http"):
+                try:
+                    base = _validate_safe_provider_url(req.model)
+                except ValueError as ssrf_err:
+                    return {"ok": False, "error": f"Invalid model URL: {ssrf_err}"}
+            else:
+                base = "https://api.openai.com/v1"
             async with httpx.AsyncClient() as client:
                 r = await client.get(
                     f"{base}/models",
@@ -3197,9 +3460,18 @@ class SetupProviderRequest(BaseModel):
 
 @app.post("/api/onboarding/setup-provider")
 async def onboarding_setup_provider(req: SetupProviderRequest):
-    """Run setup commands for Ollama or Claude subscription."""
+    """Run setup commands for Ollama or Claude subscription (desktop only)."""
     import shutil
     import subprocess
+    import asyncio
+
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+    if is_hosted and user_count() > 0:
+        raise _HTTPException(
+            status_code=403,
+            detail="Software installation/setup is strictly prohibited in hosted environments.",
+        )
 
     try:
         if req.provider == "ollama":
@@ -3247,7 +3519,8 @@ async def onboarding_setup_provider(req: SetupProviderRequest):
                         "error": "Homebrew not found. Install Ollama manually from https://ollama.com/download",
                         "download_url": "https://ollama.com/download",
                     }
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     [brew_path, "install", "ollama"],
                     capture_output=True,
                     text=True,
@@ -3278,7 +3551,8 @@ async def onboarding_setup_provider(req: SetupProviderRequest):
                 return {"ok": True, "message": "Ollama started", "next_step": "pull_model"}
 
             elif req.step == "pull_model":
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     ["ollama", "pull", "llama3.1"],
                     capture_output=True,
                     text=True,
@@ -3300,7 +3574,8 @@ async def onboarding_setup_provider(req: SetupProviderRequest):
                 claude_path = shutil.which("claude")
                 if claude_path:
                     # Check if logged in by running claude --version
-                    result = subprocess.run(
+                    result = await asyncio.to_thread(
+                        subprocess.run,
                         [claude_path, "--version"],
                         capture_output=True,
                         text=True,
@@ -3328,7 +3603,8 @@ async def onboarding_setup_provider(req: SetupProviderRequest):
                         "ok": False,
                         "error": "npm not found. Install Node.js from https://nodejs.org first.",
                     }
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     [npm_path, "i", "-g", "@anthropic-ai/claude-code"],
                     capture_output=True,
                     text=True,
@@ -3377,7 +3653,7 @@ async def onboarding_test_newsapi(req: TestNewsAPIRequest):
 
 class OnboardingCompleteRequest(BaseModel):
     capital: int = 200000
-    risk_pct: float = 2
+    risk_pct: float = 2.0
     trading_mode: str = "PAPER"
 
 
@@ -3386,10 +3662,23 @@ async def onboarding_complete(req: OnboardingCompleteRequest):
     import os
     from config.credentials import set_credential
 
+    if req.capital <= 0:
+        raise HTTPException(status_code=422, detail="Capital must be a positive integer.")
+    if not (0 < req.risk_pct <= 10.0):
+        raise HTTPException(status_code=422, detail="Risk percentage must be between 0 and 10%.")
+
+    clean_mode = req.trading_mode.strip().upper()
+    if clean_mode not in ("PAPER", "SIMULATE", "DEMO", "OBSERVE", "LIVE"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid trading mode '{clean_mode}' for onboarding. Allowed: PAPER, SIMULATE, DEMO, OBSERVE, LIVE.",
+        )
+
     set_credential("TOTAL_CAPITAL", str(req.capital))
-    set_credential("DEFAULT_RISK_PCT", str(req.risk_pct))
-    set_credential("TRADING_MODE", req.trading_mode)
+    risk_val = int(req.risk_pct) if req.risk_pct == int(req.risk_pct) else req.risk_pct
+    set_credential("DEFAULT_RISK_PCT", str(risk_val))
     set_credential("ONBOARDING_COMPLETE", "1")
+    os.environ["TRADING_MODE"] = clean_mode
 
     # Also write to app data .env as backup for packaged/container mode.
     env_path = app_data_path(".env")
@@ -3744,19 +4033,28 @@ async def api_smart_route(request: Request, body: dict):
     duration_min = int(body.get("duration_minutes", 30))
     target_pov = float(body.get("target_pov_pct", 0.10))
 
-    plan = build_smart_execution_plan(
-        symbol=symbol,
-        side=side,
-        total_quantity=qty,
-        ltp=ltp,
-        bid_price=bid,
-        ask_price=ask,
-        lot_size=lot_size,
-        urgency=urgency,
-        routing_mode_override=routing_mode,
-        duration_minutes=duration_min,
-        target_pov_pct=target_pov,
-    )
+    try:
+        plan = build_smart_execution_plan(
+            symbol=symbol,
+            side=side,
+            total_quantity=qty,
+            ltp=ltp,
+            bid_price=bid,
+            ask_price=ask,
+            lot_size=lot_size,
+            urgency=urgency,
+            routing_mode_override=routing_mode,
+            duration_minutes=duration_min,
+            target_pov_pct=target_pov,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        logger.warning("[api_smart_route] Execution plan unavailable for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Execution plan unavailable because current canonical instrument data could not be verified.",
+        ) from exc
     return plan.to_dict()
 
 
@@ -3852,8 +4150,11 @@ class PaperSquareOffRequest(BaseModel):
 async def api_paper_square_off(req: PaperSquareOffRequest, request: Request):
     """Square off an active paper position immediately."""
     _require_localhost(request)
+    from engine.modes import get_trading_mode
+
+    if get_trading_mode().mode.name != "SIMULATE":
+        raise _HTTPException(409, "Paper square-off is available only in SIMULATE mode.")
     from engine.paper import PaperBroker
-    from brokers.base import OrderRequest
 
     pb = PaperBroker()
     positions = pb.get_positions()
@@ -3862,22 +4163,32 @@ async def api_paper_square_off(req: PaperSquareOffRequest, request: Request):
         raise _HTTPException(404, f"No open paper position found for {req.symbol}")
 
     side = "SELL" if target.quantity > 0 else "BUY"
-    res = pb.place_order(
-        OrderRequest(
-            symbol=target.symbol,
-            exchange=target.exchange,
-            transaction_type=side,
-            quantity=abs(target.quantity),
-            order_type="MARKET",
-            product=target.product,
+    from market.quotes import get_ltp
+    from engine.order_lifecycle import submit_simulated_order_intent
+
+    reference_price = float(get_ltp(f"{target.exchange}:{target.symbol}") or 0.0)
+    if reference_price <= 0:
+        raise _HTTPException(
+            503, "Current market reference is unavailable; paper square-off was not submitted."
         )
+    res = submit_simulated_order_intent(
+        symbol=target.symbol,
+        side=side,
+        quantity=abs(target.quantity),
+        price=reference_price,
+        order_type="MARKET",
+        product=target.product,
     )
+    if res.status not in ("FILLED_PAPER", "OPEN"):
+        raise _HTTPException(
+            409, f"Paper square-off was not completed: {res.rejection_reason or res.status}"
+        )
     return {
-        "status": "ok",
+        "status": res.status,
         "symbol": target.symbol,
         "squared_qty": target.quantity,
         "order_id": res.order_id,
-        "message": f"Successfully squared off {target.symbol} ({target.quantity} qty) in paper sandbox.",
+        "message": f"Paper OMS square-off submitted for {target.symbol} ({target.quantity} qty).",
     }
 
 
@@ -4222,6 +4533,21 @@ async def websocket_ticker(ws: WebSocket):
     WebSocket endpoint for sub-second real-time market ticks
     (Indices, MCX Commodities, Crypto).
     """
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+    if is_hosted:
+        session_id = ws.cookies.get("__Host-session_id") or ws.cookies.get("session_id")
+        session = get_session(session_id) if session_id else None
+        if not session:
+            await ws.close(code=1008, reason="Unauthorized")
+            return
+
+    if len(_event_bus._channels.get("ticker", [])) >= getattr(
+        _event_bus, "MAX_SUBSCRIBERS_PER_CHANNEL", 50
+    ):
+        await ws.close(code=1013, reason="Channel subscriber capacity reached")
+        return
+
     await ws.accept()
     from market.ticker_stream import ticker_stream
 

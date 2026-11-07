@@ -26,7 +26,10 @@ logger = logging.getLogger("engine.paper")
 
 import json
 import uuid
+import threading
 from copy import deepcopy
+
+_PAPER_LOCK = threading.RLock()
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Optional
@@ -76,7 +79,9 @@ class PaperBroker(BrokerAPI):
         import os
 
         start = capital or float(os.environ.get("TOTAL_CAPITAL", 200_000))
-        self._state = self._load_or_init(start)
+        self._capital = start
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(start)
         self._profile = UserProfile(
             user_id="PAPER_001",
             name="Paper Trader",
@@ -102,7 +107,8 @@ class PaperBroker(BrokerAPI):
         return state
 
     def _save(self) -> None:
-        target_path = get_paper_file()
+        with _PAPER_LOCK:
+            target_path = get_paper_file()
         target_path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self._state, indent=2, default=str)
         import os
@@ -150,15 +156,20 @@ class PaperBroker(BrokerAPI):
         )
         pos_margin = sum(
             abs(p["qty"])
-            * self._ltp(sym)
+            * p.get("avg_price", self._ltp(sym))
             * (MIS_MARGIN if p.get("product", "MIS") == "MIS" else NRML_MARGIN)
             for sym, p in self._state["positions"].items()
             if p["qty"] != 0
         )
+        unrealized_pnl = sum(
+            (self._ltp(sym) - p["avg_price"]) * p["qty"]
+            for sym, p in self._state["positions"].items()
+            if p["qty"] != 0
+        )
         cash = self._state["cash"]
-        total = cash + holdings_value
+        total = cash + pos_margin + holdings_value + unrealized_pnl
         return Funds(
-            available_cash=round(max(0.0, cash - pos_margin), 2),
+            available_cash=round(max(0.0, cash), 2),
             used_margin=round(pos_margin, 2),
             total_balance=round(total, 2),
         )
@@ -230,7 +241,12 @@ class PaperBroker(BrokerAPI):
     # ── Orders ────────────────────────────────────────────────
 
     def get_orders(self) -> list[Order]:
-        today = date.today().isoformat()
+        try:
+            from config.constants import now_ist
+
+            today = now_ist().date().isoformat()
+        except Exception:
+            today = date.today().isoformat()
         fields = Order.__dataclass_fields__
         return [
             Order(**{k: v for k, v in o.items() if k in fields})
@@ -239,19 +255,43 @@ class PaperBroker(BrokerAPI):
         ]
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
-        order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+            order_id = f"PAPER-{uuid.uuid4().hex[:16].upper()}"
         ltp = self._ltp(req.symbol)
-        fill_price = self._fill_price(req, ltp)
+        effective_ltp = (
+            ltp
+            if (ltp is not None and ltp > 0)
+            else (float(req.price) if req.price and float(req.price) > 0 else 0.0)
+        )
+        ot_check = (req.order_type or "MARKET").upper()
+        if effective_ltp <= 0 and ot_check == "MARKET":
+            self._record_order(
+                order_id,
+                req,
+                0.0,
+                "REJECTED",
+                "No market quote or order price available for symbol",
+            )
+            return OrderResponse(
+                order_id=order_id,
+                status="REJECTED",
+                message="No market quote or order price available for symbol",
+            )
+
+        fill_price = self._fill_price(req, effective_ltp)
 
         if fill_price is None:
             # Limit price not met — record as OPEN, don't apply fill
             self._record_order(order_id, req, req.price or ltp, "OPEN")
+            self._save()
             return OrderResponse(order_id=order_id, status="OPEN")
 
         try:
             self._apply(req, fill_price)
         except ValueError as e:
             self._record_order(order_id, req, fill_price, "REJECTED", str(e))
+            self._save()
             return OrderResponse(order_id=order_id, status="REJECTED", message=str(e))
 
         self._record_order(order_id, req, fill_price, "COMPLETE")
@@ -259,12 +299,17 @@ class PaperBroker(BrokerAPI):
         return OrderResponse(order_id=order_id, status="COMPLETE", average_price=fill_price)
 
     def cancel_order(self, order_id: str) -> bool:
-        for o in self._state["orders"]:
-            if o["order_id"] == order_id and o["status"] == "OPEN":
-                o["status"] = "CANCELLED"
-                self._save()
-                return True
-        return False
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+            clean_id = str(order_id).replace("PAPER-OPEN-", "").replace("PAPER-EXEC-", "").strip()
+            for o in self._state["orders"]:
+                if (o["order_id"] == order_id or o["order_id"] == clean_id) and o[
+                    "status"
+                ] == "OPEN":
+                    o["status"] = "CANCELLED"
+                    self._save()
+                    return True
+            return False
 
     def modify_order(
         self,
@@ -274,20 +319,22 @@ class PaperBroker(BrokerAPI):
         trigger_price: Optional[float] = None,
         order_type: Optional[str] = None,
     ) -> OrderResponse:
-        for o in self._state["orders"]:
-            if o["order_id"] == order_id and o["status"] == "OPEN":
-                if price is not None:
-                    o["price"] = float(price)
-                if trigger_price is not None:
-                    o["trigger_price"] = float(trigger_price)
-                if qty is not None:
-                    o["quantity"] = int(qty)
-                if order_type is not None:
-                    o["order_type"] = str(order_type)
-                self._save()
-                return OrderResponse(
-                    order_id=order_id, status="OPEN", message="Paper order modified"
-                )
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+            for o in self._state["orders"]:
+                if o["order_id"] == order_id and o["status"] == "OPEN":
+                    if price is not None:
+                        o["price"] = float(price)
+                    if trigger_price is not None:
+                        o["trigger_price"] = float(trigger_price)
+                    if qty is not None:
+                        o["quantity"] = int(qty)
+                    if order_type is not None:
+                        o["order_type"] = str(order_type)
+                    self._save()
+                    return OrderResponse(
+                        order_id=order_id, status="OPEN", message="Paper order modified"
+                    )
         return OrderResponse(
             order_id=order_id, status="REJECTED", message="Order not found or not OPEN"
         )
@@ -359,23 +406,66 @@ class PaperBroker(BrokerAPI):
         )
         side = req.transaction_type.upper()
 
+        rate = MIS_MARGIN if prod == "MIS" else NRML_MARGIN
+
         if side == "BUY":
-            if self._state["cash"] < margin:
-                raise ValueError(
-                    f"Insufficient funds: need ₹{margin:,.0f}, have ₹{self._state['cash']:,.0f}"
+            if prod == "CNC":
+                if self._state["cash"] < value:
+                    raise ValueError(
+                        f"Insufficient funds: need ₹{value:,.0f}, have ₹{self._state['cash']:,.0f}"
+                    )
+                self._state["cash"] -= value
+                h = self._state["holdings"].get(
+                    sym, {"qty": 0, "avg_price": 0.0, "product": "CNC", "exchange": req.exchange}
                 )
-            self._state["cash"] -= margin
-            bucket = "holdings" if prod == "CNC" else "positions"
-            entry = self._state[bucket].get(
-                sym, {"qty": 0, "avg_price": 0.0, "product": prod, "exchange": req.exchange}
-            )
-            old_val = entry["qty"] * entry["avg_price"]
-            new_qty = entry["qty"] + qty
-            entry["avg_price"] = ((old_val + value) / new_qty) if new_qty else fill_price
-            entry["qty"] = new_qty
-            entry["product"] = prod
-            entry["exchange"] = req.exchange
-            self._state[bucket][sym] = entry
+                old_val = h["qty"] * h["avg_price"]
+                new_qty = h["qty"] + qty
+                h["avg_price"] = ((old_val + value) / new_qty) if new_qty else fill_price
+                h["qty"] = new_qty
+                h["product"] = "CNC"
+                h["exchange"] = req.exchange
+                self._state["holdings"][sym] = h
+            else:
+                p = self._state["positions"].get(
+                    sym, {"qty": 0, "avg_price": 0.0, "product": prod, "exchange": req.exchange}
+                )
+                cur_qty = p["qty"]
+                if cur_qty < 0:
+                    # Covering an existing short position
+                    cov_qty = min(qty, abs(cur_qty))
+                    cov_margin = p["avg_price"] * cov_qty * rate
+                    realised = (p["avg_price"] - fill_price) * cov_qty
+                    self._state["cash"] += cov_margin + realised
+                    rem_short = cur_qty + cov_qty
+                    p["qty"] = rem_short
+                    if rem_short == 0:
+                        p["avg_price"] = 0.0
+
+                    excess_long = qty - cov_qty
+                    if excess_long > 0:
+                        ex_val = fill_price * excess_long
+                        ex_margin = ex_val * rate
+                        if self._state["cash"] < ex_margin:
+                            raise ValueError(
+                                f"Insufficient funds for excess long: need ₹{ex_margin:,.0f}"
+                            )
+                        self._state["cash"] -= ex_margin
+                        p["qty"] = excess_long
+                        p["avg_price"] = fill_price
+                else:
+                    # Adding to long or opening long
+                    if self._state["cash"] < margin:
+                        raise ValueError(
+                            f"Insufficient funds: need ₹{margin:,.0f}, have ₹{self._state['cash']:,.0f}"
+                        )
+                    self._state["cash"] -= margin
+                    old_val = cur_qty * p["avg_price"]
+                    new_qty = cur_qty + qty
+                    p["avg_price"] = ((old_val + value) / new_qty) if new_qty else fill_price
+                    p["qty"] = new_qty
+                p["product"] = prod
+                p["exchange"] = req.exchange
+                self._state["positions"][sym] = p
 
         else:  # SELL
             if prod == "CNC":
@@ -387,10 +477,45 @@ class PaperBroker(BrokerAPI):
                 h["qty"] -= qty
                 self._state["holdings"][sym] = h
             else:
-                p = self._state["positions"].get(sym, {"qty": 0, "avg_price": 0.0, "product": prod})
-                realised = (fill_price - p["avg_price"]) * qty
-                self._state["cash"] += margin + realised
-                p["qty"] -= qty
+                p = self._state["positions"].get(
+                    sym, {"qty": 0, "avg_price": 0.0, "product": prod, "exchange": req.exchange}
+                )
+                cur_qty = p["qty"]
+                if cur_qty > 0:
+                    # Exiting an existing long position
+                    exit_qty = min(qty, cur_qty)
+                    ret_margin = p["avg_price"] * exit_qty * rate
+                    realised = (fill_price - p["avg_price"]) * exit_qty
+                    self._state["cash"] += ret_margin + realised
+                    rem_long = cur_qty - exit_qty
+                    p["qty"] = rem_long
+                    if rem_long == 0:
+                        p["avg_price"] = 0.0
+
+                    excess_short = qty - exit_qty
+                    if excess_short > 0:
+                        ex_val = fill_price * excess_short
+                        ex_margin = ex_val * rate
+                        if self._state["cash"] < ex_margin:
+                            raise ValueError(
+                                f"Insufficient funds for excess short: need ₹{ex_margin:,.0f}"
+                            )
+                        self._state["cash"] -= ex_margin
+                        p["qty"] = -excess_short
+                        p["avg_price"] = fill_price
+                else:
+                    # Opening or adding to short position
+                    if self._state["cash"] < margin:
+                        raise ValueError(
+                            f"Insufficient funds: need ₹{margin:,.0f}, have ₹{self._state['cash']:,.0f}"
+                        )
+                    self._state["cash"] -= margin
+                    old_val = abs(cur_qty) * p["avg_price"]
+                    new_qty = abs(cur_qty) + qty
+                    p["avg_price"] = ((old_val + value) / new_qty) if new_qty else fill_price
+                    p["qty"] = -new_qty
+                p["product"] = prod
+                p["exchange"] = req.exchange
                 self._state["positions"][sym] = p
 
     def _record_order(
@@ -471,7 +596,11 @@ class PaperBroker(BrokerAPI):
         Check active GTT triggers against latest market prices.
         Executes paper market fill order when stop or target level is breached.
         """
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+
         triggered_ids = []
+        candidates = []
         for g in self._state.get("gtts", []):
             if g.get("status") != "ACTIVE":
                 continue
@@ -484,8 +613,6 @@ class PaperBroker(BrokerAPI):
             leg1 = g.get("leg1", {})
             leg2 = g.get("leg2")
 
-            # For SELL exit (closing LONG): stop triggers if ltp <= stop_trigger, target triggers if ltp >= target_trigger
-            # For BUY exit (closing SHORT): stop triggers if ltp >= stop_trigger, target triggers if ltp <= target_trigger
             hit_leg = None
             if side == "SELL":
                 if leg1 and ltp <= float(leg1.get("trigger_price", 0)):
@@ -499,27 +626,55 @@ class PaperBroker(BrokerAPI):
                     hit_leg = ("TARGET", leg2)
 
             if hit_leg:
-                leg_name, target_leg = hit_leg
-                g["status"] = "TRIGGERED"
-                g["triggered_leg"] = leg_name
-                g["triggered_at"] = datetime.now().isoformat()
-                g["triggered_price"] = ltp
-
-                order_req = OrderRequest(
-                    symbol=sym,
-                    exchange=g.get("exchange", "NSE"),
-                    transaction_type=side,
-                    order_type="MARKET",
-                    product=g.get("product", "MIS"),
-                    quantity=int(target_leg.get("quantity", 1)),
-                    price=float(target_leg.get("price", ltp)),
+                candidates.append(
+                    (
+                        g["gtt_id"],
+                        sym,
+                        side,
+                        hit_leg,
+                        ltp,
+                        g.get("exchange", "NSE"),
+                        g.get("product", "MIS"),
+                    )
                 )
-                try:
-                    self.place_order(order_req)
-                except Exception as e_fill:
-                    logger.warning(f"[PaperBroker] GTT execution order failed for {sym}: {e_fill}")
-                triggered_ids.append(g["gtt_id"])
 
-        if triggered_ids:
-            self._save()
+        for gtt_id, sym, side, hit_leg, ltp, exch, prod in candidates:
+            leg_name, target_leg = hit_leg
+            with _PAPER_LOCK:
+                self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+                for g in self._state.get("gtts", []):
+                    if g.get("gtt_id") == gtt_id:
+                        g["status"] = "TRIGGERED"
+                        g["triggered_leg"] = leg_name
+                        g["triggered_at"] = datetime.now().isoformat()
+                        g["triggered_price"] = ltp
+                self._save()
+
+            order_req = OrderRequest(
+                symbol=sym,
+                exchange=exch,
+                transaction_type=side,
+                order_type="MARKET",
+                product=prod,
+                quantity=int(target_leg.get("quantity", 1)),
+                price=float(target_leg.get("price", ltp)),
+            )
+            try:
+                self.place_order(order_req)
+            except Exception as e_fill:
+                logger.warning(f"[PaperBroker] GTT execution order failed for {sym}: {e_fill}")
+
+            # Re-latch TRIGGERED in case place_order state synchronization overwrote it
+            with _PAPER_LOCK:
+                self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+                for g in self._state.get("gtts", []):
+                    if g.get("gtt_id") == gtt_id:
+                        g["status"] = "TRIGGERED"
+                        g["triggered_leg"] = leg_name
+                        g["triggered_at"] = datetime.now().isoformat()
+                        g["triggered_price"] = ltp
+                self._save()
+
+            triggered_ids.append(gtt_id)
+
         return triggered_ids

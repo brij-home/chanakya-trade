@@ -3360,6 +3360,7 @@ _SETTINGS_READABLE: list[tuple[str, bool]] = [
     ("OPENAI_MODEL", False),
     ("GEMINI_API_KEY", True),
     ("TRADING_MODE", False),
+    ("TOTAL_CAPITAL", False),
     ("TRADING_CAPITAL", False),
     ("DEFAULT_RISK_PCT", False),
     ("NEWSAPI_KEY", True),

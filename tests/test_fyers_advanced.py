@@ -180,7 +180,7 @@ def test_api_fyers_routes(mock_fyers):
         assert resp.json().get("status") == "ok"
         assert resp.json().get("orders") == []
 
-        # POST /api/fyers/gtt
+        # Untracked broker-side order mutations are blocked.
         mock_fyers._fyers.place_gtt_order.return_value = {"s": "ok", "id": "GTT-API-1"}
         resp = client.post(
             "/api/fyers/gtt",
@@ -192,22 +192,24 @@ def test_api_fyers_routes(mock_fyers):
                 "limit_price": 1201.0,
             },
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
-        assert resp.json()["response"]["id"] == "GTT-API-1"
+        assert resp.status_code == 409
+        mock_fyers._fyers.place_gtt_order.assert_not_called()
 
         # DELETE /api/fyers/gtt/GTT-API-1
         mock_fyers._fyers.cancel_gtt_order.return_value = {"s": "ok"}
         resp = client.delete("/api/fyers/gtt/GTT-API-1")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
-        assert resp.json()["cancelled"] is True
+        assert resp.status_code == 409
+        mock_fyers._fyers.cancel_gtt_order.assert_not_called()
 
-        # POST /api/fyers/panic-exit
-        mock_fyers._fyers.exit_positions.return_value = {"s": "ok", "message": "Exited all"}
-        resp = client.post("/api/fyers/panic-exit", json={})
+        # Panic exit goes through the central audited coordinator and reports uncertainty.
+        with patch(
+            "engine.order_lifecycle.emergency_flatten_all_positions",
+            return_value={"status": "PENDING_RECONCILIATION", "mode": "SIMULATE"},
+        ) as emergency:
+            resp = client.post("/api/fyers/panic-exit", json={})
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+        assert resp.json()["status"] == "PENDING_RECONCILIATION"
+        emergency.assert_called_once()
 
         # GET /api/fyers/trades
         mock_fyers._fyers.tradebook.return_value = {"s": "ok", "tradeBook": []}
@@ -245,8 +247,8 @@ def test_api_fyers_routes(mock_fyers):
                 ],
             },
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+        assert resp.status_code == 409
+        mock_fyers._fyers.place_multileg_order.assert_not_called()
 
         # POST /api/fyers/alerts
         mock_fyers._fyers.create_alert.return_value = {"s": "ok", "id": "ALT-1"}

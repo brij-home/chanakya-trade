@@ -171,3 +171,72 @@ def test_get_scan_universe_segments():
     assert any(classify_symbol_segment(s) == "NON_FNO" for s in all_univ)
     assert any(classify_symbol_segment(s) == "CRYPTO" for s in all_univ)
     assert any(classify_symbol_segment(s) == "COMMODITY" for s in all_univ)
+
+
+def test_precursor_radar_internal_sla_timeout_and_graceful_completion(scanner):
+    """
+    RCA Regression:
+    Ensure scan_precursors obeys timeout_sec and returns whatever candidates completed
+    without blocking in executor.shutdown or stalling the master scan cycle.
+    """
+    import time
+
+    def slow_evaluate(sym, quote=None):
+        time.sleep(0.5)
+        return None
+
+    with patch.object(scanner, "evaluate_symbol", side_effect=slow_evaluate):
+        t0 = time.time()
+        # Scan 20 symbols with tight 0.3s timeout
+        candidates = scanner.scan_precursors(
+            universe=[f"SYM{i}" for i in range(20)],
+            timeout_sec=0.3,
+            force_refresh=True,
+        )
+        elapsed = time.time() - t0
+        # Elapsed must be close to timeout (bounded under 1.5s), never hanging for 20 * 0.5s = 10s
+        assert elapsed < 2.0, (
+            f"scan_precursors blocked for {elapsed:.2f}s instead of adhering to SLA timeout"
+        )
+        assert isinstance(candidates, list)
+
+
+def test_precursor_radar_uses_passed_quotes_map(scanner):
+    """Verify that passing pre-fetched quotes_map eliminates redundant get_quote network calls."""
+    mock_q = MagicMock(last_price=2500.0, ltp=2500.0, volume=100000, vwap=2490.0)
+    quotes_map = {"NSE:TESTSTOCK": mock_q, "TESTSTOCK": mock_q}
+
+    with (
+        patch("market.quotes.get_quote") as mock_get_quote,
+        patch.object(scanner, "evaluate_symbol", return_value=None) as mock_eval,
+    ):
+        scanner.scan_precursors(
+            universe=["TESTSTOCK"],
+            quotes_map=quotes_map,
+            force_refresh=True,
+        )
+        mock_get_quote.assert_not_called()
+        mock_eval.assert_called_once_with("TESTSTOCK", quote=mock_q)
+
+
+def test_commodity_adaptive_regime_callable_ref_time_guard():
+    """
+    RCA Regression for: 'function' object has no attribute 'strftime'
+    Verify evaluate_commodity_adaptive_regime safely resolves callable ref_time
+    (e.g., now_ist imported as a function from config.constants) without crashing.
+    """
+    from datetime import datetime
+    from config.constants import IST
+    from engine.commodity_adaptive_regime import evaluate_commodity_adaptive_regime
+
+    def fake_now_ist_fn():
+        return datetime(2026, 11, 4, 10, 30, tzinfo=IST)
+
+    # Pass the function itself (uncalled) as ref_time
+    decision = evaluate_commodity_adaptive_regime(
+        symbol="CRUDEOIL",
+        spot=6200.0,
+        ref_time=fake_now_ist_fn,  # callable function
+    )
+    assert decision is not None
+    assert "2026-11-04 10:30:00 IST" in decision.evaluated_at

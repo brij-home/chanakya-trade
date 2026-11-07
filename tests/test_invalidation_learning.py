@@ -38,6 +38,7 @@ def temp_learning_engine(tmp_path, monkeypatch):
 
 def test_symbol_invalidation_lockout(temp_learning_engine):
     eng = temp_learning_engine
+    eng.refractory_seconds = 0.0
 
     # Initially not locked out
     is_locked, reason = eng.is_symbol_locked_out("MANKIND", direction="BULLISH")
@@ -69,6 +70,7 @@ def test_symbol_invalidation_lockout(temp_learning_engine):
 
 def test_conduct_invalidation_post_mortem(temp_learning_engine):
     eng = temp_learning_engine
+    eng.refractory_seconds = 0.0
 
     dummy_alert = AutoAlert(
         alert_id="test-inv-mankind-1",
@@ -107,6 +109,7 @@ def test_conduct_invalidation_post_mortem(temp_learning_engine):
 
 def test_evaluate_candidate_respects_lockout(temp_learning_engine):
     eng = temp_learning_engine
+    eng.refractory_seconds = 0.0
 
     # Lock out MANKIND
     eng.set_symbol_lockout(
@@ -198,6 +201,7 @@ def test_auto_alert_engine_records_post_mortem_on_live_invalidation(tmp_path, mo
 
 def test_adaptive_structural_reclaim_unlocks_symbol(temp_learning_engine):
     eng = temp_learning_engine
+    eng.refractory_seconds = 0.0
 
     # 1. Activate lockout on MANKIND with reclaim level 2274.0 (the breakdown level)
     eng.set_symbol_lockout(

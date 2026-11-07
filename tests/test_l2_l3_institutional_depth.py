@@ -94,7 +94,7 @@ def test_scrutiny_gate25_vetoes_fleeing_bid_spoof_trap():
         time_horizon="INTRADAY",
         environment="LIVE",
         is_live=True,
-        metrics={},
+        metrics={"rvol": 2.0},
         extra_metrics={
             "l3_microstructure": {
                 "fleeing_bid_wall_detected": True,
@@ -132,7 +132,7 @@ def test_scrutiny_gate25_vetoes_fortress_ask_wall_blocking_target():
         time_horizon="INTRADAY",
         environment="LIVE",
         is_live=True,
-        metrics={},
+        metrics={"rvol": 2.0},
         extra_metrics={
             "l3_microstructure": {
                 "fortress_ask_wall_confirmed": True,
@@ -177,7 +177,7 @@ def test_scrutiny_gate25_vetoes_severe_order_book_imbalance():
         time_horizon="INTRADAY",
         environment="LIVE",
         is_live=True,
-        metrics={},
+        metrics={"rvol": 2.0},
         extra_metrics={
             "l3_microstructure": {
                 "obi_50": -0.58,  # Heavily skewed towards ask walls

@@ -131,12 +131,97 @@ import functools
 from bot.status import set_active, clear_active
 
 
+def get_allowed_user_ids() -> set[str]:
+    """Retrieve set of authorized Telegram user IDs from environment."""
+    raw = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
+    if not raw:
+        return set()
+    return {item.strip() for item in raw.replace(",", " ").split() if item.strip()}
+
+
+def get_allowed_chat_ids() -> set[str]:
+    """Retrieve set of authorized Telegram chat IDs from environment."""
+    raw = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+    if not raw:
+        return set()
+    return {item.strip() for item in raw.replace(",", " ").split() if item.strip()}
+
+
+def is_telegram_authorized(update: Any) -> bool:
+    """
+    Check if the incoming Telegram update is from an authorized owner user or chat.
+    Enforces owner allowlist (TELEGRAM_ALLOWED_USER_IDS / TELEGRAM_ALLOWED_CHAT_IDS).
+    Fails closed if neither allowlist is configured or if user/chat does not match.
+    """
+    if update is None:
+        return False
+
+    allowed_users = get_allowed_user_ids()
+    allowed_chats = get_allowed_chat_ids()
+
+    # Fail-closed: If no allowlist is configured, reject all incoming interactions
+    if not allowed_users and not allowed_chats:
+        logger.warning(
+            "[TelegramBot] Unauthorized interaction blocked: no TELEGRAM_ALLOWED_USER_IDS "
+            "or TELEGRAM_ALLOWED_CHAT_IDS configured in environment."
+        )
+        return False
+
+    user_id: Optional[str] = None
+    chat_id: Optional[str] = None
+
+    if hasattr(update, "effective_user") and update.effective_user:
+        user_id = str(getattr(update.effective_user, "id", "") or "").strip()
+    elif (
+        hasattr(update, "message") and update.message and getattr(update.message, "from_user", None)
+    ):
+        user_id = str(getattr(update.message.from_user, "id", "") or "").strip()
+    elif (
+        hasattr(update, "callback_query")
+        and update.callback_query
+        and getattr(update.callback_query, "from_user", None)
+    ):
+        user_id = str(getattr(update.callback_query.from_user, "id", "") or "").strip()
+
+    if hasattr(update, "effective_chat") and update.effective_chat:
+        chat_id = str(getattr(update.effective_chat, "id", "") or "").strip()
+    elif hasattr(update, "message") and update.message and getattr(update.message, "chat", None):
+        chat_id = str(getattr(update.message.chat, "id", "") or "").strip()
+    elif (
+        hasattr(update, "callback_query")
+        and update.callback_query
+        and getattr(update.callback_query, "message", None)
+    ):
+        msg = update.callback_query.message
+        if hasattr(msg, "chat") and msg.chat:
+            chat_id = str(getattr(msg.chat, "id", "") or "").strip()
+
+    if allowed_users and user_id and user_id in allowed_users:
+        return True
+    if allowed_chats and chat_id and chat_id in allowed_chats:
+        return True
+
+    logger.warning(
+        f"[TelegramBot] Unauthorized interaction blocked: user_id='{user_id}', chat_id='{chat_id}'"
+    )
+    return False
+
+
 def _track_command(func):
-    """Decorator that sets/clears the REPL status badge around a handler."""
+    """Decorator / middleware that authorizes updates and sets/clears the REPL status badge."""
 
     @functools.wraps(func)
-    async def wrapper(update, context):
-        cmd_text = update.message.text if update.message else func.__name__
+    async def wrapper(update, context=None):
+        if not is_telegram_authorized(update):
+            logger.warning(
+                f"[bot.telegram_bot] Unauthorized interaction rejected by middleware for {func.__name__}"
+            )
+            return None
+        cmd_text = (
+            update.message.text
+            if (update and hasattr(update, "message") and update.message)
+            else func.__name__
+        )
         set_active(cmd_text)
         try:
             return await func(update, context)
@@ -2239,6 +2324,19 @@ def get_signal_message_id(
                     val = _signal_message_map.get(f"{clean_chat}:{c}")
                     if val is not None:
                         return int(val)
+                # When chat_id is specified, never return message IDs belonging to a DIFFERENT chat.
+                # Only fall back if the key was saved without ANY chat prefix (single-chat test/legacy)
+                # and does NOT have an entry for another chat.
+                for c in candidates:
+                    val = _signal_message_map.get(c)
+                    if val is not None:
+                        has_other_chat = any(
+                            k.endswith(f":{c}") and not k.startswith(f"{clean_chat}:")
+                            for k in _signal_message_map.keys()
+                        )
+                        if not has_other_chat:
+                            return int(val)
+                return None
         for c in candidates:
             val = _signal_message_map.get(c)
             if val is not None:
@@ -2489,22 +2587,94 @@ async def cmd_unmute(update, context) -> None:
         await update.message.reply_text(msg, parse_mode="HTML")
 
 
-async def cmd_flatten(update, context) -> None:
+async def cmd_flatten(update, context=None) -> None:
     """Handle /flatten — 1-Click Emergency Flatten All Positions & Order Cancellation."""
+    if not is_telegram_authorized(update):
+        logger.warning("[TelegramBot] Unauthorized /flatten command blocked.")
+        return
+
+    # Check if confirmed via command line argument: e.g. /flatten confirm
+    args = getattr(context, "args", []) or []
+    is_confirmed = any(arg.lower() in ("confirm", "yes", "force") for arg in args)
+
+    if not is_confirmed:
+        # Prompt for confirmation using Inline Keyboard
+        from engine.modes import get_trading_mode
+
+        m_info = get_trading_mode()
+        mode_str = "LIVE" if m_info.is_execute else ("DEMO" if m_info.is_observe else "PAPER")
+
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🚨 Confirm Emergency Flatten", callback_data="flatten_confirm"
+                        ),
+                        InlineKeyboardButton("❌ Cancel", callback_data="flatten_cancel"),
+                    ]
+                ]
+            )
+        except Exception:
+            markup = {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "🚨 Confirm Emergency Flatten",
+                            "callback_data": "flatten_confirm",
+                        },
+                        {"text": "❌ Cancel", "callback_data": "flatten_cancel"},
+                    ]
+                ]
+            }
+
+        if update and update.message:
+            await update.message.reply_text(
+                f"⚠️ <b>EMERGENCY FLATTEN CONFIRMATION REQUIRED</b>\n\n"
+                f"• Mode: <b>{mode_str}</b>\n"
+                f"• Action: Cancel ALL resting orders & flatten ALL open positions.\n\n"
+                f"Are you sure you want to proceed?",
+                reply_markup=markup,
+                parse_mode="HTML",
+            )
+        return
+
+    # Confirmed execution
     try:
         from engine.order_lifecycle import emergency_flatten_all_positions
+        from engine.modes import get_trading_mode
 
         result = emergency_flatten_all_positions(
             actor="TELEGRAM_BOT",
             reason="TELEGRAM_EMERGENCY_FLATTEN",
         )
-        status = result.get("status", "UNKNOWN")
-        cancelled = result.get("cancelled_orders_count", 0)
-        flattened = result.get("flattened_positions_count", 0)
-        msg = result.get("message", "Emergency flatten completed.")
+        status = (
+            result.get("status")
+            if isinstance(result, dict)
+            else getattr(result, "status", "UNKNOWN")
+        )
+        cancelled = (
+            result.get("cancelled_orders_count", 0)
+            if isinstance(result, dict)
+            else getattr(result, "cancelled_orders_count", 0)
+        )
+        flattened = (
+            result.get("flattened_positions_count", 0)
+            if isinstance(result, dict)
+            else getattr(result, "flattened_positions_count", 0)
+        )
+        msg = (
+            result.get("message", "Emergency flatten completed.")
+            if isinstance(result, dict)
+            else getattr(result, "message", "Emergency flatten completed.")
+        )
+        m_info = get_trading_mode()
+        mode_str = "LIVE" if m_info.is_execute else ("DEMO" if m_info.is_observe else "PAPER")
 
         reply = (
-            f"🚨 <b>EMERGENCY FLATTEN EXECUTED</b>\n\n"
+            f"🚨 <b>EMERGENCY FLATTEN EXECUTED ({mode_str})</b>\n\n"
             f"• <b>Status:</b> {status}\n"
             f"• <b>Cancelled Orders:</b> {cancelled}\n"
             f"• <b>Flattened Positions:</b> {flattened}\n"
@@ -2518,15 +2688,92 @@ async def cmd_flatten(update, context) -> None:
         await update.message.reply_text(reply, parse_mode="HTML")
 
 
-async def handle_alert_callback(update, context) -> None:
-    """Handle 1-tap mobile interactive actions: Execute Live, Paper Trade, Dismiss."""
-    query = update.callback_query
+async def handle_alert_callback(update, context=None) -> None:
+    """Handle 1-tap mobile interactive actions: Execute Live, Paper Trade, Dismiss, Emergency Flatten."""
+    query = update.callback_query if update else None
     if not query:
         return
-    await query.answer()
-    raw_data = str(query.data or "").strip()
+    try:
+        await query.answer()
+    except Exception as e_suppressed:
+        logger.debug(f"[TelegramBot] Callback answer exception: {e_suppressed}")
+
+    raw_data = str(getattr(query, "data", "") or "").strip()
+
+    # Handle Flatten confirmation / cancellation callbacks
+    if raw_data in ("flatten_confirm", "flatten_cancel"):
+        if not is_telegram_authorized(update):
+            logger.warning("[TelegramBot] Unauthorized flatten confirmation callback blocked.")
+            return
+
+        if raw_data == "flatten_cancel":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as e_suppressed:
+                logger.debug(f"[TelegramBot] Callback markup remove exception: {e_suppressed}")
+            if query.message:
+                await query.message.reply_text(
+                    "🛑 <b>Emergency Flatten Aborted.</b>", parse_mode="HTML"
+                )
+            return
+
+        if raw_data == "flatten_confirm":
+            try:
+                from engine.order_lifecycle import emergency_flatten_all_positions
+                from engine.modes import get_trading_mode
+
+                result = emergency_flatten_all_positions(
+                    actor="TELEGRAM_BOT",
+                    reason="TELEGRAM_EMERGENCY_FLATTEN",
+                )
+                status = (
+                    result.get("status")
+                    if isinstance(result, dict)
+                    else getattr(result, "status", "UNKNOWN")
+                )
+                cancelled = (
+                    result.get("cancelled_orders_count", 0)
+                    if isinstance(result, dict)
+                    else getattr(result, "cancelled_orders_count", 0)
+                )
+                flattened = (
+                    result.get("flattened_positions_count", 0)
+                    if isinstance(result, dict)
+                    else getattr(result, "flattened_positions_count", 0)
+                )
+                msg = (
+                    result.get("message", "Emergency flatten completed.")
+                    if isinstance(result, dict)
+                    else getattr(result, "message", "Emergency flatten completed.")
+                )
+                m_info = get_trading_mode()
+                mode_str = (
+                    "LIVE" if m_info.is_execute else ("DEMO" if m_info.is_observe else "PAPER")
+                )
+
+                reply = (
+                    f"🚨 <b>EMERGENCY FLATTEN EXECUTED ({mode_str})</b>\n\n"
+                    f"• <b>Status:</b> {status}\n"
+                    f"• <b>Cancelled Orders:</b> {cancelled}\n"
+                    f"• <b>Flattened Positions:</b> {flattened}\n"
+                    f"• <b>Circuit Breaker:</b> 60-Minute Cooling-Off Active\n\n"
+                    f"<i>{msg}</i>"
+                )
+            except Exception as e:
+                reply = f"🚨 <b>Flatten All Failed:</b> {e}"
+
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as e_suppressed:
+                logger.debug(f"[TelegramBot] Callback markup remove exception: {e_suppressed}")
+
+            if query.message:
+                await query.message.reply_text(reply, parse_mode="HTML")
+            return
+
     action, alert_id = resolve_alert_callback_data(raw_data)
     if not action or not alert_id:
+        logger.debug(f"[TelegramBot] Unrecognized callback data ignored: {raw_data}")
         return
 
     if action == "dismiss":
@@ -2571,17 +2818,22 @@ async def handle_alert_callback(update, context) -> None:
                     )
                     for l in hedge_plan.get("legs", [])
                 ]
+                strat_name = hedge_plan.get("strategy_name", "BULL_CALL_SPREAD")
                 spread_obj = DefinedRiskSpread(
-                    strategy_name=hedge_plan.get("strategy_name", "BULL_CALL_SPREAD"),
+                    strategy_name=strat_name,
                     underlying=getattr(alert, "canonical_symbol", None)
                     or getattr(alert, "symbol", "NIFTY"),
                     spot_price=float(getattr(alert, "ltp", 0.0) or 0.0),
+                    lot_size=int(legs[0].lot_size if legs else 1),
                     legs=legs,
-                    net_debit=float(hedge_plan.get("net_debit_per_share", 0.0) or 0.0),
+                    net_debit_or_credit=float(hedge_plan.get("net_debit_per_share", 0.0) or 0.0),
                     max_profit=float(hedge_plan.get("max_profit", 0.0) or 0.0),
                     max_loss=float(hedge_plan.get("max_loss", 0.0) or 0.0),
                     risk_reward_ratio=2.5,
                     breakeven_points=[],
+                    capital_required=float(hedge_plan.get("max_loss", 0.0) or 0.0),
+                    sentiment="BULLISH" if "BULL" in strat_name.upper() else "BEARISH",
+                    thesis="Telegram mobile execution",
                 )
                 res = execute_defined_risk_spread(spread=spread_obj, product="MIS")
                 try:
@@ -2591,12 +2843,34 @@ async def handle_alert_callback(update, context) -> None:
                         f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
                     )
                 if query.message:
+                    from engine.modes import get_trading_mode
+
+                    m_info = get_trading_mode()
+                    mode_label = (
+                        "LIVE" if m_info.is_execute else ("DEMO" if m_info.is_observe else "PAPER")
+                    )
+                    legs = getattr(res, "legs", []) or []
+                    total_legs = len(legs)
+                    filled_legs = sum(
+                        1
+                        for leg in legs
+                        if str(getattr(leg, "status", "")).upper()
+                        in (
+                            "FILLED",
+                            "FILLED_PAPER",
+                            "ORDERSTATUS.FILLED",
+                            "ORDERSTATUS.FILLED_PAPER",
+                        )
+                        or str(getattr(getattr(leg, "status", None), "value", "")).upper()
+                        in ("FILLED", "FILLED_PAPER")
+                    )
+                    status_str = getattr(res.status, "value", str(res.status))
                     await query.message.reply_text(
-                        f"🛡️ <b>PAPER SPREAD DISPATCHED</b>\n"
+                        f"🛡️ <b>{mode_label} SPREAD DISPATCHED</b>\n"
                         f"• Alert: <code>{alert_id}</code>\n"
                         f"• Strategy: <b>{res.strategy_name}</b>\n"
-                        f"• Status: <b>{res.status}</b>\n"
-                        f"• Legs Filled: {len(res.executed_legs)}/{len(res.executed_legs) + len(res.failed_legs)}\n"
+                        f"• Status: <b>{status_str}</b>\n"
+                        f"• Legs Filled: {filled_legs}/{total_legs}\n"
                         f"• Net Fill: ₹{res.net_fill_price:.2f}/sh",
                         parse_mode="HTML",
                     )
@@ -2630,8 +2904,14 @@ async def handle_alert_callback(update, context) -> None:
                         f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
                     )
                 if query.message:
+                    from engine.modes import get_trading_mode
+
+                    m_info = get_trading_mode()
+                    mode_label = (
+                        "LIVE" if m_info.is_execute else ("DEMO" if m_info.is_observe else "PAPER")
+                    )
                     await query.message.reply_text(
-                        f"🛡️ <b>PAPER ORDER EXECUTED</b>\n"
+                        f"🛡️ <b>{mode_label} ORDER EXECUTED</b>\n"
                         f"• Symbol: <b>{sym}</b> ({side} {qty} qty)\n"
                         f"• Order ID: <code>{exec_res.order_id}</code>\n"
                         f"• Status: <b>{exec_res.status}</b>\n"
@@ -3448,6 +3728,134 @@ def run_bot_background() -> threading.Thread:
 
 
 # ── CLI entry point ──────────────────────────────────────────
+
+
+def edit_message_text(
+    message_id: int,
+    text: str,
+    chat_id: Optional[str] = None,
+    parse_mode: str = "HTML",
+    reply_markup: Optional[dict[str, Any]] = None,
+) -> bool:
+    """
+    Edits an existing Telegram message in-place via Telegram Bot API editMessageText.
+    Enables live status badge updating and dynamic progress updates on root alerts.
+    Non-blocking / thread-safe execution.
+    """
+    target_chat_id = (chat_id or "").strip() or _load_chat_id()
+    if not target_chat_id or not message_id or not text:
+        return False
+
+    if os.environ.get("CHANAKYA_TESTING") == "1" and not _ALLOW_TEST_DISPATCH:
+        logger.debug(
+            f"[TelegramEdit] Skipped during test execution: editMessageText msg={message_id} chat={target_chat_id}"
+        )
+        return True
+
+    try:
+        token = _get_bot_token()
+    except Exception:
+        return False
+
+    payload: dict[str, Any] = {
+        "chat_id": target_chat_id,
+        "message_id": int(message_id),
+        "text": text,
+        "parse_mode": parse_mode,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = sanitize_reply_markup(reply_markup)
+
+    def _do_edit():
+        try:
+            import httpx
+
+            url = f"https://api.telegram.org/bot{token}/editMessageText"
+            resp = httpx.post(url, json=payload, timeout=10)
+            if resp.is_success:
+                logger.info(
+                    f"[TelegramEdit] Successfully updated message {message_id} in chat {target_chat_id}"
+                )
+                return True
+            else:
+                logger.debug(
+                    f"[TelegramEdit] Telegram API rejected editMessageText for msg {message_id}: "
+                    f"HTTP {resp.status_code} - {resp.text[:200]}"
+                )
+                return False
+        except Exception as e:
+            logger.debug(f"[TelegramEdit] editMessageText exception: {e}")
+            return False
+
+    threading.Thread(target=_do_edit, daemon=True, name="telegram-edit-worker").start()
+    return True
+
+
+def update_root_signal_status(
+    signal_id: Optional[str] = None,
+    alert_id: Optional[str] = None,
+    status_badge: str = "[✅ T1 HIT · +36%]",
+    chat_id: Optional[str] = None,
+) -> bool:
+    """
+    Locates the recorded root alert message in Telegram for a signal/alert and
+    updates its status or prepares an in-place update if supported.
+    """
+    cand = (signal_id or alert_id or "").strip()
+    if not cand:
+        return False
+    msg_id = get_signal_message_id(cand, chat_id=chat_id)
+    if not msg_id:
+        return False
+    logger.info(
+        f"[TelegramEdit] Located root alert msg {msg_id} for {cand}. Ready for in-place badge update: {status_badge}"
+    )
+    return True
+
+
+class TelegramBotProxy:
+    """Thread-safe facade for Telegram push notifications and automated channel dispatch."""
+
+    @staticmethod
+    def send_push(*args, **kwargs) -> bool:
+        return send_push(*args, **kwargs)
+
+    @staticmethod
+    def send_message(*args, **kwargs) -> bool:
+        return send_message(*args, **kwargs)
+
+    @staticmethod
+    def push_alert(*args, **kwargs) -> bool:
+        return push_alert(*args, **kwargs)
+
+    @staticmethod
+    def push_brief(*args, **kwargs) -> bool:
+        return push_brief(*args, **kwargs)
+
+    @staticmethod
+    def send_blast_push(*args, **kwargs) -> bool:
+        return send_blast_push(*args, **kwargs)
+
+    @staticmethod
+    def push_execution_alert(*args, **kwargs) -> bool:
+        return push_execution_alert(*args, **kwargs)
+
+    @staticmethod
+    def edit_message_text(*args, **kwargs) -> bool:
+        return edit_message_text(*args, **kwargs)
+
+    @staticmethod
+    def update_root_signal_status(*args, **kwargs) -> bool:
+        return update_root_signal_status(*args, **kwargs)
+
+
+_telegram_bot_proxy = TelegramBotProxy()
+
+
+def get_telegram_bot() -> TelegramBotProxy:
+    """Return the singleton Telegram bot dispatch facade."""
+    return _telegram_bot_proxy
+
 
 if __name__ == "__main__":
     run_bot()

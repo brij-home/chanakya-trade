@@ -1,7 +1,7 @@
 """
 tests/test_fyers_token_resilience.py
 ───────────────────────────────────
-Deterministic unit tests for Fyers session boundary token expiration (06:00 AM IST),
+Deterministic unit tests for Fyers session boundary token expiration (06:30 AM IST),
 self-healing auto-reauthentication upon auth rejection (-16 Token Invalid or Expired),
 fail-closed profile and funds contracts, and WebSocket 403 Forbidden halt protection.
 """
@@ -24,33 +24,32 @@ def test_token_expired_on_earlier_calendar_day():
     assert api._is_token_expired(old_ts) is True
 
 
-def test_token_expired_across_0600_ist_boundary():
+def test_token_expired_across_0630_ist_boundary():
     """
-    RCA Verification: Token generated at 00:01:57 IST expires once clock hits 06:00:00 AM IST.
-    Simulates the exact incident condition: 2026-10-27 00:01:57 IST token checked at 06:02:51 IST.
+    Token generated at 00:01:57 IST is expired after the documented 06:30 AM cutoff.
     """
     api = FyersAPI(app_id="TEST-100", secret_key="secret")
 
     token_dt = datetime(2026, 10, 27, 0, 1, 57, tzinfo=IST)
-    now_dt = datetime(2026, 10, 27, 6, 2, 51, tzinfo=IST)
+    now_dt = datetime(2026, 10, 27, 6, 32, 51, tzinfo=IST)
 
     with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is True
 
 
-def test_token_valid_before_0600_ist_boundary():
-    """Verify midnight session token remains valid before 06:00 AM IST daily cutoff."""
+def test_token_valid_before_0630_ist_boundary():
+    """Verify midnight session token remains valid immediately before daily cutoff."""
     api = FyersAPI(app_id="TEST-100", secret_key="secret")
 
     token_dt = datetime(2026, 10, 27, 0, 1, 57, tzinfo=IST)
-    now_dt = datetime(2026, 10, 27, 2, 30, 0, tzinfo=IST)
+    now_dt = datetime(2026, 10, 27, 6, 29, 59, tzinfo=IST)
 
     with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is False
 
 
-def test_token_valid_same_day_after_0600_ist():
-    """Verify token generated in the morning after 06:00 AM IST cutoff is valid throughout trading hours."""
+def test_token_valid_same_day_after_0630_ist():
+    """Verify token generated after 06:30 AM IST remains valid during the session."""
     api = FyersAPI(app_id="TEST-100", secret_key="secret")
 
     token_dt = datetime(2026, 10, 27, 8, 30, 0, tzinfo=IST)
@@ -60,15 +59,25 @@ def test_token_valid_same_day_after_0600_ist():
         assert api._is_token_expired(token_dt.timestamp()) is False
 
 
-def test_token_expired_next_day_after_0600_ist():
-    """Verify daytime token expires next morning at 06:00 AM IST cutoff."""
+def test_token_expired_next_day_after_0630_ist():
+    """Verify daytime token expires at the next 06:30 AM IST cutoff."""
     api = FyersAPI(app_id="TEST-100", secret_key="secret")
 
     token_dt = datetime(2026, 10, 27, 8, 30, 0, tzinfo=IST)
-    now_dt = datetime(2026, 10, 28, 6, 5, 0, tzinfo=IST)
+    now_dt = datetime(2026, 10, 28, 6, 35, 0, tzinfo=IST)
 
     with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is True
+
+
+def test_token_remains_valid_more_than_twelve_hours_before_daily_cutoff():
+    """A valid same-day token must not be rejected by an obsolete 12-hour TTL."""
+    api = FyersAPI(app_id="TEST-100", secret_key="secret")
+    token_dt = datetime(2026, 10, 27, 8, 30, 0, tzinfo=IST)
+    now_dt = datetime(2026, 10, 27, 22, 0, 0, tzinfo=IST)
+
+    with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
+        assert api._is_token_expired(token_dt.timestamp()) is False
 
 
 def test_is_fyers_auth_error_classifier():
@@ -230,3 +239,73 @@ def test_fyers_socket_patch_sets_restart_flag_false_on_403():
 
     data_ws.FyersDataSocket.On_error(dummy_data_sock, "Handshake status 403 Forbidden")
     assert dummy_data_sock.restart_flag is False
+
+
+def test_fyers_headless_auto_login_429_triggers_cooldown_and_suppresses_repeat_calls():
+    """Verify that HTTP 429 during headless auto-login trips circuit breaker, sets cooldown, and blocks repeated attempts."""
+    from brokers.fyers import _reset_auth_backoff, _get_auth_backoff_remaining
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+    _reset_auth_backoff()
+    api = FyersAPI(
+        app_id="TEST-100",
+        secret_key="secret",
+        fy_id="FAK999",
+        totp_secret="BASE32SECRET",
+        pin="1234",
+    )
+    api._access_token = ""
+    api._token_ts = 0.0
+
+    cb = get_fyers_circuit_breaker()
+    cb.record_success()
+
+    with patch.object(api, "_auto_login_totp") as mock_totp:
+        mock_totp.side_effect = RuntimeError(
+            'Fyers auto-login step 1 failed (HTTP 429): {"s": "error", "code": 429, "message": "Too many requests. Please try again later."}'
+        )
+
+        assert api.is_authenticated() is False
+        assert mock_totp.call_count == 1
+        assert _get_auth_backoff_remaining() > 0
+
+        # Subsequent 10 calls during cooldown window MUST NOT call _auto_login_totp
+        for _ in range(10):
+            assert api.is_authenticated() is False
+
+        assert mock_totp.call_count == 1
+
+    _reset_auth_backoff()
+
+
+def test_fyers_headless_auto_login_success_clears_backoff():
+    """Verify that successful headless login resets backoff and records auth success."""
+    from brokers.fyers import _reset_auth_backoff, _get_auth_backoff_remaining
+
+    _reset_auth_backoff()
+    api = FyersAPI(
+        app_id="TEST-100",
+        secret_key="secret",
+        fy_id="FAK999",
+        totp_secret="BASE32SECRET",
+        pin="1234",
+    )
+    api._access_token = ""
+    api._token_ts = 0.0
+
+    mock_profile = MagicMock()
+    mock_profile.user_id = "FAK999"
+
+    with (
+        patch.object(api, "_auto_login_totp", return_value="fresh_token_123"),
+        patch.object(api, "_save_token"),
+        patch.object(api, "get_profile", return_value=mock_profile),
+        patch("web.api._invalidate_auth_cache") as mock_inv,
+    ):
+        res = api.complete_login()
+        assert res.user_id == "FAK999"
+        assert api._access_token == "fresh_token_123"
+        assert _get_auth_backoff_remaining() == 0.0
+        assert mock_inv.called
+
+    _reset_auth_backoff()

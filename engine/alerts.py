@@ -704,7 +704,7 @@ class AlertManager:
         elif not in_market:
             env_tag = "[OFF-MARKET]"
         else:
-            env_tag = "[REAL/LIVE]"
+            env_tag = "[LIVE]"
 
         if alert.is_invalidated:
             panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"

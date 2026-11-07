@@ -296,6 +296,7 @@ def test_scrutiny_auditor_vetoes_unviable_trade_plan():
         stop_loss=78.0,
         strike=23500.0,
         option_type="PE",
+        metrics={"volume": 20000, "oi": 20000, "vol_oi_ratio": 1.0},
         actionable_plan={
             "action": "BUY",
             "trade_plan": {
@@ -339,8 +340,8 @@ def test_get_trading_days_elapsed():
 def test_sebi_single_weekly_expiry_mandate():
     """
     Verify that under SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
-    - NSE: Only NIFTY 50 has weekly options (Thursday).
-    - BSE: Only SENSEX has weekly options (Friday).
+    - NSE: Only NIFTY 50 has weekly options on the effective-dated weekday.
+    - BSE: Only SENSEX has weekly options on the effective-dated weekday.
     - BANKEX, BANKNIFTY, MIDCPNIFTY, FINNIFTY, and Equities offer strictly monthly contracts.
     """
     from market.calendar import (
@@ -353,26 +354,26 @@ def test_sebi_single_weekly_expiry_mandate():
     # Reference date: Monday 2026-09-07
     ref_d = date(2026, 9, 7)
 
-    # NIFTY resolves to upcoming Thursday (2026-09-10)
+    # NIFTY resolves to the upcoming Tuesday under the effective-dated rule.
     nifty_exp = get_nearest_weekly_expiry("NIFTY", ref_date=ref_d)
-    assert nifty_exp.weekday() == 3  # Thursday
+    assert nifty_exp.weekday() == 1  # Tuesday after September 2025
     assert (nifty_exp - ref_d).days <= 7
     assert classify_expiry_type(str(nifty_exp), symbol="NIFTY") == "WEEKLY"
 
-    # SENSEX resolves to upcoming Friday (2026-09-11)
+    # SENSEX resolves to the upcoming Thursday under the effective-dated rule.
     sensex_exp = get_nearest_weekly_expiry("SENSEX", ref_date=ref_d)
-    assert sensex_exp.weekday() == 4  # Friday
+    assert sensex_exp.weekday() == 3  # Thursday after September 2025
     assert (sensex_exp - ref_d).days <= 7
     assert classify_expiry_type(str(sensex_exp), symbol="SENSEX") == "WEEKLY"
 
-    # BANKEX (BSE) must NOT resolve to this week's Friday! It must resolve to monthly expiry (last Friday of September 2026)
+    # BANKEX (BSE) must resolve to its monthly expiry, not a weekly contract.
     bankex_exp = get_nearest_weekly_expiry("BANKEX", ref_date=ref_d)
     monthly_bankex = get_nearest_monthly_expiry("BANKEX", ref_date=ref_d)
     assert bankex_exp == monthly_bankex
     assert bankex_exp.day > 20  # Last Friday of the month
     assert classify_expiry_type(str(bankex_exp), symbol="BANKEX") == "MONTHLY"
 
-    # BANKNIFTY (NSE) must resolve to monthly expiry (last Thursday of September 2026)
+    # BANKNIFTY (NSE) must resolve to the current monthly expiry.
     banknifty_exp = get_nearest_weekly_expiry("BANKNIFTY", ref_date=ref_d)
     monthly_bn = get_nearest_monthly_expiry("BANKNIFTY", ref_date=ref_d)
     assert banknifty_exp == monthly_bn

@@ -32,6 +32,7 @@ from typing import Optional
 import httpx
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     UserProfile,
     Funds,
@@ -140,7 +141,7 @@ class StoxkartAPI(BrokerAPI):
                 "expiry": time.time() + expiry_seconds,
                 "updated_at": datetime.now().isoformat(),
             }
-            TOKEN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            save_secure_token(TOKEN_FILE, json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as e_suppressed:
             logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -185,7 +186,7 @@ class StoxkartAPI(BrokerAPI):
                 "secretKey": asec,
                 "userId": cc,
                 "password": pwd,
-                "twoFA": totp_code or "123456",
+                "twoFA": totp_code or "",
             }
             resp = self._client.post(url, json=payload, headers=headers)
             if resp.status_code == 200:
@@ -231,7 +232,6 @@ class StoxkartAPI(BrokerAPI):
         """Alias for logout to conform to standard resource close protocol."""
         self.logout()
 
-    @property
     def is_authenticated(self) -> bool:
         return bool(self._token)
 
@@ -403,12 +403,30 @@ class StoxkartAPI(BrokerAPI):
                 "Authorization": self._token,
                 "Content-Type": "application/json",
             }
+            exch_key = (req.exchange or "").upper()
+            if exch_key not in _EXCHANGE_MAP:
+                raise ValueError(
+                    f"Unsupported exchange '{req.exchange}' for Stoxkart. Supported: {list(_EXCHANGE_MAP.keys())}"
+                )
+
+            ot_key = (req.order_type or "").upper()
+            if ot_key not in _ORDER_TYPE_MAP:
+                raise ValueError(
+                    f"Unsupported order type '{req.order_type}' for Stoxkart. Supported: {list(_ORDER_TYPE_MAP.keys())}"
+                )
+
+            prod_key = (req.product or "").upper()
+            if prod_key not in _PRODUCT_MAP:
+                raise ValueError(
+                    f"Unsupported product '{req.product}' for Stoxkart. Supported: {list(_PRODUCT_MAP.keys())}"
+                )
+
             payload = {
                 "symbol": req.symbol.upper(),
-                "exchange": _EXCHANGE_MAP.get(req.exchange.upper(), "NSECM"),
+                "exchange": _EXCHANGE_MAP[exch_key],
                 "transactionType": tx_type,  # BUY | SELL
-                "orderType": _ORDER_TYPE_MAP.get(req.order_type.upper(), "LIMIT"),
-                "productType": _PRODUCT_MAP.get(req.product.upper(), "MIS"),
+                "orderType": _ORDER_TYPE_MAP[ot_key],
+                "productType": _PRODUCT_MAP[prod_key],
                 "quantity": req.quantity,
                 "price": req.price or 0.0,
                 "triggerPrice": req.trigger_price or 0.0,

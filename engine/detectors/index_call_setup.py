@@ -276,6 +276,31 @@ def detect_index_call_setup(
             df_today_5m = ohlcv_5m
 
     active_ohlcv = df_today_5m if df_today_5m is not None else ohlcv_5m
+
+    # ── Temporal Bar Freshness Invariant (Zero Stale Bar Feeding) ──
+    if active_ohlcv is not None and len(active_ohlcv) >= 1 and not is_test_runner:
+        try:
+            from market.calendar import is_market_open
+
+            if is_market_open(exchange="NSE"):
+                last_bar_dt = active_ohlcv.index[-1]
+                if hasattr(last_bar_dt, "to_pydatetime"):
+                    last_bar_dt = last_bar_dt.to_pydatetime()
+                if getattr(last_bar_dt, "tzinfo", None) is not None:
+                    last_bar_dt = last_bar_dt.astimezone(IST).replace(tzinfo=None)
+                now_loc = (
+                    now_dt.replace(tzinfo=None) if hasattr(now_dt, "replace") else datetime.now()
+                )
+                age_minutes = (now_loc - last_bar_dt).total_seconds() / 60.0
+                if age_minutes > 15.0:
+                    logger.warning(
+                        f"[IndexCallSetup] Stale 5m OHLCV detected for {clean_sym}: "
+                        f"Latest bar is from {last_bar_dt.strftime('%H:%M:%S')} ({age_minutes:.1f}m ago vs {now_loc.strftime('%H:%M:%S')}). "
+                        f"Aborting scan to prevent false breakout traps (Rule 10/11)."
+                    )
+                    return []
+        except Exception as e_fresh:
+            logger.debug(f"[IndexCallSetup] Bar freshness guard check: {e_fresh}")
     try:
         from engine.index_velocity import calculate_roc_momentum, calculate_premium_velocity
 
@@ -416,6 +441,7 @@ def detect_index_call_setup(
     active_expiries = sorted(
         list(set(str(getattr(c, "expiry", "") or "") for c in chain if getattr(c, "expiry", None)))
     )
+    nearest_exp = None
     if active_expiries:
         nearest_exp = active_expiries[0]
         chain_nearest = [c for c in chain if str(getattr(c, "expiry", "") or "") == nearest_exp]
@@ -441,8 +467,13 @@ def detect_index_call_setup(
         else (100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
     )
 
-    is_0dte_today = (clean_sym == "NIFTY" and now_dt.weekday() == 3) or (
-        clean_sym in ("SENSEX", "BSX") and now_dt.weekday() == 4
+    from engine.options_hedging import get_0dte_intraday_phase
+
+    is_0dte_today = bool(
+        nearest_exp
+        and get_0dte_intraday_phase(clean_sym, now_dt=now_dt, expiry_date=nearest_exp).get(
+            "is_0dte"
+        )
     )
 
     vix_val = None
@@ -1707,6 +1738,11 @@ def detect_index_call_setup(
                             if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX")
                             else 0.30
                         )
+                        max_bounce = (
+                            0.55
+                            if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX")
+                            else 0.40
+                        )
                         day_low_ext = (
                             ((effective_vwap - (day_low or spot)) / effective_vwap * 100.0)
                             if effective_vwap > 0
@@ -1718,7 +1754,28 @@ def detect_index_call_setup(
                             else 0.0
                         )
 
-                        if day_low_ext >= min_oversold and spot_bounce >= 0.20:
+                        # Freshness: Day low must have occurred within the last 8 bars (~40 minutes)
+                        bars_since_low = 0
+                        if col_l in active_ohlcv.columns:
+                            try:
+                                low_vals = active_ohlcv[col_l].values
+                                bars_since_low = len(low_vals) - 1 - int(low_vals.argmin())
+                            except Exception:
+                                bars_since_low = 0
+
+                        # Location: Spot must be strictly below VWAP for a bottom reversal mean-reversion bounce towards VWAP.
+                        # If spot has already reached or broken above VWAP, the mean-reversion bounce to VWAP is complete;
+                        # entering a call above VWAP is chasing the top and mathematically invalid.
+                        is_strictly_below_vwap = (effective_vwap <= 0) or (
+                            spot <= effective_vwap * 0.9998
+                        )
+
+                        if (
+                            day_low_ext >= min_oversold
+                            and 0.10 <= spot_bounce <= max_bounce
+                            and is_strictly_below_vwap
+                            and (bars_since_low <= 8 or is_test_runner)
+                        ):
                             b_curr = active_ohlcv.iloc[-1]
                             b_prev = active_ohlcv.iloc[-2]
                             curr_c = float(b_curr[col_c])
@@ -2364,11 +2421,16 @@ def detect_index_call_setup(
             logger.debug(
                 f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
             )
-    if opt_ltp > 0 and exp_date:
+    # Consume live exchange Greeks directly from Fyers contract if available
+    if getattr(best_ce, "delta", None) is not None and getattr(best_ce, "delta", 0.0) != 0.0:
+        opt_delta = round(float(best_ce.delta), 4)
+        opt_gamma = round(float(getattr(best_ce, "gamma", 0.0) or 0.0), 6)
+        opt_iv = round(float(getattr(best_ce, "iv", 0.0) or 0.0), 2)
+    elif opt_ltp > 0 and exp_date:
         try:
             from analysis.options import compute_greeks
 
-            g = compute_greeks(spot, strike, str(exp_date)[:10], "CE", opt_ltp)
+            g = compute_greeks(spot, strike, str(exp_date)[:10], "CE", opt_ltp, as_of=now_dt)
             if g and getattr(g, "delta", None) is not None:
                 opt_delta = round(float(g.delta), 4)
                 opt_gamma = round(float(g.gamma), 6)
@@ -2624,8 +2686,39 @@ def detect_index_call_setup(
     if day_low and day_low > 0 and day_low < spot:
         # Anchor below day low with dynamic volatility buffer (safe from opening liquidity wicks)
         buffered_dl = round(day_low - dynamic_buffer, 1)
-        # Ensure stop is safely below day low, but never pinned tighter than dynamic_spot_sl_floor from spot
-        underlying_spot_sl = min(buffered_dl, round(spot - dynamic_spot_sl_floor, 1))
+        max_allowable_spot_risk = max(effective_spot_risk * 1.6, spot * 0.005)
+        if (spot - buffered_dl) <= max_allowable_spot_risk:
+            underlying_spot_sl = min(buffered_dl, round(spot - dynamic_spot_sl_floor, 1))
+        else:
+            # Day low is too distant (>0.5% away) to serve as tight intraday stop;
+            # anchor structural SL to recent 5m swing low to maintain risk-reward coherence.
+            local_swing_l = spot - effective_spot_risk
+            if (
+                active_ohlcv is not None
+                and hasattr(active_ohlcv, "iloc")
+                and len(active_ohlcv) >= 3
+            ):
+                try:
+                    local_swing_l = float(active_ohlcv[col_l].iloc[-4:].min()) - dynamic_buffer
+                except Exception as e_swing:
+                    logger.debug(f"[IndexCallSetup] Local swing calculation fallback: {e_swing}")
+            underlying_spot_sl = round(min(local_swing_l, spot - dynamic_spot_sl_floor), 1)
+
+    # Harmonize Option Stop Loss directly to Spot Stop Loss via Delta:
+    actual_spot_risk = max(1.0, spot - underlying_spot_sl)
+    delta_derived_opt_risk = round(actual_spot_risk * eff_delta, 1)
+
+    max_naked_spot_distance = 55.0 if clean_sym in ("NIFTY", "FINNIFTY", "MIDCPNIFTY") else 125.0
+    is_wide_spot_risk = bool(
+        actual_spot_risk > max_naked_spot_distance or delta_derived_opt_risk > (opt_ltp * 0.28)
+    )
+
+    sl_premium = round(max(0.5, opt_ltp - delta_derived_opt_risk), 1)
+    calc_risk = max(1.0, opt_ltp - sl_premium)
+    t1_premium = round(opt_ltp + (calc_risk * 2.0), 1)
+    t2_premium = round(opt_ltp + (calc_risk * 3.5), 1)
+    t3_premium = round(opt_ltp + (calc_risk * 5.5), 1)
+    t0_5_premium = round(opt_ltp + (calc_risk * 1.0), 1)
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"
@@ -2970,10 +3063,11 @@ def detect_index_call_setup(
 
     gex_data = compute_chain_gex(chain, spot, underlying=clean_sym, lot_size=lot_sz)
 
-    iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
+    live_iv_frac = (opt_iv / 100.0) if (opt_iv and opt_iv > 0) else None
+    iv_val = live_iv_frac or max(0.10, (vix_val / 100.0) if vix_val else 0.14)
     from engine.options_backtest import bs_delta
 
-    long_delta = bs_delta(spot, strike, dte, iv_val, "CE")
+    long_delta = opt_delta if opt_delta is not None else bs_delta(spot, strike, dte, iv_val, "CE")
 
     # Target 1 Confluence: Short leg must be strictly OTM and sit at or beyond Target 1 resistance
     # so the spread never caps profitability before Target 1 is attained.
@@ -3127,6 +3221,13 @@ def detect_index_call_setup(
             spread_guidance = (
                 f"⚠️ POSITIVE DEALER GAMMA PIN (Net GEX +₹{net_gex / 1e7:,.1f} Cr): Dealers hedging counter-trend; index pinned near {gex_flip:,.0f}. "
                 "Naked calls suffer heavy theta decay; Bull Call Spread required."
+            )
+        elif is_wide_spot_risk:
+            pref_veh = "SPREAD_ONLY"
+            is_spread_mandated = True
+            spread_guidance = (
+                f"🛡️ WIDE STRUCTURAL SPOT RISK ({actual_spot_risk:.1f} pts): Naked option stop loss would trigger prematurely on minor noise. "
+                "Execute defined-risk Bull Call Spread (hedged short leg absorbs noise and eliminates theta bleed)."
             )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
@@ -3439,7 +3540,17 @@ def detect_index_call_setup(
             "oi_change": oi_change,
             "volume": volume,
             "vol_oi_ratio": vol_oi_ratio,
-            "rvol": max(float(vol_oi_ratio or 1.0), 1.0),
+            "rvol": max(
+                1.0,
+                float(
+                    signal_tags.get("trend_pullback", {}).get("rvol")
+                    or signal_tags.get("demand_zone_sweep", {}).get("rvol")
+                    or signal_tags.get("double_bottom_bounce", {}).get("rvol")
+                    or round(volume / max(1.0, oi * 0.1), 1)
+                    if oi > 0
+                    else 1.2
+                ),
+            ),
             "spot": spot,
             "vwap": effective_vwap,
             "spot_to_vwap_pct": round(

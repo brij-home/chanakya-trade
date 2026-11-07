@@ -153,10 +153,10 @@ class TestBuildHarnessSystemPrompt:
 
 
 class TestExecuteTradeToolRegistration:
-    def _make_registry(self):
+    def _make_registry(self, approval_callback=None):
         from agent.tools import ToolRegistry
 
-        return ToolRegistry()
+        return ToolRegistry(approval_callback=approval_callback)
 
     def test_tool_registered_when_broker_provided(self):
         from agent.harness import _register_execute_tool
@@ -190,7 +190,7 @@ class TestExecuteTradeToolRegistration:
     def test_execute_trade_routes_through_trade_executor(self):
         from agent.harness import _register_execute_tool
 
-        registry = self._make_registry()
+        registry = self._make_registry(approval_callback=lambda n, a: True)
         broker = MagicMock()
         _register_execute_tool(registry, broker)
 
@@ -204,7 +204,7 @@ class TestExecuteTradeToolRegistration:
     def test_execute_trade_passes_broker(self):
         from agent.harness import _register_execute_tool
 
-        registry = self._make_registry()
+        registry = self._make_registry(approval_callback=lambda n, a: True)
         broker = MagicMock()
         _register_execute_tool(registry, broker)
 
@@ -215,6 +215,36 @@ class TestExecuteTradeToolRegistration:
             )
         call_args = mock_exec.call_args
         assert call_args[0][1] is broker  # second positional arg is the broker
+
+    def test_execute_trade_denied_without_approval_callback(self):
+        from agent.harness import _register_execute_tool
+
+        registry = self._make_registry(approval_callback=None)
+        broker = MagicMock()
+        _register_execute_tool(registry, broker)
+
+        with patch("agent.harness.execute_trade_plan") as mock_exec:
+            result = registry.execute(
+                "execute_trade",
+                {"symbol": "RELIANCE", "action": "BUY", "quantity": 10},
+            )
+        mock_exec.assert_not_called()
+        assert result.get("permission_denied") is True
+
+    def test_execute_trade_denied_when_operator_declines(self):
+        from agent.harness import _register_execute_tool
+
+        registry = self._make_registry(approval_callback=lambda n, a: False)
+        broker = MagicMock()
+        _register_execute_tool(registry, broker)
+
+        with patch("agent.harness.execute_trade_plan") as mock_exec:
+            result = registry.execute(
+                "execute_trade",
+                {"symbol": "RELIANCE", "action": "BUY", "quantity": 10},
+            )
+        mock_exec.assert_not_called()
+        assert result.get("permission_denied") is True
 
 
 # ── run() ─────────────────────────────────────────────────────

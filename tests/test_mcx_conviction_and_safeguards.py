@@ -877,8 +877,10 @@ def test_alert_invalidation_clears_milestones_and_purges_outcomes():
     assert inv.stage == "INVALIDATED"
     assert inv.target_status == "INVALIDATED"
     assert inv.achieved_milestones == []
-    assert inv.r_multiple == 0.0
-    assert inv.pnl_pct == 0.0
+    # Invalidation clears unsupported performance claims; it does not turn an
+    # alert path into a zero-R account fill.
+    assert inv.r_multiple is None
+    assert inv.pnl_pct is None
     assert inv.should_trail is False
     assert inv.trailing_decision == "INVALIDATED"
 
@@ -889,7 +891,7 @@ def test_alert_invalidation_clears_milestones_and_purges_outcomes():
     assert len(matching) >= 1
     for m in matching:
         assert m.outcome == "INVALIDATED"
-        assert m.realized_rr == 0.0
+        assert m.realized_rr is None
 
 
 def test_alert_evaluator_rejects_spot_option_scale_mismatch():

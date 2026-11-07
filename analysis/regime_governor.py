@@ -18,8 +18,9 @@ Continuously classifies macro Dalal Street market conditions into 4 distinct reg
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger("chanakya.analysis.regime_governor")
@@ -31,7 +32,7 @@ class MarketRegimeClassification:
     regime: (
         str  # "TREND_EXPANSION" | "BALANCED_CHOP" | "VOLATILITY_EXPANSION_EXPIRY" | "MACRO_SHOCK"
     )
-    vix: float
+    vix: Optional[float]
     is_orb_trapped: bool
     is_expiry_session: bool
     min_scrutiny_score: int
@@ -44,6 +45,8 @@ class MarketRegimeClassification:
     classified_at: str = field(
         default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     )
+    data_status: str = "AVAILABLE"
+    unavailable_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,7 +60,64 @@ class MarketRegimeClassification:
             "active_detectors": self.active_detectors,
             "suppressed_detectors": self.suppressed_detectors,
             "classified_at": self.classified_at,
+            "data_status": self.data_status,
+            "unavailable_reasons": self.unavailable_reasons,
         }
+
+
+def _is_test_environment() -> bool:
+    import os
+
+    return bool(
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    )
+
+
+def _fresh_live_vix(max_age_seconds: float = 30.0) -> Optional[float]:
+    """Return India VIX only from a recent LIVE quote with an identified provider."""
+    try:
+        from market.indices import INDEX_INSTRUMENTS
+        from market.quotes import get_quote
+
+        symbol = INDEX_INSTRUMENTS["VIX"]
+        snapshots = get_quote(symbol)
+        quote = snapshots.get(symbol) if isinstance(snapshots, dict) else None
+        if quote is None:
+            return None
+        value = float(getattr(quote, "last_price", 0.0) or getattr(quote, "ltp", 0.0) or 0.0)
+        provider = str(getattr(quote, "provider", "UNKNOWN") or "UNKNOWN").upper()
+        data_state = str(getattr(quote, "data_state", "UNAVAILABLE") or "UNAVAILABLE").upper()
+        received_at_raw = getattr(quote, "received_at", None)
+        received_at = (
+            datetime.fromisoformat(str(received_at_raw).replace("Z", "+00:00"))
+            if received_at_raw
+            else None
+        )
+        age_seconds = (
+            (datetime.now(timezone.utc) - received_at.astimezone(timezone.utc)).total_seconds()
+            if received_at is not None and received_at.tzinfo is not None
+            else None
+        )
+        if (
+            not math.isfinite(value)
+            or value <= 0
+            or data_state != "LIVE"
+            or provider in {"UNKNOWN", "MOCK", "TEST"}
+            or age_seconds is None
+            or not math.isfinite(age_seconds)
+            or age_seconds < 0.0
+            or age_seconds > max_age_seconds
+        ):
+            return None
+        return value
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        logger.warning("[regime_governor] Fresh VIX quote unavailable: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("[regime_governor] VIX quote lookup degraded: %s", exc, exc_info=True)
+        return None
 
 
 def classify_market_regime(
@@ -78,58 +138,23 @@ def classify_market_regime(
     else:
         now_ist = now_ist.astimezone(IST)
 
-    import os
-
-    is_test_env = (
-        os.environ.get("CHANAKYA_TESTING") == "1"
-        or "PYTEST_CURRENT_TEST" in os.environ
-        or os.environ.get("DEPLOY_MODE") == "test"
-    )
+    is_test_env = _is_test_environment()
 
     if is_test_env and ref_dt is None:
         # In test environments without an explicit time fixture, default to standard morning session (10:00 IST)
         # to ensure unit tests targeting specific alert logic are not blocked by ambient wall-clock midday lull.
         now_ist = now_ist.replace(hour=10, minute=0, second=0)
 
-    # 1. Fetch live VIX if not provided (Zero Network I/O in test environments)
-    vix_val = vix
-    if vix_val is None or vix_val <= 0:
-        try:
-            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
-
-            with _quote_cache_lock:
-                for k in ("NSE:INDIA VIX", "INDIA VIX", "VIX", "INDIAVIX"):
-                    if k in _QUOTE_CACHE:
-                        _, q_obj = _QUOTE_CACHE[k]
-                        val = float(
-                            getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
-                        )
-                        if val > 0:
-                            vix_val = val
-                            break
-        except Exception as e_suppressed:
-            logger.debug(
-                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
-            )
-
-    if (vix_val is None or vix_val <= 0) and not is_test_env:
-        try:
-            from market.indices import get_vix
-
-            v_raw = get_vix()
-            if isinstance(v_raw, (int, float)) and v_raw > 0:
-                vix_val = float(v_raw)
-            elif hasattr(v_raw, "ltp") and v_raw.ltp:
-                vix_val = float(v_raw.ltp)
-            elif isinstance(v_raw, dict):
-                vix_val = float(v_raw.get("ltp") or v_raw.get("value") or 0.0)
-        except Exception as e_suppressed:
-            logger.debug(
-                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
-            )
-
-    if vix_val is None or vix_val <= 0:
-        vix_val = 13.5  # Neutral institutional baseline
+    # 1. Missing live volatility is unavailable evidence, never a neutral VIX baseline.
+    vix_val: Optional[float]
+    try:
+        vix_val = float(vix) if vix is not None else None
+    except (TypeError, ValueError):
+        vix_val = None
+    if vix_val is not None and (not math.isfinite(vix_val) or vix_val <= 0):
+        vix_val = None
+    if vix_val is None:
+        vix_val = _fresh_live_vix()
 
     # 2. Check Expiry Session (Post 13:15 IST on active index weekly expiry days: Nifty Thu, Sensex Fri)
     from market.calendar import is_expiry_day
@@ -156,7 +181,7 @@ def classify_market_regime(
     # ── Regime Decision Logic ───────────────────────────────────────────────
 
     # Regime 4: Macro Shock
-    if vix_val >= 19.0 or macro_score <= -50.0:
+    if (vix_val is not None and vix_val >= 19.0) or macro_score <= -50.0:
         return MarketRegimeClassification(
             regime="MACRO_SHOCK",
             vix=vix_val,
@@ -170,7 +195,7 @@ def classify_market_regime(
         )
 
     # Regime 3: Volatility Expansion Expiry
-    if is_afternoon_expiry and vix_val >= 12.0:
+    if is_afternoon_expiry and vix_val is not None and vix_val >= 12.0:
         return MarketRegimeClassification(
             regime="VOLATILITY_EXPANSION_EXPIRY",
             vix=vix_val,
@@ -181,6 +206,21 @@ def classify_market_regime(
             guidance="Expiry day gamma expansion active. Fast-paced options unwinding setups prioritized.",
             active_detectors=["GAMMA_BLAST", "OPTIONS_MOMENTUM", "INTRADAY_SPARK"],
             suppressed_detectors=["MULTIBAGGER", "DEFINED_RISK_NEUTRAL"],
+        )
+
+    if vix_val is None:
+        return MarketRegimeClassification(
+            regime="UNAVAILABLE",
+            vix=None,
+            is_orb_trapped=is_orb_trapped,
+            is_expiry_session=is_afternoon_expiry,
+            min_scrutiny_score=100,
+            dominant_bias="WAIT_FOR_VERIFIED_DATA",
+            guidance="Fresh LIVE India VIX is unavailable. Wait for a verified volatility quote before classifying the market regime.",
+            active_detectors=[],
+            suppressed_detectors=["ALL_DIRECTIONAL_BREAKOUTS"],
+            data_status="UNAVAILABLE",
+            unavailable_reasons=["FRESH_LIVE_INDIA_VIX_MISSING"],
         )
 
     # Regime 2b: Institutional Distribution (Bearish Trend Day)
@@ -264,7 +304,7 @@ def classify_market_regime(
             )
 
     is_midday_lull = (
-        (dtime(11, 15) <= now_t <= dtime(13, 15)) and (vix_val < 16.0) and not is_benchmark_trending
+        (dtime(11, 15) <= now_t <= dtime(13, 15)) and vix_val < 16.0 and not is_benchmark_trending
     )
     if (
         (vix_val < 13.5 and not is_benchmark_trending) or is_orb_trapped or is_midday_lull
@@ -332,6 +372,12 @@ def is_detector_eligible_for_regime(
       - In Macro Shock: Naked directional breakouts prohibited; defined-risk spreads mandated.
     Returns: (is_eligible, reason_if_suppressed)
     """
+    if getattr(regime, "data_status", "AVAILABLE") != "AVAILABLE" or regime.regime == "UNAVAILABLE":
+        return (
+            False,
+            "Suppressed by Regime Governor: fresh verified volatility data is unavailable.",
+        )
+
     atype = alert_type.upper()
     dir_up = str(direction or "BULLISH").upper()
     is_bull = dir_up in ("BULLISH", "LONG", "BUY")

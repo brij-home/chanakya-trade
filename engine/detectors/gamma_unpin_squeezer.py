@@ -70,9 +70,8 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
         try:
             from market.calendar import is_expiry_day
 
-            # Thursday for NIFTY, Friday for SENSEX
             expected_exchange = "BSE" if canonical_sym == "SENSEX" else "NSE"
-            if not is_expiry_day(canonical_sym, exchange=expected_exchange):
+            if not is_expiry_day(canonical_sym, ref_date=now_dt.date(), exchange=expected_exchange):
                 return []
         except Exception as e_cal:
             logger.debug(f"[gamma_unpin_squeezer] Calendar check skipped: {e_cal}")
@@ -203,7 +202,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
             )
 
             # Defined Risk: Max loss is 50% of entry premium or ₹10 pts
-            opt_sl = round(max(0.50, premium * 0.50), 2)
+            opt_sl = round(max(0.50, premium * 0.65), 2)
             opt_t1 = round(premium * 2.0, 2)  # +100% (2x, scale 50% & SL to breakeven)
             opt_t2 = round(premium * 3.5, 2)  # +250%
             opt_runner = round(premium * 6.0, 2)  # +500%
@@ -218,10 +217,12 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
             conf = min(96, conf)
 
             alert_id = generate_alert_id("0dte-unpin", canonical_sym, variant="bull-squeeze")
+            c_sym = contract_sym or f"{canonical_sym}{strike_p:.0f}CE"
             alerts.append(
                 AutoAlert(
                     alert_id=alert_id,
                     symbol=canonical_sym,
+                    contract_symbol=c_sym,
                     exchange="BFO" if canonical_sym == "SENSEX" else "NFO",
                     segment="FNO_INDEX",
                     alert_type="0DTE_GAMMA_UNPIN_SQUEEZE",
@@ -253,6 +254,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                         "asymmetric_rr": "1:3.0+",
                     },
                     actionable_plan={
+                        "instrument_type": "OPTION",
                         "action": "BUY CE",
                         "contract": contract_sym or f"{canonical_sym}{strike_p:.0f}CE",
                         "strike": strike_p,
@@ -333,7 +335,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                 )
             )
 
-            opt_sl = round(max(0.50, premium * 0.50), 2)
+            opt_sl = round(max(0.50, premium * 0.65), 2)
             opt_t1 = round(premium * 2.0, 2)
             opt_t2 = round(premium * 3.5, 2)
             opt_runner = round(premium * 6.0, 2)
@@ -348,10 +350,12 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
             conf = min(96, conf)
 
             alert_id = generate_alert_id("0dte-unpin", canonical_sym, variant="bear-flush")
+            c_sym = contract_sym or f"{canonical_sym}{strike_p:.0f}PE"
             alerts.append(
                 AutoAlert(
                     alert_id=alert_id,
                     symbol=canonical_sym,
+                    contract_symbol=c_sym,
                     exchange="BFO" if canonical_sym == "SENSEX" else "NFO",
                     segment="FNO_INDEX",
                     alert_type="0DTE_GAMMA_UNPIN_SQUEEZE",
@@ -383,6 +387,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                         "asymmetric_rr": "1:3.0+",
                     },
                     actionable_plan={
+                        "instrument_type": "OPTION",
                         "action": "BUY PE",
                         "contract": contract_sym or f"{canonical_sym}{strike_p:.0f}PE",
                         "strike": strike_p,

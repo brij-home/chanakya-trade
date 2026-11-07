@@ -852,6 +852,7 @@ def test_active_alert_deduplication_and_in_place_upgrade():
         target_level=3650.0,
         stop_loss=3380.0,
         confidence=82,
+        metrics={"rvol": 2.5},
     )
     assert engine.record_alert(early) is True
     assert len(engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")) == 1
@@ -871,6 +872,7 @@ def test_active_alert_deduplication_and_in_place_upgrade():
         target_level=3650.0,
         stop_loss=3390.0,
         confidence=90,
+        metrics={"rvol": 2.5},
     )
     assert engine.record_alert(ignited) is True
     alerts = engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")
@@ -911,6 +913,7 @@ def test_decisive_telegram_formatting_and_one_shot_dispatch(monkeypatch):
         is_live=True,
         environment="LIVE",
         telegram_dispatched=True,
+        telegram_message_id=12345,
     )
     engine._alerts.append(alert)
 
@@ -1216,12 +1219,11 @@ def test_classify_expiry_type():
     assert classify_expiry_type("2026-09-17", symbol="RELIANCE") == "MONTHLY"
     assert classify_expiry_type("2026-09-24", symbol="TCS") == "MONTHLY"
 
-    # Index options: mid-month expiry is WEEKLY, month-end expiry is MONTHLY
-    # 2026-09-17 + 7 days = 2026-09-24 (same month) -> WEEKLY
-    assert classify_expiry_type("2026-09-17", symbol="NIFTY") == "WEEKLY"
-    # 2026-09-24 + 7 days = 2026-10-01 (next month) -> MONTHLY
-    assert classify_expiry_type("2026-09-24", symbol="NIFTY") == "MONTHLY"
-    assert classify_expiry_type("2026-09-24", symbol="BANKNIFTY") == "MONTHLY"
+    # NSE's effective Tuesday schedule makes 15 September a weekly NIFTY expiry
+    # and 29 September the monthly expiry. Thursday 17 September is not listed.
+    assert classify_expiry_type("2026-09-15", symbol="NIFTY") == "WEEKLY"
+    assert classify_expiry_type("2026-09-29", symbol="NIFTY") == "MONTHLY"
+    assert classify_expiry_type("2026-09-29", symbol="BANKNIFTY") == "MONTHLY"
     # Under SEBI regulations (Nov 2024), only NIFTY & SENSEX have weekly options; rest are strictly MONTHLY
     assert classify_expiry_type("2026-09-17", symbol="BANKNIFTY") == "MONTHLY"
     assert classify_expiry_type("2026-09-17", symbol="MIDCPNIFTY") == "MONTHLY"
@@ -2143,19 +2145,15 @@ def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
     assert dixon_spark.alert_type == "INTRADAY_BREAKDOWN_SPARK"
     assert dixon_spark.stage == "IGNITED"
     assert dixon_spark.actionable_plan["action"] in ("SELL_SHORT_OR_BUY_PUT", "BUY_PUT")
-    if dixon_spark.option_premium:
+    if "option_sl" in dixon_spark.actionable_plan:
         opt_sl = float(
-            str(dixon_spark.actionable_plan["stop_loss"]).replace("₹", "").replace(",", "")
+            str(dixon_spark.actionable_plan["option_sl"]).replace("₹", "").replace(",", "")
         )
         opt_entry = float(
-            str(dixon_spark.actionable_plan["recommended_entry"]).replace("₹", "").replace(",", "")
+            str(dixon_spark.actionable_plan["option_entry"]).replace("₹", "").replace(",", "")
         )
         assert opt_sl < opt_entry  # Put premium SL is below entry premium
-        spot_sl = dixon_spark.metrics.get("underlying_sl") or dixon_spark.stop_loss
-        spot_price = dixon_spark.metrics.get("underlying_spot") or dixon_spark.ltp
-        assert spot_sl > spot_price  # Spot SL is above spot price for shorts
-    else:
-        assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for cash shorts
+    assert dixon_spark.stop_loss > dixon_spark.ltp  # Spot SL is above entry for cash shorts
 
 
 def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
@@ -2707,7 +2705,7 @@ def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
         is_live=True,
         environment="LIVE",
         expiry_date="2026-09-24",
-        metrics={"vol_oi_ratio": 5.0, "oi": 25000},
+        metrics={"vol_oi_ratio": 5.0, "oi": 25000, "volume": 125000},
     )
     recorded = engine.record_alert(initial_alert)
     assert recorded is True
@@ -2734,7 +2732,7 @@ def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
         is_live=True,
         environment="LIVE",
         expiry_date="2026-09-24",
-        metrics={"vol_oi_ratio": 15.0, "oi": 30000},
+        metrics={"vol_oi_ratio": 15.0, "oi": 30000, "volume": 450000},
     )
     result = engine.record_alert(alternate_alert)
     assert result is False  # Suppressed
@@ -2831,6 +2829,7 @@ def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
         option_type="CE",
         contract_symbol="HDFCBANK680CE",
         option_premium=24.70,
+        metrics={"volume": 5000000, "oi": 5000000},
         created_at=earlier_str,
         signal_ref="#SIG_HDFCBANK_680CE_11SEP_1000",
     )
@@ -2855,6 +2854,7 @@ def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
         contract_symbol="HDFCBANK680CE",
         option_premium=22.10,
         underlying_spot=693.80,
+        metrics={"volume": 5000000, "oi": 5000000},
         created_at=now_str,
     )
     recorded = engine.record_alert(ignite_alert)
@@ -2905,6 +2905,7 @@ def test_symbol_consolidation_respects_session_date(tmp_path, monkeypatch):
         option_type="CE",
         contract_symbol="HDFCBANK690CE",
         option_premium=20.7,
+        metrics={"volume": 5000000, "oi": 5000000},
         created_at=yesterday_str,
     )
     engine.record_alert(yest_alert)
@@ -2926,6 +2927,7 @@ def test_symbol_consolidation_respects_session_date(tmp_path, monkeypatch):
         strike=680.0,
         option_type="CE",
         contract_symbol="HDFCBANK680CE",
+        metrics={"volume": 5000000, "oi": 5000000},
         option_premium=22.1,
         created_at=now_str,
     )
@@ -2993,6 +2995,11 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
             audited_at="2026-09-10 20:00:00 IST",
         ),
     )
+    monkeypatch.setattr(
+        alert_scrutiny_auditor,
+        "verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "fixture evidence accepted", {}),
+    )
 
     from brokers.base import Quote
 
@@ -3003,9 +3010,20 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
         provider="NSE",
         quality_flags=(),
     )
+    fake_vix = Quote(
+        symbol="NSE:INDIA VIX",
+        last_price=15.0,
+        data_state="LIVE",
+        provider="FYERS",
+        quality_flags=(),
+    )
     monkeypatch.setattr(
         "market.quotes.get_quote",
-        lambda sym: {sym: fake_quote, "TATASTEEL": fake_quote, "RELIANCE": fake_quote},
+        lambda sym: (
+            {sym: fake_vix}
+            if sym == "NSE:INDIA VIX"
+            else {sym: fake_quote, "TATASTEEL": fake_quote, "RELIANCE": fake_quote}
+        ),
     )
     monkeypatch.setattr(
         "market.sentiment.get_market_breadth",
@@ -3044,19 +3062,23 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
     # 2. Swing setup off-market -> MUST BE ACCEPTED
     swing_alert = AutoAlert(
         alert_id="aa-swing-test-offmarket",
-        alert_type="SQUEEZE_BREAKDOWN",
+        alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="TATASTEEL",
-        exchange="NSE",
+        exchange="NFO",
         direction="BEARISH",
         headline="TATASTEEL Swing Breakdown",
         summary="Should be accepted off-market",
         time_horizon="SWING_MID",
-        ltp=150.0,
-        trigger_level=150.0,
-        target_level=140.0,
-        stop_loss=155.0,
-        metrics={"rvol": 2.5},
+        ltp=10.0,
+        trigger_level=10.0,
+        target_level=14.0,
+        stop_loss=8.0,
+        option_type="PE",
+        contract_symbol="TATASTEEL26DEC300PE",
+        metrics={"rvol": 2.5, "volume": 5000000, "oi": 5000000},
+        environment="PAPER",
+        is_live=False,
         created_at=now_str,
     )
     rec_swing = engine.record_alert(swing_alert)
@@ -3096,6 +3118,7 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
         trigger_level=2950.0,
         target_level=3050.0,
         stop_loss=2900.0,
+        metrics={"rvol": 2.5},
         created_at=now_str,
     )
     rec1 = engine.record_alert(alert1)
@@ -3115,6 +3138,7 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
         trigger_level=2955.0,
         target_level=3050.0,
         stop_loss=2905.0,
+        metrics={"rvol": 2.5},
         created_at=now_str,
     )
     rec2 = engine.record_alert(alert2)
@@ -3153,6 +3177,7 @@ def test_gamma_blast_and_options_momentum_unified_consolidation(tmp_path, monkey
         option_type="CE",
         contract_symbol="HDFCBANK680CE",
         option_premium=22.1,
+        metrics={"volume": 5000000, "oi": 5000000},
         created_at=now_str,
     )
     engine.record_alert(optmom)
@@ -3175,6 +3200,7 @@ def test_gamma_blast_and_options_momentum_unified_consolidation(tmp_path, monkey
         option_type="CE",
         contract_symbol="HDFCBANK690CE",
         option_premium=17.5,
+        metrics={"volume": 5000000, "oi": 5000000},
         created_at=now_str,
     )
     rec_gamma = engine.record_alert(gamma)
@@ -3427,7 +3453,12 @@ def test_record_alert_adhoc_cli_suppresses_telegram(tmp_path, monkeypatch):
         confidence=90,
         is_live=True,
         environment="LIVE",
-        metrics={"rollover_series": "NEXT_MONTH", "is_next_month_routed": True},
+        metrics={
+            "rollover_series": "NEXT_MONTH",
+            "is_next_month_routed": True,
+            "volume": 500000,
+            "oi": 500000,
+        },
     )
 
     # In market hours
@@ -3759,6 +3790,7 @@ def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegr
         contract_symbol="NIFTY23000PE",
         confidence=90,
         telegram_dispatched=True,
+        telegram_message_id=54321,
         is_live=True,
         environment="LIVE",
     )
@@ -3925,11 +3957,17 @@ def test_commodity_root_canonicalization(monkeypatch, tmp_path):
         "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
         lambda alert: (True, "", {}),
     )
-    from unittest.mock import MagicMock
+    from engine.alert_scrutiny import ScrutinyResult
 
     monkeypatch.setattr(
         "engine.alert_scrutiny.alert_scrutiny_auditor.scrutinize_alert",
-        lambda *a, **k: MagicMock(status="APPROVED", score=85, trap_risk_warning=None),
+        lambda *a, **k: ScrutinyResult(
+            status="APPROVED",
+            score=85,
+            logic_confirmation="Valid commodity breakout",
+            trap_risk_warning="",
+            actionable_guidance="",
+        ),
     )
 
     engine = AutoAlertEngine(max_buffer=20)
@@ -4590,6 +4628,7 @@ def test_auto_alert_t0_5_milestone_latch_and_deduplication(monkeypatch):
             is_live=True,
             environment="LIVE",
             telegram_dispatched=True,
+            telegram_message_id=98765,
         )
 
         # First dispatch of T0_5 should succeed

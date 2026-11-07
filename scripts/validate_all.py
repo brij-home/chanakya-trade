@@ -134,6 +134,11 @@ def main():
         if args.fast or (not args.full and not args.backend_only):
             # Fast mode: Run core smoke test matrix in parallel
             core_test_files = (
+                "tests/test_verified_market_safety.py "
+                "tests/test_modes.py "
+                "tests/test_csrf_and_security.py "
+                "tests/test_risk_limits.py "
+                "tests/test_p1_p2_fixes_regression.py "
                 "tests/test_execution_gate.py "
                 "tests/test_risk_debate.py "
                 "tests/test_smart_funnel.py "

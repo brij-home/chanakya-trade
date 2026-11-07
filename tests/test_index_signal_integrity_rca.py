@@ -67,7 +67,7 @@ def _make_dummy_5m_ohlcv(
             }
         )
     df = pd.DataFrame(records)
-    df.set_index("datetime", inplace=True)
+    df = df.set_index("datetime")
     return df
 
 
@@ -422,7 +422,12 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="NIFTY",
-        exchange="NSE",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        contract_symbol="NIFTY26NOV25000PE",
+        expiry_date="2026-11-24",
+        option_type="PE",
+        strike=25000,
         direction="BEARISH",
         headline="Nifty Trade",
         summary="Active Nifty PE",
@@ -431,18 +436,23 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
         target_level=240.0,
         stop_loss=140.0,
         confidence=82,
-        metrics={"vol_oi_ratio": 1.5, "delta": -0.55},
+        metrics={"vol_oi_ratio": 1.5, "delta": -0.55, "volume": 12000, "oi": 45000},
         created_at=(datetime.now(IST) - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S IST"),
     )
     engine._alerts.append(active_nifty)
 
     # 1. Incoming high-quality BANKNIFTY alert (confidence=84 >= 80%, R:R = (950-730)/(730-620) = 2.0 >= 2.0)
     incoming_bn = AutoAlert(
-        alert_id="aa-index-put-setup-banknifty-pe-54800-20261007",
+        alert_id="aa-index-put-setup-banknifty-pe-54800-20261101",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="BANKNIFTY",
-        exchange="NSE",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        contract_symbol="BANKNIFTY26NOV54800PE",
+        expiry_date="2026-11-24",
+        option_type="PE",
+        strike=54800,
         direction="BEARISH",
         headline="BankNifty Trade",
         summary="Incoming BankNifty PE",
@@ -451,7 +461,13 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
         target_level=950.0,
         stop_loss=620.0,
         confidence=84,
-        metrics={"vol_oi_ratio": 1.6, "delta": -0.55},
+        metrics={
+            "vol_oi_ratio": 1.6,
+            "delta": -0.55,
+            "volume": 12000,
+            "oi": 45000,
+            "rvol": 2.6,
+        },
     )
 
     accepted_bn = engine.record_alert(incoming_bn)
@@ -859,7 +875,7 @@ def test_rca_downside_roc_acceleration_vetoes_call(monkeypatch):
             {"datetime": t, "open": o, "high": o + 5, "low": c - 5, "close": c, "volume": 25000}
         )
     df_down = pd.DataFrame(records)
-    df_down.set_index("datetime", inplace=True)
+    df_down = df_down.set_index("datetime")
 
     # Call detector with accelerating downward momentum
     alerts = detect_index_call_setup(

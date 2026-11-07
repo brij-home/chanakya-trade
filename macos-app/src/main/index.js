@@ -214,7 +214,7 @@ ipcMain.handle('sidecar-request', async (_, request = {}) => {
   if (!_readyPort) throw new Error('API is not ready')
   const allowedHeaders = {}
   for (const [key, value] of Object.entries(request.headers || {})) {
-    if (['content-type', 'x-csrf-token'].includes(String(key).toLowerCase())) allowedHeaders[key] = String(value)
+    if (['content-type', 'x-csrf-token', 'x-sidecar-token', 'authorization'].includes(String(key).toLowerCase())) allowedHeaders[key] = String(value)
   }
   const body = request.body === undefined || method === 'GET' ? undefined : JSON.stringify(request.body)
   if (body && Buffer.byteLength(body, 'utf8') > 1_000_000) throw new Error('Request body exceeds 1 MB limit')

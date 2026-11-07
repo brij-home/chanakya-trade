@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import webbrowser
 from typing import Optional
 
@@ -182,11 +183,26 @@ def unregister_broker(key: str) -> None:
         _exec_key = _primary_key
 
 
+_last_auto_restore_attempt: float = 0.0
+_AUTO_RESTORE_COOLDOWN_SEC: float = 10.0
+
+
 def _try_auto_restore_sessions() -> None:
     """Attempt to restore persisted broker sessions (Fyers, mStock, Shoonya, etc.)."""
-    global _brokers, _primary_key, _data_key, _exec_key
+    global _brokers, _primary_key, _data_key, _exec_key, _last_auto_restore_attempt
     if os.environ.get("CHANAKYA_TESTING") == "1":
         return
+
+    now = time.time()
+    if not _brokers and (now - _last_auto_restore_attempt) < _AUTO_RESTORE_COOLDOWN_SEC:
+        return
+    _last_auto_restore_attempt = now
+
+    is_testing = bool(
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    )
 
     # 0. Fyers (Primary Institutional Data & Execution Broker)
     if "fyers" not in _brokers:
@@ -199,11 +215,6 @@ def _try_auto_restore_sessions() -> None:
                     is_first = not _brokers
                     register_broker(
                         "fyers", b, primary=is_first, role="both" if is_first else "data"
-                    )
-                    is_testing = bool(
-                        os.environ.get("CHANAKYA_TESTING") == "1"
-                        or "PYTEST_CURRENT_TEST" in os.environ
-                        or os.environ.get("DEPLOY_MODE") == "test"
                     )
                     if not is_testing:
                         try:
@@ -374,11 +385,16 @@ def get_data_broker_key() -> str:
 
 
 def get_execution_broker() -> BrokerAPI:
-    """Return the current execution broker. Falls back to primary if unset."""
+    """Return the current execution broker. Rejects data-only primary fallback (BRK-17)."""
     if not _brokers:
         _try_auto_restore_sessions()
     if _exec_key and _exec_key in _brokers:
         return _brokers[_exec_key]
+    # Explicit role validation: if primary was registered as data-only, refuse execution fallback
+    if _primary_key and _data_key == _primary_key and _exec_key is None:
+        raise RuntimeError(
+            f"Execution broker not available: Primary broker '{_primary_key}' is configured for role 'data' only."
+        )
     return get_broker()
 
 
@@ -902,7 +918,7 @@ def _recreate_broker_from_token(key: str):
 
             if TOKEN_FILE.exists():
                 b = StoxkartAPI()
-                if b.is_authenticated:
+                if b.is_authenticated():
                     return b
         elif key == "shoonya":
             from brokers.shoonya import ShoonyaAPI, TOKEN_FILE

@@ -19,13 +19,16 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import date, datetime, time as dtime, timedelta
+from importlib import import_module
 import logging
+import math
 import os
 import threading
 import time
 from typing import Any, Callable, Optional, Set
 
 from engine.ring_buffer import RollingTickBuffer
+from config.discovery_policy import get_discovery_policy
 
 logger = logging.getLogger("market.fyers_tbt")
 
@@ -33,22 +36,41 @@ logger = logging.getLogger("market.fyers_tbt")
 # Prevents 80+ repeated 'fyers_apiv3 not installed' P2 incidents per session.
 # RCA: INC-001 2026-10-30 -- 81 repetitions masking real P2s in OPS deck.
 _FYERS_APIV3_AVAILABLE: bool | None = None
+_FYERS_SDK_CHECK_LOCK = threading.Lock()
+TBT_LIVE_DEPTH_MAX_AGE_SECONDS = 15.0
+
+
+def is_fresh_tbt_depth(snapshot: dict[str, Any], *, now: Optional[float] = None) -> bool:
+    """Only a recent local packet receipt can qualify a depth snapshot as live."""
+    if snapshot.get("status") != "LIVE":
+        return False
+    try:
+        received_at = float(snapshot["received_at"])
+        age = (time.time() if now is None else now) - received_at
+    except (KeyError, TypeError, ValueError):
+        return False
+    return math.isfinite(age) and 0 <= age <= TBT_LIVE_DEPTH_MAX_AGE_SECONDS
 
 
 def _is_fyers_sdk_available() -> bool:
     """Check fyers_apiv3 SDK installation. Result cached after first call."""
     global _FYERS_APIV3_AVAILABLE
-    if _FYERS_APIV3_AVAILABLE is None:
+    with _FYERS_SDK_CHECK_LOCK:
+        if _FYERS_APIV3_AVAILABLE is not None:
+            return _FYERS_APIV3_AVAILABLE
         try:
-            import fyers_apiv3  # noqa: F401
-
+            # A top-level package import does not check WebSocket dependencies.
+            module = import_module("fyers_apiv3.FyersWebsocket.tbt_ws")
+            if not callable(getattr(module, "FyersTbtSocket", None)):
+                raise ImportError("FyersTbtSocket is unavailable")
             _FYERS_APIV3_AVAILABLE = True
-        except ImportError:
+        except Exception as exc:
             _FYERS_APIV3_AVAILABLE = False
             logger.warning(
-                "[TbtManager] fyers_apiv3 SDK not installed -- "
+                "[TbtManager] Fyers TBT transport dependencies unavailable (%s) -- "
                 "TBT 50-level depth WebSocket PERMANENTLY UNAVAILABLE this session. "
-                "Install with: pip install fyers-apiv3"
+                "Qualify the optional Fyers dependency profile before enabling TBT.",
+                exc,
             )
     return _FYERS_APIV3_AVAILABLE
 
@@ -56,41 +78,44 @@ def _is_fyers_sdk_available() -> bool:
 MAX_TBT_SYMBOLS = 15
 RESERVED_ANCHOR_SLOTS = 3  # Slots 0..2: NIFTY, BANKNIFTY, MIDCPNIFTY near-month futures
 MAX_DYNAMIC_SLOTS = 12  # Slots 3..14: 100% elastic demand-driven slots
-MAX_IN_FLIGHT_SLOTS = 4  # Dynamic active execution positions & bracket orders
 MAX_CORE_GRID_SLOTS = 8  # 3 anchor futures + up to 5 focused asset contracts
 MAX_TODAYS_EXPIRY_SLOTS = 4
 MAX_SCOUT_SLOTS = 12  # Elastic scout capacity: utilizes all unallocated dynamic slots
 MIN_SCOUT_DWELL_SECONDS = 10.0  # Anti-thrashing minimum dwell time before idle eviction
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=512)
+def _resolve_index_future_memo(
+    index_name: str, ref_day: Optional[tuple[int, int, int]] = None
+) -> str:
+    from market.contract_selection import get_listed_contracts
+    from config.constants import IST
+
+    now = datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    if ref_day is not None:
+        now = now.replace(year=ref_day[0], month=ref_day[1], day=ref_day[2])
+    futures = [
+        c
+        for c in get_listed_contracts(index_name, as_of=now)
+        if c.option_type == "FUT" and c.symbol.startswith("NSE:")
+    ]
+    return futures[0].symbol if futures else ""
+
+
 def _resolve_index_future(index_name: str, ref_date: Optional[date] = None) -> str:
     """Resolve spot index name to the active near-month tradable Index Future."""
-    now = datetime.now()
-    cur_date = ref_date or now.date()
+    ref_day = (ref_date.year, ref_date.month, ref_date.day) if ref_date is not None else None
+    return _resolve_index_future_memo(index_name, ref_day)
 
-    from market.symbol_master import resolve_active_future
 
-    fut = resolve_active_future(index_name, ref_date=cur_date)
-    if fut:
-        return fut
-
-    from market.calendar import get_active_derivative_expiry
-
-    name = index_name.upper().replace(" ", "").replace("-INDEX", "")
-    if name in ("NIFTY50", "NIFTY_50"):
-        name = "NIFTY"
-    elif name == "NIFTYBANK":
-        name = "BANKNIFTY"
-    elif name in ("NIFTYFINSERVICE", "FIN_NIFTY"):
-        name = "FINNIFTY"
-    elif name in ("NIFTYMIDCAP100", "NIFTYMIDSELECT", "MIDCAP"):
-        name = "MIDCPNIFTY"
-
-    prefix = "BSE" if name in ("SENSEX", "BANKEX") else "NSE"
-    exp_date = get_active_derivative_expiry(
-        name, is_future=True, ref_date=cur_date, ref_time=now.time()
-    )
-    return f"{prefix}:{name}{exp_date.strftime('%y%b').upper()}FUT"
+@lru_cache(maxsize=512)
+def _resolve_stock_future_memo(clean: str, ref_day: Optional[tuple[int, int, int]] = None) -> str:
+    return _resolve_index_future_memo(clean, ref_day)
 
 
 def resolve_stock_future(symbol: str, ref_date: Optional[date] = None) -> str:
@@ -99,49 +124,16 @@ def resolve_stock_future(symbol: str, ref_date: Optional[date] = None) -> str:
     E.g. 'RELIANCE', 'NSE:RELIANCE-EQ', 'BAJFINANCE' -> 'NSE:RELIANCE26NOVFUT'
     Returns empty string if not an eligible F&O stock or resolution fails.
     """
-    if not symbol or not isinstance(symbol, str):
+    from config.discovery_policy import allows_context_symbol
+    from market.instruments import canonical_symbol
+
+    if not isinstance(symbol, str) or not symbol.strip():
         return ""
-    clean = (
-        symbol.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("-EQ", "")
-        .replace(":EQ", "")
-        .strip()
-    )
-    if not clean:
+    clean = canonical_symbol(symbol)
+    if not allows_context_symbol(f"NSE:{clean}"):
         return ""
-
-    # Corporate Action & Demerger Alias Mapping: Tata Motors F&O derivatives trade under TMPV
-    if clean == "TATAMOTORS":
-        clean = "TMPV"
-
-    from market.instruments import STANDARD_LOT_SIZES
-
-    if clean not in STANDARD_LOT_SIZES:
-        return ""
-
-    now = datetime.now()
-    cur_date = ref_date or now.date()
-
-    from market.symbol_master import resolve_active_future
-
-    fut = resolve_active_future(clean, ref_date=cur_date)
-    if fut:
-        return fut
-
-    from market.calendar import get_active_derivative_expiry
-
-    try:
-        exp_date = get_active_derivative_expiry(
-            clean, is_future=True, ref_date=cur_date, ref_time=now.time()
-        )
-        return f"NSE:{clean}{exp_date.strftime('%y%b').upper()}FUT"
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.fyers_tbt_manager] Stock future resolution failed for {clean}: {e_suppressed}"
-        )
-        return ""
+    ref_day = (ref_date.year, ref_date.month, ref_date.day) if ref_date is not None else None
+    return _resolve_stock_future_memo(clean, ref_day)
 
 
 def _tbt_symbol_priority(
@@ -196,7 +188,7 @@ def _tbt_symbol_priority(
             return 62 if now_t < dtime(17, 0) else 5
 
     # ── Primary Focus Dynamic Elevation ────────────────────────────────
-    if primary_focus:
+    if primary_focus and not get_discovery_policy().fno_only:
         pf = (
             primary_focus.upper().replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip()
         )
@@ -349,6 +341,11 @@ def get_default_core_grid(
     Guarantees that index options or MCX commodities are immediately available on TBT.
     Supports dynamic primary_focus to revolve multi-strike ATM/OTM options for an active index.
     """
+    if get_discovery_policy().fno_only:
+        if session == "AUTO":
+            session = get_market_session()
+        if session != "EQUITY_NFO":
+            return [], []
     if session == "AUTO":
         from market.instruments import STANDARD_LOT_SIZES
 
@@ -368,128 +365,46 @@ def get_default_core_grid(
         else:
             session = get_market_session()
 
-    from market.calendar import get_active_derivative_expiry
-    from brokers.fyers import format_fyers_option_symbol
-    from market.instruments import STANDARD_LOT_SIZES
-    from market.quotes import get_ltp
+    from config.constants import IST
 
-    now = datetime.now()
-    cur_time = ref_time or now.time()
+    now = datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    if ref_time is not None:
+        now = now.replace(hour=ref_time.hour, minute=ref_time.minute, second=ref_time.second)
 
     if session in ("EQUITY_NFO", "OFF_MARKET"):
-        # Daytime: Primary Index Futures in user's priority order:
-        # NIFTY, BANKNIFTY, MIDCPNIFTY (SENSEX & FINNIFTY sampled on need-basis via Scout)
-        nifty_fut = _resolve_index_future("NIFTY", ref_date=now.date())
-        banknifty_fut = _resolve_index_future("BANKNIFTY", ref_date=now.date())
-        midcp_fut = _resolve_index_future("MIDCPNIFTY", ref_date=now.date())
+        from market.contract_selection import get_subscription_option_grid
+        from market.instruments import canonical_symbol
 
-        core = [nifty_fut, banknifty_fut, midcp_fut]
-
-        focus = (primary_focus or "").upper() if primary_focus else None
-
-        if focus == "MIDCPNIFTY":
-            m_exp = get_active_derivative_expiry(
-                "MIDCPNIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
+        core = [
+            s
+            for s in (
+                _resolve_index_future("NIFTY", ref_date=now.date()),
+                _resolve_index_future("BANKNIFTY", ref_date=now.date()),
+                _resolve_index_future("MIDCPNIFTY", ref_date=now.date()),
             )
-            m_spot = get_ltp("NSE:MIDCPNIFTY-INDEX") or 13200.0
-            m_atm = int(round(m_spot / 25.0) * 25)
-            core.extend(
-                [
-                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm, "CE"),
-                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm, "PE"),
-                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm + 25, "CE"),
-                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm - 25, "PE"),
-                ]
-            )
-        elif focus == "BANKNIFTY":
-            bn_exp = get_active_derivative_expiry(
-                "BANKNIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
-            )
-            bn_spot = get_ltp("NSE:NIFTYBANK-INDEX") or 52000.0
-            bn_atm = int(round(bn_spot / 100.0) * 100)
-            core.extend(
-                [
-                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm, "CE"),
-                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm, "PE"),
-                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm + 100, "CE"),
-                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm - 100, "PE"),
-                ]
-            )
-        elif focus == "SENSEX":
-            s_fut = _resolve_index_future("SENSEX", ref_date=now.date())
-            s_exp = get_active_derivative_expiry(
-                "SENSEX", is_future=False, ref_date=now.date(), ref_time=cur_time
-            )
-            s_spot = get_ltp("BSE:SENSEX-INDEX") or 81500.0
-            s_atm = int(round(s_spot / 100.0) * 100)
-            core.extend(
-                [
-                    s_fut,
-                    format_fyers_option_symbol("SENSEX", s_exp, s_atm, "CE"),
-                    format_fyers_option_symbol("SENSEX", s_exp, s_atm, "PE"),
-                    format_fyers_option_symbol("SENSEX", s_exp, s_atm + 100, "CE"),
-                    format_fyers_option_symbol("SENSEX", s_exp, s_atm - 100, "PE"),
-                ]
-            )
-        elif focus and (
-            focus in STANDARD_LOT_SIZES
-            or focus.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip()
-            in STANDARD_LOT_SIZES
-        ):
-            clean_stk = focus.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip()
-            stk_fut = resolve_stock_future(clean_stk, ref_date=now.date())
-            if stk_fut and stk_fut not in core:
-                core.insert(0, stk_fut)
-            stk_exp = get_active_derivative_expiry(
-                clean_stk, is_future=False, ref_date=now.date(), ref_time=cur_time
-            )
-            stk_spot = (
-                get_ltp(f"NSE:{clean_stk}-EQ")
-                or get_ltp(clean_stk)
-                or (get_ltp(stk_fut) if stk_fut else None)
-                or 1000.0
-            )
-            from engine.strike_revolver import get_strike_step_for_symbol
-
-            stk_step = float(get_strike_step_for_symbol(clean_stk, spot=stk_spot))
-            stk_atm = round(round(stk_spot / stk_step) * stk_step, 2)
-            core.extend(
-                [
-                    format_fyers_option_symbol(clean_stk, stk_exp, stk_atm, "CE"),
-                    format_fyers_option_symbol(clean_stk, stk_exp, stk_atm, "PE"),
-                    format_fyers_option_symbol(
-                        clean_stk, stk_exp, round(stk_atm + stk_step, 2), "CE"
-                    ),
-                    format_fyers_option_symbol(
-                        clean_stk, stk_exp, round(stk_atm - stk_step, 2), "PE"
-                    ),
-                ]
-            )
-        elif focus == "NIFTY":
-            n_exp = get_active_derivative_expiry(
-                "NIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
-            )
-            n_spot = get_ltp("NSE:NIFTY50-INDEX") or 25000.0
-            n_atm = int(round(n_spot / 50.0) * 50)
-            core.extend(
-                [
-                    format_fyers_option_symbol("NIFTY", n_exp, n_atm, "CE"),
-                    format_fyers_option_symbol("NIFTY", n_exp, n_atm, "PE"),
-                    format_fyers_option_symbol("NIFTY", n_exp, n_atm + 50, "CE"),
-                    format_fyers_option_symbol("NIFTY", n_exp, n_atm - 50, "PE"),
-                ]
-            )
-        else:
-            # Option A (Pure 3-Anchor + 12 Elastic Dynamic Slots):
-            # When focus is None, core strictly reserves the 3 benchmark futures:
-            # [NIFTY FUT, BANKNIFTY FUT, MIDCPNIFTY FUT].
-            # All remaining 12 slots are dynamic on a need basis for in-flight trades,
-            # JIT alert microstructure scrutiny, and scanner radar candidates.
-            pass
-
-        todays_exp: list[str] = []
-        return core[:MAX_CORE_GRID_SLOTS], todays_exp
-
+            if s
+        ]
+        focus = canonical_symbol(primary_focus or "")
+        if focus:
+            focused_future = _resolve_index_future(focus, ref_date=now.date())
+            if focused_future and focused_future not in core:
+                core.append(focused_future)
+            # The Versova TBT transport does not support BSE. BSE contracts stay
+            # on the separately managed Data Socket/depth path.
+            options = [
+                s
+                for s in get_subscription_option_grid(
+                    focus,
+                    strikes_per_side=1,
+                    max_expiries=1,
+                    as_of=now if ref_time is not None else None,
+                )
+                if s.startswith("NSE:")
+            ]
+            core.extend(options)
+        return list(dict.fromkeys(core)), []
     else:
         # Evening (15:30 - 23:30 IST): MCX Commodities & Currency CDS
         from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
@@ -570,6 +485,7 @@ class TbtSocketWorker:
         self.status: str = "DISCONNECTED"  # DISCONNECTED, CONNECTING, CONNECTED, DEGRADED_429
         self.subscribed: set[str] = set()
         self.desired: list[str] = []
+        self._channel_symbols: dict[str, set[str]] = {"1": set(), "2": set(), "3": set()}
         self.last_connected_at: float = 0.0
         self.last_packet_at: float = 0.0
         self.degraded_until: float = 0.0
@@ -606,6 +522,7 @@ class TbtSocketWorker:
             self.ws = FyersTbtSocket(
                 access_token=token,
                 on_depth_update=self._handle_depth,
+                on_error_message=self._on_server_error,
                 on_connect=self._on_connect,
                 on_open=self._on_connect,
                 on_close=self._on_close,
@@ -643,9 +560,19 @@ class TbtSocketWorker:
         self.sync()
         self._on_status(self.worker_id, "CONNECTED")
 
+    def _on_server_error(self, message: str) -> None:
+        logger.warning(f"[TbtWorker-{self.worker_id}] Fyers server error: {message}")
+        if "symbol count exceeds limit" in str(message).lower():
+            logger.info(
+                f"[TbtWorker-{self.worker_id}] Resetting channels after server symbol limit warning..."
+            )
+            with self._lock:
+                self._channel_symbols = {"1": set(), "2": set(), "3": set()}
+
     def _on_close(self, *args, **kwargs) -> None:
         with self._lock:
             self.connected = False
+            self._channel_symbols = {"1": set(), "2": set(), "3": set()}
             if self.status != "DEGRADED_429":
                 self.status = "DISCONNECTED"
         logger.info(f"[TbtWorker-{self.worker_id}] Disconnected")
@@ -698,58 +625,68 @@ class TbtSocketWorker:
         with self._lock:
             if not self.connected or not self.ws:
                 return
-            desired_list = list(self.desired[:5])
+            desired_list = [s for s in self.desired[:MAX_TBT_SYMBOLS] if is_tbt_eligible_symbol(s)]
             desired_set = set(desired_list)
-            to_remove = self.subscribed - desired_set
-            to_add = desired_set - self.subscribed
 
-            to_remove_tbt: set[str] = set()
-            if to_remove:
-                self.subscribed.difference_update(to_remove)
-                to_remove_tbt = {s for s in to_remove if is_tbt_eligible_symbol(s)}
-                if to_remove_tbt:
+            try:
+                from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
+            except ImportError:
+                return
+
+            # Deterministic slot-to-channel partitioning:
+            # Channel 1: slots 0..4 (max 5)
+            # Channel 2: slots 5..9 (max 5)
+            # Channel 3: slots 10..14 (max 5)
+            for ch_idx in range(3):
+                ch = str(ch_idx + 1)
+                target_syms = set(desired_list[ch_idx * 5 : (ch_idx + 1) * 5])
+                current_syms = set(self._channel_symbols.get(ch, set()))
+
+                to_unsub = current_syms - target_syms
+                if to_unsub:
                     try:
-                        from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
-
-                        for ch in ("1", "2", "3"):
-                            self.ws.unsubscribe(
-                                symbol_tickers=set(to_remove_tbt),
-                                channelNo=ch,
-                                mode=SubscriptionModes.DEPTH,
-                            )
+                        self.ws.unsubscribe(
+                            symbol_tickers=set(to_unsub),
+                            channelNo=ch,
+                            mode=SubscriptionModes.DEPTH,
+                        )
                         logger.info(
-                            f"[TbtWorker-{self.worker_id}] Unsubscribed {len(to_remove_tbt)} symbols: {to_remove_tbt}"
+                            f"[TbtWorker-{self.worker_id}] Unsubscribed {len(to_unsub)} symbols from ch {ch}: {to_unsub}"
                         )
                     except Exception as e:
-                        logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe failed: {e}")
+                        logger.debug(
+                            f"[TbtWorker-{self.worker_id}] Unsubscribe failed on ch {ch}: {e}"
+                        )
 
-            to_add_tbt: list[str] = []
-            if to_add:
-                self.subscribed.update(to_add)
-                to_add_tbt = [s for s in desired_list if s in to_add and is_tbt_eligible_symbol(s)]
-                if to_add_tbt:
+                to_sub = target_syms - current_syms
+                if to_sub:
                     try:
-                        from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
-
-                        for i in range(0, len(to_add_tbt), 5):
-                            ch = str((i // 5) + 1)
-                            chunk = to_add_tbt[i : i + 5]
-                            self.ws.subscribe(
-                                symbol_tickers=set(chunk),
-                                channelNo=ch,
-                                mode=SubscriptionModes.DEPTH,
-                            )
+                        self.ws.subscribe(
+                            symbol_tickers=set(to_sub),
+                            channelNo=ch,
+                            mode=SubscriptionModes.DEPTH,
+                        )
                         logger.info(
-                            f"[TbtWorker-{self.worker_id}] Subscribed to {len(to_add_tbt)} symbols across channels: {to_add_tbt}"
+                            f"[TbtWorker-{self.worker_id}] Subscribed {len(to_sub)} symbols to ch {ch}: {to_sub}"
                         )
                     except Exception as e:
-                        logger.debug(f"[TbtWorker-{self.worker_id}] Subscribe failed: {e}")
+                        logger.debug(
+                            f"[TbtWorker-{self.worker_id}] Subscribe failed on ch {ch}: {e}"
+                        )
+
+                self._channel_symbols[ch] = target_syms
+
+            self.subscribed = desired_set
 
             if hasattr(self.ws, "switchChannel") and self.subscribed:
                 try:
-                    num_channels = min(3, max(1, (len(self.subscribed) + 4) // 5))
-                    active_channels = set(str(i) for i in range(1, num_channels + 1))
-                    self.ws.switchChannel(active_channels, set())
+                    active_channels = {
+                        ch for ch in ("1", "2", "3") if self._channel_symbols.get(ch)
+                    }
+                    pause_channels = {"1", "2", "3"} - active_channels
+                    if not active_channels:
+                        active_channels = {"1"}
+                    self.ws.switchChannel(active_channels, pause_channels)
                 except Exception as e:
                     logger.debug(f"[TbtWorker-{self.worker_id}] switchChannel failed: {e}")
 
@@ -765,11 +702,15 @@ class TbtSocketWorker:
                     try:
                         from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
 
-                        self.ws.unsubscribe(
-                            symbol_tickers=set(to_remove_tbt),
-                            channelNo="1",
-                            mode=SubscriptionModes.DEPTH,
-                        )
+                        for ch, syms in self._channel_symbols.items():
+                            in_ch = syms.intersection(to_remove_tbt)
+                            if in_ch:
+                                syms.difference_update(in_ch)
+                                self.ws.unsubscribe(
+                                    symbol_tickers=set(in_ch),
+                                    channelNo=ch,
+                                    mode=SubscriptionModes.DEPTH,
+                                )
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe error: {e}")
 
@@ -1025,7 +966,9 @@ class FyersTbtManager:
 
         # Autonomous Packet Silence Watchdog Sentinel
         self._last_packet_time: float = 0.0
-        self._silence_watchdog_threshold: float = 15.0  # seconds
+        self._silence_watchdog_threshold: float = float(
+            os.environ.get("FYERS_TBT_SILENCE_WATCHDOG_THRESHOLD", "30.0")
+        )  # seconds
         self._reconnect_count: int = 0
 
         # Institutional Wall Durability & Spoof History Tracker
@@ -1206,6 +1149,17 @@ class FyersTbtManager:
                     if free_cap > 0 or expired_ttl:
                         self.sync_subscriptions()
 
+                # 2d. Reconnect quiescent/disconnected workers if past backoff
+                if getattr(self, "_multi_socket_entitled", True) and self._workers:
+                    now_g = time.time()
+                    for w in self._workers:
+                        if (
+                            not w.connected
+                            and w.status == "DISCONNECTED"
+                            and now_g >= w.degraded_until
+                        ):
+                            w.connect()
+
                 # 3. In-flight position cleanup
                 if self._in_flight:
                     self.sync_in_flight_with_positions()
@@ -1312,6 +1266,8 @@ class FyersTbtManager:
 
         # Helper thread to connect workers 1 and 2 with staggered delay
         def _staggered_worker_connect():
+            if not getattr(self, "_multi_socket_entitled", True):
+                return
             if len(self._workers) > 1 and not self._stop_event.is_set():
                 time.sleep(5.0)
                 if self._workers[0].status == "DEGRADED_429":
@@ -1390,20 +1346,21 @@ class FyersTbtManager:
                 from market.quotes import _QUOTE_CACHE, _quote_cache_lock
                 from brokers.base import Quote
 
-                ltp_val = float(parsed.get("ltp") or 0.0)
-                if ltp_val > 0:
+                ltp_raw = parsed.get("ltp")
+                if ltp_raw is not None and float(ltp_raw) > 0:
+                    ltp_val = float(ltp_raw)
                     bids_list = parsed.get("bids", [])
                     asks_list = parsed.get("asks", [])
-                    top_b = float(bids_list[0]["price"]) if bids_list else ltp_val
-                    top_a = float(asks_list[0]["price"]) if asks_list else ltp_val
+                    top_b = float(bids_list[0]["price"]) if bids_list else None
+                    top_a = float(asks_list[0]["price"]) if asks_list else None
                     q_obj = Quote(
                         symbol=symbol,
                         last_price=ltp_val,
-                        open=ltp_val,
-                        high=ltp_val,
-                        low=ltp_val,
-                        close=ltp_val,
-                        volume=int(parsed.get("tbq", 0) + parsed.get("tsq", 0)),
+                        open=None,
+                        high=None,
+                        low=None,
+                        close=None,
+                        volume=0,
                         bid=top_b,
                         ask=top_a,
                         source="STREAM",
@@ -1499,7 +1456,18 @@ class FyersTbtManager:
         avg_bid_q = (tot_bid_q / max(1, len(bids))) if bids else 0
         avg_ask_q = (tot_ask_q / max(1, len(asks))) if asks else 0
 
-        ltp = bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0)
+        # Read genuine trade price if present; never assume top bid is last-traded price
+        explicit_ltp = (
+            getattr(depth, "ltp", None)
+            or getattr(depth, "last_price", None)
+            or getattr(depth, "last_traded_price", None)
+        )
+        ltp = float(explicit_ltp) if explicit_ltp is not None and float(explicit_ltp) > 0 else None
+        ref_px = (
+            ltp
+            if ltp is not None
+            else (bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0))
+        )
 
         def _classify_wall(
             row: dict[str, Any], tot_q: int, avg_q: float
@@ -1515,7 +1483,9 @@ class FyersTbtManager:
             book_share_pct = round((qty / max(1, tot_q)) * 100, 2)
             multiple_of_avg = round(qty / max(1.0, avg_q), 2)
             notional = round(qty * price, 2)
-            dist_pct = round(abs(price - ltp) / max(0.01, ltp) * 100, 3) if ltp > 0 else 0.0
+            dist_pct = (
+                round(abs(price - ref_px) / max(0.01, ref_px) * 100, 3) if ref_px > 0 else 0.0
+            )
 
             # Must satisfy minimum volume or 2.5x multiple with at least 8% book share
             if (qty < max(min_wall_qty, avg_q * 2.5)) and book_share_pct < 8.0:
@@ -1576,20 +1546,22 @@ class FyersTbtManager:
                 4,
             )
             if bids and asks
-            else ltp
+            else (ltp or ref_px)
         )
 
         # Update O(1) rolling tick buffer for micro-price tracking
         buf = self._tick_buffers.setdefault(symbol, RollingTickBuffer(capacity=1000))
-        if micro_price > 0:
+        if micro_price and micro_price > 0:
             buf.append(micro_price, max(1, tbq + tsq))
 
-        rolling_vwap = round(buf.vwap, 4) if buf.count > 0 else micro_price
+        rolling_vwap = round(buf.vwap, 4) if buf.count > 0 else (micro_price or 0.0)
         rolling_vol = round(buf.std_dev, 4) if buf.count > 1 else 0.0
 
         # Micro-Price Skew in Basis Points (bps)
         micro_price_skew_bps = (
-            round(((micro_price - ltp) / max(0.01, ltp)) * 10000.0, 2) if ltp > 0 else 0.0
+            round(((micro_price - ref_px) / max(0.01, ref_px)) * 10000.0, 2)
+            if ref_px > 0 and micro_price is not None
+            else 0.0
         )
         flow_posture = (
             "BULLISH_PRESSURE"
@@ -1598,7 +1570,7 @@ class FyersTbtManager:
         )
 
         # Audit wall durability, resting absorption, and fleeing/spoof behavior
-        wall_audit = self._audit_wall_durability(symbol, ltp, bid_walls, ask_walls)
+        wall_audit = self._audit_wall_durability(symbol, ref_px, bid_walls, ask_walls)
 
         return {
             "symbol": symbol,
@@ -2017,7 +1989,7 @@ class FyersTbtManager:
     def register_in_flight(self, symbol: str) -> None:
         """
         Register in-flight active position or limit order.
-        Allocated to highest priority Tier 1 (Slots 1-4) for institutional slippage & wall protection.
+        Existing exposure preempts discovery up to the total provider capacity.
         """
         tradable = resolve_tradable_tbt_symbol(symbol)
         if not tradable:
@@ -2028,8 +2000,12 @@ class FyersTbtManager:
             self._evicted_cooldowns.pop(symbol, None)
             if tradable not in self._in_flight:
                 self._in_flight.append(tradable)
-                while len(self._in_flight) > MAX_IN_FLIGHT_SLOTS:
-                    self._in_flight.pop(0)
+                if len(self._in_flight) > MAX_TBT_SYMBOLS:
+                    logger.error(
+                        "[TbtManager] TBT exposure capacity exceeded: %s registered / %s slots; excess exposure retains registration and needs alternate market-data monitoring",
+                        len(self._in_flight),
+                        MAX_TBT_SYMBOLS,
+                    )
                 logger.info(
                     f"[TbtManager] Registered Tier 1 In-Flight position: {tradable} (Total: {len(self._in_flight)})"
                 )
@@ -2165,10 +2141,17 @@ class FyersTbtManager:
 
         # 1. RRG Leading & Improving sector constituents
         try:
-            from analysis.sector_rotation import get_sector_rrg_matrix
+            from engine.analysis_cache import analysis_cache
             from analysis.universe import SECTOR_TAXONOMY
 
-            rrg = get_sector_rrg_matrix(use_cache=True)
+            # Never synchronously block under _slots_lock on uncached OHLCV downloads
+            cached_rrg = analysis_cache.get_macro("sector_rrg_matrix")
+            if cached_rrg and isinstance(cached_rrg, list):
+                from analysis.sector_rotation import get_sector_rrg_matrix
+
+                rrg = get_sector_rrg_matrix(use_cache=True)
+            else:
+                rrg = []
             leading_sectors = [pt.sector for pt in rrg if getattr(pt, "quadrant", "") == "LEADING"]
             improving_sectors = [
                 pt.sector for pt in rrg if getattr(pt, "quadrant", "") == "IMPROVING"
@@ -2211,7 +2194,7 @@ class FyersTbtManager:
         """
         Build exact prioritized list of up to MAX_TBT_SYMBOLS (15) symbols.
         Order of priority:
-          1. IN_FLIGHT (Slots 1-4: active orders/positions)
+          1. IN_FLIGHT (active orders/positions, before all discovery)
           2. CORE_GRID (Benchmark Futures & Revolving ATM Options, elastic)
           3. TODAYS_EXPIRY (0DTE priority candidates when active)
           4. SCOUT (Elastic: fills all remaining unallocated slots up to 15)
@@ -2224,7 +2207,7 @@ class FyersTbtManager:
             desired: list[str] = []
 
             # 1. In-flight open orders / positions (overrides cooldowns if active trade exists)
-            for s in self._in_flight[:MAX_IN_FLIGHT_SLOTS]:
+            for s in self._in_flight[:MAX_TBT_SYMBOLS]:
                 if s and s not in desired:
                     desired.append(s)
 
@@ -2233,7 +2216,17 @@ class FyersTbtManager:
                 if len(desired) >= MAX_TBT_SYMBOLS:
                     break
                 if s and s not in desired and s not in self._evicted_cooldowns:
-                    desired.append(s)
+                    companion = (
+                        s[:-2] + ("PE" if s.endswith("CE") else "CE")
+                        if s.endswith(("CE", "PE"))
+                        else ""
+                    )
+                    pair = [s, companion] if companion in self._core_grid else [s]
+                    missing = [c for c in pair if c not in desired]
+                    if any(c in self._evicted_cooldowns for c in missing):
+                        continue
+                    if len(desired) + len(missing) <= MAX_TBT_SYMBOLS:
+                        desired.extend(missing)
 
             # 3. Today's Expiry Radar
             for s in self._todays_expiry[:MAX_TODAYS_EXPIRY_SLOTS]:
@@ -2289,6 +2282,7 @@ class FyersTbtManager:
           - Worker 2: slots 10..14 (Scouts / MCX Commodities)
         """
         desired_list = self.compute_desired_subscriptions()[:MAX_TBT_SYMBOLS]
+        self._last_desired = list(desired_list)
         desired_set = set(desired_list)
 
         with self._slots_lock:
@@ -2314,10 +2308,23 @@ class FyersTbtManager:
                     for w in disconnected_workers:
                         w.desired = []
 
-                    for idx, worker in enumerate(connected_workers):
-                        worker_chunk = desired_list[idx * 5 : (idx + 1) * 5]
-                        worker.desired = worker_chunk
-                        worker.sync()
+                    num_conn = len(connected_workers)
+                    if num_conn == 1:
+                        # Single active worker takes all 15 desired symbols across channels 1..3
+                        connected_workers[0].desired = desired_list[:MAX_TBT_SYMBOLS]
+                        connected_workers[0].sync()
+                    elif num_conn == 2:
+                        # Worker 0 takes 10 (channels 1 & 2), Worker 1 takes 5 (channel 1)
+                        connected_workers[0].desired = desired_list[:10]
+                        connected_workers[0].sync()
+                        connected_workers[1].desired = desired_list[10:MAX_TBT_SYMBOLS]
+                        connected_workers[1].sync()
+                    else:
+                        # 3 or more workers: 5 symbols each (channel 1 per connection)
+                        for idx, worker in enumerate(connected_workers):
+                            worker_chunk = desired_list[idx * 5 : (idx + 1) * 5]
+                            worker.desired = worker_chunk
+                            worker.sync()
 
                     self._subscribed = set().union(*(w.subscribed for w in connected_workers))
                 else:
@@ -2760,7 +2767,9 @@ class FyersTbtManager:
             }
 
             slots = []
-            desired_list = self.compute_desired_subscriptions()
+            desired_list = getattr(self, "_last_desired", None)
+            if not desired_list:
+                desired_list = list(self._subscribed)
             # Order subscribed symbols strictly by priority: desired_list first, then any remaining
             ordered_syms = [s for s in desired_list if s in self._subscribed]
             remaining = [s for s in self._subscribed if s not in ordered_syms]
@@ -2829,7 +2838,11 @@ class FyersTbtManager:
 
                 if last_local_ts and float(last_local_ts) > 0:
                     pkt_age_s = round(max(0.0, now - float(last_local_ts)), 2)
-                    threshold = 15.0 if depth_data.get("status") == "LIVE" else 30.0
+                    threshold = (
+                        TBT_LIVE_DEPTH_MAX_AGE_SECONDS
+                        if depth_data.get("status") == "LIVE"
+                        else 30.0
+                    )
                     is_stale = (
                         (pkt_age_s > threshold)
                         if depth_data.get("status") != "L2_FALLBACK"
@@ -2885,6 +2898,12 @@ class FyersTbtManager:
                 "primary_focus": self._primary_focus_index,
                 "last_atm_strikes": dict(self._last_atm_strikes),
                 "in_flight": list(self._in_flight),
+                "in_flight_without_tbt_subscription": [
+                    s for s in self._in_flight if s not in self._subscribed
+                ],
+                "exposure_subscription_coverage": "COMPLETE"
+                if all(s in self._subscribed for s in self._in_flight)
+                else "INCOMPLETE",
                 "core_grid": list(self._core_grid),
                 "todays_expiry": list(self._todays_expiry),
                 "scout": list(self._scout.keys()),
@@ -2897,6 +2916,18 @@ class FyersTbtManager:
     def get_slot_allocation(self) -> dict[str, Any]:
         """Alias for get_active_slots_status."""
         return self.get_active_slots_status()
+
+    def is_fresh_tbt_depth(self, target: Any, *, now: Optional[float] = None) -> bool:
+        """Verify freshness of TBT depth snapshot or cached symbol."""
+        if isinstance(target, dict):
+            return is_fresh_tbt_depth(target, now=now)
+        with self._depth_lock:
+            snap = self._depth_cache.get(target) or self._depth_cache.get(
+                str(target).split(":")[-1]
+            )
+        if not snap:
+            return False
+        return is_fresh_tbt_depth(snap, now=now)
 
     def get_50_depth(self, symbol: str, *, allow_rest_fallback: bool = False) -> dict[str, Any]:
         """
@@ -3096,9 +3127,9 @@ class FyersTbtManager:
         depth = self.get_50_depth(tradable)
 
         is_buy = side.upper() in ("BUY", "LONG")
-        obi = depth.get("obi_50", 0.0)
-        density = depth.get("density_score", 0.0)
-        ltp = depth.get("ltp", 0.0)
+        obi = float(depth.get("obi_50") or 0.0)
+        density = float(depth.get("density_score") or 0.0)
+        ltp = float(depth.get("ltp") or 0.0)
 
         findings = []
         penalties = 0

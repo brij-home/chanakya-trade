@@ -24,7 +24,7 @@ def clean_books():
 def test_gate26_index_option_wide_spread_veto():
     """Gate 26 must veto Nifty option when bid-ask spread exceeds 4.5%."""
     auditor = AlertScrutinyAuditor()
-    sym = "NIFTY26OCT25000CE"
+    sym = "NIFTY26NOV25000CE"
     book = get_depth_book(sym)
     # Bid: 100.0, Ask: 110.0 -> spread 10.0 / mid 105.0 = 9.52% > 4.5%
     book.batch_update(
@@ -34,7 +34,7 @@ def test_gate26_index_option_wide_spread_veto():
 
     alert = SimpleNamespace(
         alert_id="aa-opt-nifty-001",
-        symbol=sym,
+        symbol="NIFTY",
         contract_symbol=sym,
         direction="BULLISH",
         alert_type="OPTIONS_MOMENTUM",
@@ -51,8 +51,8 @@ def test_gate26_index_option_wide_spread_veto():
         environment="LIVE",
         is_live=True,
         option_type="CE",
-        segment="OPT",
-        metrics={},
+        segment="FNO_INDEX",
+        metrics={"volume": 1000, "oi": 2000},
         extra_metrics={},
     )
 
@@ -66,7 +66,7 @@ def test_gate26_index_option_wide_spread_veto():
 def test_gate26_index_option_tight_spread_passes():
     """Gate 26 passes Nifty option when bid-ask spread is tight (<= 4.5%)."""
     auditor = AlertScrutinyAuditor()
-    sym = "NIFTY26OCT25000CE"
+    sym = "NIFTY26NOV25000CE"
     book = get_depth_book(sym)
     # Bid: 100.0, Ask: 102.0 -> spread 2.0 / mid 101.0 = 1.98% <= 4.5%
     book.batch_update(
@@ -76,7 +76,7 @@ def test_gate26_index_option_tight_spread_passes():
 
     alert = SimpleNamespace(
         alert_id="aa-opt-nifty-002",
-        symbol=sym,
+        symbol="NIFTY",
         contract_symbol=sym,
         direction="BULLISH",
         alert_type="OPTIONS_MOMENTUM",
@@ -93,8 +93,8 @@ def test_gate26_index_option_tight_spread_passes():
         environment="LIVE",
         is_live=True,
         option_type="CE",
-        segment="OPT",
-        metrics={},
+        segment="FNO_INDEX",
+        metrics={"volume": 1000, "oi": 2000},
         extra_metrics={},
     )
 
@@ -107,7 +107,7 @@ def test_gate26_index_option_tight_spread_passes():
 def test_gate26_stock_option_spread_threshold():
     """Gate 26 permits stock options up to 8.0% spread, vetoes beyond 8.0%."""
     auditor = AlertScrutinyAuditor()
-    sym = "TATASTEEL26OCT160CE"
+    sym = "TATASTEEL26NOV160CE"
     book = get_depth_book(sym)
     # Bid: 10.0, Ask: 11.2 -> spread 1.2 / mid 10.6 = 11.32% > 8.0%
     book.batch_update(
@@ -117,7 +117,7 @@ def test_gate26_stock_option_spread_threshold():
 
     alert = SimpleNamespace(
         alert_id="aa-opt-tatasteel-001",
-        symbol=sym,
+        symbol="TATASTEEL",
         contract_symbol=sym,
         direction="BULLISH",
         alert_type="OPTIONS_MOMENTUM",
@@ -134,8 +134,8 @@ def test_gate26_stock_option_spread_threshold():
         environment="LIVE",
         is_live=True,
         option_type="CE",
-        segment="OPT",
-        metrics={},
+        segment="FNO_STOCK",
+        metrics={"volume": 1000, "oi": 2000},
         extra_metrics={},
     )
 

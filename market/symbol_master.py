@@ -45,6 +45,8 @@ CACHE_DIR = app_data_path("sym_master")
 _EXCHANGE_MASTERS = {
     "NSE": ("NSE_CM", "NSE_FO", "NSE_CD", "NSE_COM"),
     "BSE": ("BSE_CM", "BSE_FO"),
+    "NFO": ("NSE_FO",),
+    "BFO": ("BSE_FO",),
     "MCX": ("MCX_COM",),
 }
 
@@ -53,49 +55,45 @@ _IN_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
 
 
 import os
+import threading
+from config.constants import IST
+
+_MASTER_CHECKED_ON: dict[str, dt.date] = {}
+_DEGRADED_MASTERS: set[str] = set()
+_MASTER_CACHE_PATHS: dict[str, Path] = {}
+_MASTER_LOCKS = {name: threading.RLock() for name in MASTERS}
 
 
 def _cache_path(master: str) -> Path:
-    p = CACHE_DIR / f"{master}.json"
-    if p.exists():
-        return p
-    # If in test mode or custom DATA dir, fall back to standard home cache if present
-    standard_home = Path.home() / ".trading_platform" / "sym_master" / f"{master}.json"
-    if standard_home.exists():
-        return standard_home
-    # Fixture fallback for hermetic offline test suites / CI runners
-    test_fixture = (
-        Path(__file__).resolve().parent.parent
-        / "tests"
-        / "fixtures"
-        / "sym_master"
-        / f"{master}.json"
-    )
-    if test_fixture.exists():
-        return test_fixture
-    return p
+    # Runtime overrides must never fall through to user-home or bundled test data.
+    return app_data_path("sym_master", f"{master}.json")
 
 
 def _is_fresh(path: Path) -> bool:
-    """True if the cached master JSON has an entry updated today, during current weekend, or in test mode."""
+    """Check local snapshot retrieval date; row lastUpdate is not fetch freshness."""
     if not path.exists():
         return False
     if os.environ.get("CHANAKYA_TESTING") == "1":
         return True
     try:
-        today_date = dt.date.today()
-        # Accept today or recent trading days (up to 4 days ago to cover weekends and holiday weekends)
-        valid_dates = {today_date.isoformat()}
-        for days_back in range(1, 5):
-            valid_dates.add((today_date - dt.timedelta(days=days_back)).isoformat())
-
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return any(v.get("lastUpdate") in valid_dates for v in data.values())
-    except Exception:
+        fetched_day = dt.datetime.fromtimestamp(path.stat().st_mtime, IST).date()
+        return fetched_day == dt.datetime.now(IST).date()
+    except OSError as exc:
+        logger.warning("[SymbolMaster] Could not inspect snapshot freshness %s: %s", path, exc)
         return False
 
 
 def load_master(master: str, force: bool = False, offline_fallback: bool = True) -> dict[str, Any]:
+    name = master.upper().strip()
+    if name not in _MASTER_LOCKS:
+        raise ValueError(f"Unknown master {name!r}")
+    with _MASTER_LOCKS[name]:
+        return _load_master_snapshot(name, force=force, offline_fallback=offline_fallback)
+
+
+def _load_master_snapshot(
+    master: str, force: bool = False, offline_fallback: bool = True
+) -> dict[str, Any]:
     """
     Load a master JSON dict keyed by API symbol ticker.
     Downloads and caches locally if missing or stale.
@@ -104,28 +102,48 @@ def load_master(master: str, force: bool = False, offline_fallback: bool = True)
     if master_upper not in MASTERS:
         raise ValueError(f"Unknown master {master_upper!r}; choose from {', '.join(MASTERS)}")
 
-    if not force and master_upper in _IN_MEMORY_CACHE:
-        return _IN_MEMORY_CACHE[master_upper]
+    checked_today = _MASTER_CHECKED_ON.get(master_upper) == dt.datetime.now(IST).date()
+    if (
+        not force
+        and checked_today
+        and master_upper in _IN_MEMORY_CACHE
+        and _MASTER_CACHE_PATHS.get(master_upper) == _cache_path(master_upper)
+    ):
+        if offline_fallback or master_upper not in _DEGRADED_MASTERS:
+            return _IN_MEMORY_CACHE[master_upper]
 
     path = _cache_path(master_upper)
-    if force or not _is_fresh(path):
+    must_refresh = (
+        force or not _is_fresh(path) or (not offline_fallback and master_upper in _DEGRADED_MASTERS)
+    )
+    if must_refresh:
         url = BASE_URL.format(master_upper)
         req = urllib.request.Request(url, headers={"User-Agent": "chanakya-trade/2.0"})
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            dest_cache = CACHE_DIR / f"{master_upper}.json"
+            dest_cache = _cache_path(master_upper)
+            dest_cache.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = dest_cache.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(data), encoding="utf-8")
             tmp_path.replace(dest_cache)
             _IN_MEMORY_CACHE[master_upper] = data
+            _MASTER_CACHE_PATHS[master_upper] = _cache_path(master_upper)
+            _MASTER_CHECKED_ON[master_upper] = dt.datetime.now(IST).date()
+            _DEGRADED_MASTERS.discard(master_upper)
+            globals().get("_UNDERLYING_STRIKES_INDEX", {}).pop(master_upper, None)
             return data
         except Exception as e:
             if offline_fallback and path.exists():
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
                     _IN_MEMORY_CACHE[master_upper] = data
+                    _MASTER_CACHE_PATHS[master_upper] = _cache_path(master_upper)
+                    _MASTER_CHECKED_ON[master_upper] = dt.datetime.now(IST).date()
+                    _DEGRADED_MASTERS.add(master_upper)
+                    logger.warning(
+                        "[SymbolMaster] Using DEGRADED offline snapshot for %s: %s", master_upper, e
+                    )
                     return data
                 except Exception as e_suppressed:
                     logger.debug(
@@ -135,6 +153,9 @@ def load_master(master: str, force: bool = False, offline_fallback: bool = True)
 
     data = json.loads(path.read_text(encoding="utf-8"))
     _IN_MEMORY_CACHE[master_upper] = data
+    _MASTER_CACHE_PATHS[master_upper] = _cache_path(master_upper)
+    _MASTER_CHECKED_ON[master_upper] = dt.datetime.now(IST).date()
+    _DEGRADED_MASTERS.discard(master_upper)
     return data
 
 
@@ -191,7 +212,7 @@ def search_symbols(
     return results
 
 
-def get_symbol_info(symbol: str) -> Optional[dict[str, Any]]:
+def get_symbol_info(symbol: str, *, require_fresh: bool = False) -> Optional[dict[str, Any]]:
     """Look up raw master record for a symbol across applicable exchange masters.
 
     Returns the raw master record dict if found, or None if the symbol is genuinely
@@ -207,10 +228,14 @@ def get_symbol_info(symbol: str) -> Optional[dict[str, Any]]:
     # The bare symbol name without any exchange prefix (used for prefix-free lookups)
     bare = s.split(":", 1)[1] if ":" in s else s
     candidates = _EXCHANGE_MASTERS.get(exch, ("NSE_CM", "NSE_FO"))
+    master_exchange = {"NFO": "NSE", "BFO": "BSE"}.get(exch, exch)
+    master_qualified = f"{master_exchange}:{bare}"
 
     for master in candidates:
         try:
-            data = load_master(master)
+            data = load_master(master, offline_fallback=not require_fresh)
+            if require_fresh and master in _DEGRADED_MASTERS:
+                raise RuntimeError(f"{master} is using a degraded snapshot")
         except Exception as e:
             # Master unavailable (network/cache miss) — log DEGRADED, do NOT silently
             # treat this as "symbol not in master"; the caller's guard must not drop
@@ -224,6 +249,11 @@ def get_symbol_info(symbol: str) -> Optional[dict[str, Any]]:
         # Primary lookup: full qualified key (e.g. "NSE:ICICIPRULI-EQ")
         if s in data:
             return data[s]
+        # Broker derivative segments use NFO/BFO prefixes, while the FYERS
+        # instrument master keys derivative rows under NSE/BSE. Resolve only
+        # within the matching derivatives master selected above.
+        if master_qualified in data:
+            return data[master_qualified]
         # Fallback: bare symbol without prefix (only for symbols that arrived prefix-free)
         if bare != s and bare in data:
             return data[bare]
@@ -245,6 +275,164 @@ def get_symbol_info(symbol: str) -> Optional[dict[str, Any]]:
                     f"[market.symbol_master] Alias lookup in get_symbol_info non-fatal: {e_suppressed}"
                 )
     return None
+
+
+def get_quantity_freeze_info(symbol: str, *, segment: str | None = None) -> dict[str, Any]:
+    """Resolve the current single-order quantity freeze from a fresh F&O master.
+
+    Unlike lot size, exchange quantity-freeze limits change independently and must
+    never be inferred from an underlying or a historical constant. Exact contracts
+    use their own active master row. An underlying-only lookup is accepted only when
+    every active derivative row has the same published limit.
+    """
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        raise ValueError("A derivative symbol is required to resolve quantity freeze")
+
+    prefix, body = raw.split(":", 1) if ":" in raw else ("", raw)
+    from market.instruments import canonical_symbol
+    from market.indices import INDEX_INSTRUMENTS
+
+    contract_like = body.endswith(("CE", "PE", "FUT")) and any(char.isdigit() for char in body)
+    clean_underlying = canonical_symbol(body)
+    explicit_segment = str(segment or "").upper()
+    if prefix in {"MCX", "MCX_COM"} or explicit_segment == "COMMODITY":
+        exchange, master = "MCX", "MCX_COM"
+    elif prefix in {"BFO"} or (
+        prefix == "BSE" and explicit_segment in {"FNO", "OPTIONS", "FUTURES"}
+    ):
+        exchange, master = "BSE", "BSE_FO"
+    elif prefix in {"NFO"} or explicit_segment in {
+        "FNO",
+        "FNO_INDEX",
+        "FNO_STOCK",
+        "OPTIONS",
+        "FUTURES",
+    }:
+        exchange, master = "NSE", "NSE_FO"
+    elif prefix == "NSE" and explicit_segment.startswith("EQUITY"):
+        exchange, master = "NSE", "NSE_CM"
+    elif prefix == "BSE" and explicit_segment.startswith("EQUITY"):
+        exchange, master = "BSE", "BSE_CM"
+    elif prefix == "BSE" and not contract_like and clean_underlying not in INDEX_INSTRUMENTS:
+        exchange, master = "BSE", "BSE_CM"
+    elif prefix == "NSE" and body.endswith(("-EQ", "-BE", "-SM", "-BZ", "-GB", "-ST")):
+        exchange, master = "NSE", "NSE_CM"
+    elif prefix in {"BSE"} or clean_underlying in {"SENSEX", "BANKEX"}:
+        exchange, master = "BSE", "BSE_FO"
+    elif prefix == "NSE" or clean_underlying in INDEX_INSTRUMENTS or contract_like:
+        exchange, master = "NSE", "NSE_FO"
+    else:
+        raise ValueError(
+            f"Ambiguous instrument {raw}; supply an exact derivative contract or exchange cash symbol"
+        )
+
+    # A stale offline snapshot can be useful for research, but it is not valid
+    # authority for an order-size or execution plan.
+    records = load_master(master, offline_fallback=False)
+    if master in _DEGRADED_MASTERS:
+        raise RuntimeError(f"{master} is using a degraded snapshot; quantity freeze unavailable")
+
+    aliases = {raw, body, f"{exchange}:{body}"}
+    exact_rows = [
+        row
+        for key, row in records.items()
+        if isinstance(row, dict)
+        and (str(key).upper() in aliases or str(row.get("symTicker", "")).upper() in aliases)
+    ]
+
+    def _active_limit(row: dict[str, Any]) -> int | None:
+        if row.get("tradeStatus") not in (1, "1"):
+            return None
+        try:
+            value = float(row.get("qtyFreeze"))
+        except (TypeError, ValueError):
+            return None
+        if not value.is_integer() or value <= 0:
+            return None
+        return int(value)
+
+    def _active_lot_size(row: dict[str, Any]) -> int | None:
+        if row.get("tradeStatus") not in (1, "1"):
+            return None
+        try:
+            value = float(row.get("minLotSize"))
+        except (TypeError, ValueError):
+            return None
+        if not value.is_integer() or value <= 0:
+            return None
+        return int(value)
+
+    if exact_rows:
+        exact_limits = [_active_limit(row) for row in exact_rows]
+        exact_lot_sizes = [_active_lot_size(row) for row in exact_rows]
+        if (
+            any(quantity is None for quantity in exact_limits)
+            or len(set(exact_limits)) != 1
+            or any(size is None for size in exact_lot_sizes)
+            or len(set(exact_lot_sizes)) != 1
+        ):
+            raise RuntimeError(
+                f"No unambiguous active published quantity freeze or lot size for {raw}"
+            )
+        row = exact_rows[0]
+        quantity = exact_limits[0]
+        lot_size = exact_lot_sizes[0]
+        assert quantity is not None
+        assert lot_size is not None
+        return {
+            "quantity": quantity,
+            "lot_size": lot_size,
+            "exchange": exchange,
+            "symbol": str(row.get("symTicker") or raw),
+            "source": "FYERS_PUBLISHED_EXCHANGE_MASTER",
+            "master": master,
+            "source_last_update": row.get("lastUpdate"),
+            "retrieved_on": _MASTER_CHECKED_ON.get(master),
+        }
+
+    # Contract-looking input must not fall through to another expiry's row.
+    if contract_like:
+        raise RuntimeError(f"Contract {raw} is absent from the current {master} master")
+
+    underlying = clean_underlying
+    candidates = [
+        row
+        for row in records.values()
+        if isinstance(row, dict)
+        and row.get("tradeStatus") in (1, "1")
+        and canonical_symbol(str(row.get("underSym") or row.get("exSymbol") or "")) == underlying
+    ]
+    candidate_limits = [_active_limit(row) for row in candidates]
+    candidate_lot_sizes = [_active_lot_size(row) for row in candidates]
+    if (
+        not candidate_limits
+        or any(quantity is None for quantity in candidate_limits)
+        or any(size is None for size in candidate_lot_sizes)
+    ):
+        raise RuntimeError(
+            f"Current quantity freeze is missing or ambiguous for {exchange}:{underlying}"
+        )
+    limits = set(candidate_limits)
+    if len(limits) != 1:
+        raise RuntimeError(
+            f"Current quantity freeze is missing or ambiguous for {exchange}:{underlying}"
+        )
+    lot_sizes = set(candidate_lot_sizes)
+    if len(lot_sizes) != 1:
+        raise RuntimeError(f"Current lot size is missing or ambiguous for {exchange}:{underlying}")
+    return {
+        "quantity": limits.pop(),
+        "lot_size": lot_sizes.pop(),
+        "exchange": exchange,
+        "symbol": f"{exchange}:{underlying}",
+        "source": "FYERS_PUBLISHED_EXCHANGE_MASTER",
+        "master": master,
+        "source_last_update": max(
+            (str(row.get("lastUpdate") or "") for row in candidates), default=None
+        ),
+        "retrieved_on": _MASTER_CHECKED_ON.get(master),
+    }
 
 
 def validate_symbol(symbol: str) -> dict[str, Any]:
@@ -658,6 +846,9 @@ class SymbolMaster:
 
     def get_symbol_info(self, symbol: str) -> Optional[dict[str, Any]]:
         return get_symbol_info(symbol)
+
+    def get_quantity_freeze_info(self, symbol: str) -> dict[str, Any]:
+        return get_quantity_freeze_info(symbol)
 
     def validate_symbol(self, symbol: str) -> dict[str, Any]:
         return validate_symbol(symbol)

@@ -18,6 +18,14 @@ function formatRelativeTime(dateStr) {
   }
 }
 
+const fmt = (n, dec = 1) =>
+  n != null && !isNaN(n)
+    ? Number(n).toLocaleString('en-IN', {
+        minimumFractionDigits: Number(n) < 100 ? dec : 0,
+        maximumFractionDigits: dec,
+      })
+    : '—'
+
 const STAGE_CONFIG = {
   INVALIDATED:     { label: '❌ INVALIDATED', bg: 'bg-rose-500/15', text: 'text-rose-600 dark:text-rose-300', border: 'border-rose-500/30' },
   TARGET_ACHIEVED: { label: '🎯 TARGET HIT', bg: 'bg-emerald-500/15', text: 'text-emerald-600 dark:text-emerald-300', border: 'border-emerald-500/30' },

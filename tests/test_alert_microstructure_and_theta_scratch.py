@@ -174,17 +174,18 @@ def test_auto_alert_engine_enriches_with_live_l2_depth():
 
 def test_0dte_afternoon_theta_stagnation_scratch_bailout_evaluator():
     """Verify evaluate_alert_in_flight_decay triggers THETA_STAGNATION_SCRATCH on >=15m stagnation."""
-    thursday_afternoon = datetime(2026, 9, 10, 14, 0, 0, tzinfo=IST)
+    # NSE NIFTY weekly expiry moved to Tuesday effective 1 September 2025.
+    tuesday_afternoon = datetime(2026, 9, 8, 14, 0, 0, tzinfo=IST)
     with patch("engine.alert_evaluator.datetime") as mock_dt:
-        mock_dt.now.return_value = thursday_afternoon
+        mock_dt.now.return_value = tuesday_afternoon
         mock_dt.strptime.side_effect = datetime.strptime
 
-        # 1. 16 minutes elapsed (960s >= 900s) post-13:30 IST on Thursday -> THETA_STAGNATION_SCRATCH
+        # 1. 16 minutes elapsed (960s >= 900s) post-13:30 IST on expiry Tuesday -> THETA_STAGNATION_SCRATCH
         alert_16m = AutoAlert(
             alert_id="0dte-scratch-1",
             alert_type="OPTIONS_MOMENTUM_BREAKOUT",
             stage="IGNITED",
-            symbol="NIFTY",  # Thursday expiry = 0DTE
+            symbol="NIFTY",  # Explicit expiry metadata is set in the 0DTE fixture.
             exchange="NFO",
             direction="BULLISH",
             headline="Nifty 0DTE Call",
@@ -196,7 +197,8 @@ def test_0dte_afternoon_theta_stagnation_scratch_bailout_evaluator():
             stop_loss=70.0,
             option_type="CE",
             strike=24200,
-            created_at="2026-09-10 13:44:00",
+            expiry_date="2026-09-08",
+            created_at="2026-09-08 13:44:00",
             is_live=True,
         )
         eval_res = evaluate_alert_in_flight_decay(alert_16m, current_ltp=93.5)
@@ -224,7 +226,8 @@ def test_0dte_afternoon_theta_stagnation_scratch_bailout_evaluator():
             stop_loss=70.0,
             option_type="CE",
             strike=24200,
-            created_at="2026-09-10 13:51:00",
+            expiry_date="2026-09-08",
+            created_at="2026-09-08 13:51:00",
             is_live=True,
         )
         eval_9m_res = evaluate_alert_in_flight_decay(alert_9m, current_ltp=95.0)
@@ -236,14 +239,14 @@ def test_0dte_afternoon_theta_stagnation_scratch_bailout_evaluator():
 def test_auto_alert_engine_check_in_flight_theta_stagnation_bailout():
     """Verify check_and_alert_in_flight_decay marks theta_scratch_recommended and audits scratch event."""
     engine = AutoAlertEngine()
-    thursday_afternoon = datetime(2026, 9, 10, 14, 15, 0, tzinfo=IST)
+    tuesday_afternoon = datetime(2026, 9, 8, 14, 15, 0, tzinfo=IST)
 
     alert = AutoAlert(
         alert_id="aa-0dte-scratch-003",
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="NIFTY",
-        contract_symbol="NIFTY26SEP24200CE",
+        contract_symbol="NIFTY2690824200CE",
         exchange="NFO",
         direction="BULLISH",
         headline="NIFTY 24200 CE 0DTE Ignition",
@@ -254,8 +257,9 @@ def test_auto_alert_engine_check_in_flight_theta_stagnation_bailout():
         stop_loss=70.0,
         strike=24200.0,
         option_type="CE",
+        expiry_date="2026-09-08",
         underlying_spot=24210.0,
-        created_at="2026-09-10 13:45:00 IST",  # 30 minutes elapsed (> 15m)
+        created_at="2026-09-08 13:45:00 IST",  # 30 minutes elapsed (> 15m)
         is_live=True,
         environment="LIVE",
     )
@@ -270,13 +274,13 @@ def test_auto_alert_engine_check_in_flight_theta_stagnation_bailout():
             patch("engine.alert_evaluator.datetime") as mock_dt1,
             patch("engine.auto_alert_engine.datetime") as mock_dt2,
         ):
-            mock_dt1.now.return_value = thursday_afternoon
+            mock_dt1.now.return_value = tuesday_afternoon
             mock_dt1.strptime.side_effect = datetime.strptime
-            mock_dt2.now.return_value = thursday_afternoon
+            mock_dt2.now.return_value = tuesday_afternoon
             mock_dt2.strptime.side_effect = datetime.strptime
 
             # Current quote is flat / stagnant at 94.0 (-6.0%)
-            quotes_map = {"NFO:NIFTY26SEP24200CE": 94.0, "NSE:NIFTY": 24215.0}
+            quotes_map = {"NFO:NIFTY2690824200CE": 94.0, "NSE:NIFTY": 24215.0}
             warnings = engine.check_and_alert_in_flight_decay(quotes_map=quotes_map)
 
         assert len(warnings) == 1

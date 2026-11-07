@@ -172,7 +172,7 @@ def test_api_fyers_tbt_focus_endpoint(client):
 def test_api_system_health_hub_includes_rate_gate_and_tbt(client):
     """Verify GET /api/system/health-hub includes both rate_gate and tbt telemetry."""
     res = client.get("/api/system/health-hub")
-    assert res.status_code == 200
+    assert res.status_code == 200, res.text
     data = res.json()
 
     assert "rate_gate" in data
@@ -464,22 +464,34 @@ def test_tbt_dynamic_rebalance_on_worker_degradation():
 
     mgr.sync_subscriptions()
 
-    # Only w0 is connected: it must get the top 5 high-priority symbols, while degraded workers get 0
-    assert len(w0.desired) == 5
-    assert w0.desired == desired_symbols[:5]
+    # Only w0 is connected: it multiplexes all 15 symbols across channels 1..3, while degraded workers get 0
+    assert len(w0.desired) == 15
+    assert w0.desired == desired_symbols[:15]
     assert len(w1.desired) == 0
     assert len(w2.desired) == 0
 
-    # When w1 recovers:
+    # When w1 recovers (2 workers connected): w0 takes 10 (ch 1 & 2), w1 takes 5 (ch 1)
     w1.connected = True
     w1.status = "CONNECTED"
+    mgr.sync_subscriptions()
+
+    assert len(w0.desired) == 10
+    assert w0.desired == desired_symbols[:10]
+    assert len(w1.desired) == 5
+    assert w1.desired == desired_symbols[10:15]
+    assert len(w2.desired) == 0
+
+    # When all 3 workers recover: 5 symbols each
+    w2.connected = True
+    w2.status = "CONNECTED"
     mgr.sync_subscriptions()
 
     assert len(w0.desired) == 5
     assert w0.desired == desired_symbols[:5]
     assert len(w1.desired) == 5
     assert w1.desired == desired_symbols[5:10]
-    assert len(w2.desired) == 0
+    assert len(w2.desired) == 5
+    assert w2.desired == desired_symbols[10:15]
 
 
 def test_tbt_staleness_calculation_uses_local_received_at():

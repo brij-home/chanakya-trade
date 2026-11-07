@@ -83,11 +83,11 @@ def test_bullish_absorption_divergence():
     assert alert.direction == "BULLISH"
     assert alert.metrics["pattern"] == "BULLISH_ABSORPTION"
     assert "execution_ticket" in alert.actionable_plan
-    assert alert.actionable_plan["execution_ticket"]["smart_routing"]["routing_mode"] in (
-        "DIRECT_LIMIT",
-        "PASSIVE_PEG",
-        "ICEBERG",
-    )
+    # The evidence identifies a setup, but its risk budget cannot fund the
+    # canonical NIFTY lot. Preserve the signal for review without a fake lot floor.
+    assert alert.actionable_plan["execution_ticket"]["shares"] == 0
+    assert alert.actionable_plan["execution_ticket"]["auto_submit_ready"] is False
+    assert alert.actionable_plan["execution_ticket"]["smart_routing"] is None
 
 
 def test_order_flow_detector_registered():

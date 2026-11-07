@@ -74,7 +74,7 @@ def _generate_synthetic_5m_bars(
         }
     )
     df = pd.DataFrame(records)
-    df.set_index("datetime", inplace=True)
+    df = df.set_index("datetime")
     return df
 
 

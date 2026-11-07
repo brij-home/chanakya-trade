@@ -144,17 +144,17 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       if (p > 0) {
         if (act === 'BUY') {
           const validSL = rawSL != null && rawSL !== '' && Number(rawSL) < p && Number(rawSL) > 0
-          setStopLoss(validSL ? Number(rawSL) : Math.max(0.05, +(p * 0.75).toFixed(2)))
+          setStopLoss(validSL ? Number(rawSL) : '')
 
           const isAbnormalTgt = (resolvedLot > 1 || p < 500) && Number(rawTgt) > p * 3.5
           const validTgt = rawTgt != null && rawTgt !== '' && Number(rawTgt) > p && !isAbnormalTgt
-          setTarget(validTgt ? Number(rawTgt) : +(p * 1.35).toFixed(2))
+          setTarget(validTgt ? Number(rawTgt) : '')
         } else {
           const validSL = rawSL != null && rawSL !== '' && Number(rawSL) > p
-          setStopLoss(validSL ? Number(rawSL) : +(p * 1.25).toFixed(2))
+          setStopLoss(validSL ? Number(rawSL) : '')
 
           const validTgt = rawTgt != null && rawTgt !== '' && Number(rawTgt) < p && Number(rawTgt) > 0
-          setTarget(validTgt ? Number(rawTgt) : Math.max(0.05, +(p * 0.65).toFixed(2)))
+          setTarget(validTgt ? Number(rawTgt) : '')
         }
       } else {
         setStopLoss(rawSL ?? '')
@@ -225,11 +225,11 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
     const p = Number(price || 0)
     if (p > 0) {
       if (newAct === 'BUY') {
-        if (!stopLoss || Number(stopLoss) >= p) setStopLoss(Math.max(0.05, +(p * 0.75).toFixed(2)))
-        if (!target || Number(target) <= p) setTarget(+(p * 1.35).toFixed(2))
+        if (!stopLoss || Number(stopLoss) >= p) setStopLoss('')
+        if (!target || Number(target) <= p) setTarget('')
       } else {
-        if (!stopLoss || Number(stopLoss) <= p) setStopLoss(+(p * 1.25).toFixed(2))
-        if (!target || Number(target) >= p) setTarget(Math.max(0.05, +(p * 0.65).toFixed(2)))
+        if (!stopLoss || Number(stopLoss) <= p) setStopLoss('')
+        if (!target || Number(target) >= p) setTarget('')
       }
     }
   }

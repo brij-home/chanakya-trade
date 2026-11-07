@@ -51,14 +51,17 @@ def test_high_iv_earnings_deploys_vertical_spread():
     assert plan_bull is not None
     assert plan_bull.volatility_regime == "OVERPRICED_IV"
     assert plan_bull.recommended_strategy == "BULL_CALL_SPREAD"
-    assert plan_bull.iv_crush_neutralized is True
+    assert plan_bull.status == "RESEARCH_ONLY"
+    assert plan_bull.actionable is False
+    assert plan_bull.iv_crush_neutralized is False
     assert len(plan_bull.legs) == 2
     assert plan_bull.legs[0].action == "BUY" and plan_bull.legs[0].option_type == "CE"
     assert plan_bull.legs[1].action == "SELL" and plan_bull.legs[1].option_type == "CE"
     assert plan_bull.legs[1].strike > plan_bull.legs[0].strike  # OTM short leg
-    assert plan_bull.max_risk_pts > 0
-    assert plan_bull.max_reward_pts > plan_bull.max_risk_pts
-    assert "IV CRUSH HARVESTER" in plan_bull.rationale
+    assert plan_bull.max_risk_pts is None
+    assert plan_bull.max_reward_pts is None
+    assert plan_bull.reward_risk_ratio is None
+    assert "Research-only" in plan_bull.rationale
 
     # 2. Bearish scenario on INFY (Spot 1800, IV Rank 65)
     plan_bear = evaluate_event_volatility_strategy(
@@ -97,7 +100,17 @@ def test_low_iv_earnings_deploys_long_straddle():
     assert plan.legs[0].action == "BUY" and plan.legs[0].option_type == "CE"
     assert plan.legs[1].action == "BUY" and plan.legs[1].option_type == "PE"
     assert plan.legs[0].strike == plan.legs[1].strike
-    assert "UNDERPRICED VOLATILITY SQUEEZE" in plan.rationale
+    assert plan.actionable is False
+    assert plan.max_risk_pts is None
+    assert "Research-only" in plan.rationale
+
+
+def test_missing_iv_never_defaults_to_neutral_strategy(monkeypatch):
+    monkeypatch.setattr(
+        "analysis.event_volatility.get_pre_earnings_iv",
+        lambda _symbol: {"iv_rank": None, "status": "UNAVAILABLE"},
+    )
+    assert evaluate_event_volatility_strategy("RELIANCE", 3000, hours_to_event=12) is None
 
 
 def test_trade_plan_integrates_event_hedge():
@@ -120,7 +133,7 @@ def test_trade_plan_integrates_event_hedge():
 
 
 def test_alert_scrutiny_event_hedge_bonus(monkeypatch):
-    """Verify AlertScrutinyAuditor recognizes event hedge plan and approves with bonus."""
+    """Research-only event context must not boost alert conviction."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.5)
     monkeypatch.setattr(auditor, "_execute_fast_llm_scrutiny", lambda *args, **kwargs: None)
 
@@ -149,7 +162,9 @@ def test_alert_scrutiny_event_hedge_bonus(monkeypatch):
     )
 
     res = auditor.scrutinize_alert(alert)
-    assert res.status == "APPROVED"
-    assert res.score >= 80
+    baseline = SimpleNamespace(**{**vars(alert), "metrics": {}})
+    baseline_res = auditor.scrutinize_alert(baseline)
+    assert res.status == baseline_res.status
+    assert res.score == baseline_res.score
     assert alert.metrics.get("event_hedge_plan") is not None
-    assert alert.metrics["predatory_pipeline"].get("event_hedge") is not None
+    assert alert.metrics["event_hedge_plan"]["actionable"] is False

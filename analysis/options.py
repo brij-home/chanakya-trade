@@ -15,6 +15,7 @@ logger = logging.getLogger("analysis.options")
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -107,26 +108,62 @@ class StrategyPayoff:
 # ── Black-Scholes helpers ─────────────────────────────────────
 
 
-def _dte_years(expiry_str: str) -> float:
-    """Days to expiry as fraction of year."""
-    from datetime import datetime, date
-
-    try:
-        exp = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-    except ValueError:
-        exp = date.fromisoformat(expiry_str[:10])
-    dte_days = max(1, (exp - date.today()).days)
-    return dte_days / 365.0
-
-
 def _dte_days(expiry_str: str) -> int:
     from datetime import datetime, date
+    from config.constants import now_ist
 
     try:
         exp = datetime.strptime(expiry_str, "%Y-%m-%d").date()
     except ValueError:
         exp = date.fromisoformat(expiry_str[:10])
-    return max(1, (exp - date.today()).days)
+    today_ist = now_ist().date()
+    return max(0, (exp - today_ist).days)
+
+
+def _dte_years(expiry_str: str, as_of: Optional[datetime] = None) -> float:
+    """
+    Days to expiry as fraction of year with intraday time-to-close resolution for 0-DTE.
+    On expiry day (delta == 0), calculates fraction of trading day remaining until 15:30 IST.
+    For expired contracts (delta < 0), returns 0.0.
+    """
+    from datetime import datetime, date, time as dtime
+    from config.constants import now_ist, IST
+
+    try:
+        exp = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+    except ValueError:
+        exp = date.fromisoformat(expiry_str[:10])
+
+    if as_of is not None:
+        curr_ist = as_of.astimezone(IST) if hasattr(as_of, "astimezone") else as_of
+    else:
+        curr_ist = now_ist()
+    today_ist = curr_ist.date()
+    delta_days = (exp - today_ist).days
+
+    if delta_days < 0:
+        return 0.0
+
+    now_time = curr_ist.time()
+    market_close = dtime(15, 30)
+    market_open = dtime(9, 15)
+
+    if now_time < market_open:
+        rem_mins = 375.0
+    elif now_time >= market_close:
+        rem_mins = 0.0
+    else:
+        rem_mins = (market_close.hour * 60 + market_close.minute) - (
+            now_time.hour * 60 + now_time.minute
+        )
+
+    if delta_days == 0:
+        # Clamp to at least 1 minute (1.0 / (375 * 365)) so T > 0 for BS calculations
+        effective_mins = max(1.0, rem_mins)
+        return (effective_mins / 375.0) / 365.0
+    else:
+        intraday_fraction = max(0.0, min(1.0, rem_mins / 375.0))
+        return (delta_days + intraday_fraction) / 365.0
 
 
 def _flag(option_type: str) -> str:
@@ -141,12 +178,13 @@ def compute_greeks(
     option_type: str,
     ltp: float,
     rate: float = RISK_FREE_RATE,
+    as_of: Optional[datetime] = None,
 ) -> Greeks:
     """
     Compute full Greeks for a single options contract.
     Falls back to analytical approximations if py_vollib unavailable.
     """
-    t = _dte_years(expiry)
+    t = _dte_years(expiry, as_of=as_of)
     flag = _flag(option_type)
 
     if PY_VOLLIB_AVAILABLE and ltp > 0.01:
@@ -215,9 +253,14 @@ def _bs_greeks_manual(
         d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
         d2 = d1 - sigma * math.sqrt(T)
         gamma = norm.pdf(d1) / (S * sigma * math.sqrt(T))
-        theta_val = -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T)) - r * K * math.exp(
-            -r * T
-        ) * norm.cdf(d2)
+        if option_type.upper() == "CE":
+            theta_val = -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T)) - r * K * math.exp(
+                -r * T
+            ) * norm.cdf(d2)
+        else:
+            theta_val = -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T)) + r * K * math.exp(
+                -r * T
+            ) * norm.cdf(-d2)
         return Greeks(
             delta=round(delta, 4),
             gamma=round(gamma, 6),
@@ -236,29 +279,39 @@ def _bs_greeks_manual(
 def iv_rank(
     current_iv: float,
     historical_ivs: list[float],
-) -> float:
+) -> Optional[float]:
     """
     IV Rank = (current_iv - 52w_low) / (52w_high - 52w_low) × 100
 
-    Returns 0–100.  >50 means IV is elevated relative to history.
+    Returns a rank only when a valid current IV and non-flat historical IV
+    observations are available. Realized volatility is not an IV substitute.
     """
-    if not historical_ivs:
-        return 50.0
-    iv_low = min(historical_ivs)
-    iv_high = max(historical_ivs)
+    import math
+
+    if not math.isfinite(current_iv) or current_iv <= 0 or not historical_ivs:
+        return None
+    values = [float(value) for value in historical_ivs if math.isfinite(float(value)) and value > 0]
+    if not values:
+        return None
+    iv_low = min(values)
+    iv_high = max(values)
     if iv_high == iv_low:
-        return 50.0
-    return round((current_iv - iv_low) / (iv_high - iv_low) * 100, 1)
+        return None
+    rank = (current_iv - iv_low) / (iv_high - iv_low) * 100
+    return round(min(100.0, max(0.0, rank)), 1)
 
 
-def compute_iv_rank_from_history(symbol: str, period: str = "1y") -> Optional[float]:
+def compute_realized_volatility_rank_from_history(
+    symbol: str, period: str = "1y"
+) -> Optional[float]:
     """
-    Compute IV rank from historical realized volatility.
+    Compute a realized-volatility rank from historical underlying prices.
 
     Uses 30-day rolling annualized volatility as an IV proxy:
       IV Rank = (current_RV - 52w_low_RV) / (52w_high_RV - 52w_low_RV) * 100
 
-    Returns 0-100 or None if data unavailable.
+    This is explicitly not implied-volatility rank and must not be used to
+    infer option richness, IV crush, or premium-selling/buying edge.
     """
     try:
         import yfinance as yf
@@ -288,11 +341,28 @@ def compute_iv_rank_from_history(symbol: str, period: str = "1y") -> Optional[fl
         hi = rolling_vol.max()
 
         if hi == lo:
-            return 50.0
+            return None
 
-        return round((current - lo) / (hi - lo) * 100, 1)
-    except Exception:
+        rank = (current - lo) / (hi - lo) * 100
+        return round(min(100.0, max(0.0, rank)), 1)
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Realized volatility rank unavailable for %s: %s", symbol, exc
+        )
         return None
+
+
+def compute_iv_rank_from_history(symbol: str, period: str = "1y") -> Optional[float]:
+    """Compatibility shim: underlying OHLC cannot establish historical IV rank."""
+    del period
+    import logging
+
+    logging.getLogger(__name__).info(
+        "IV rank unavailable for %s: no historical option-IV source is integrated", symbol
+    )
+    return None
 
 
 # ── Payoff calculator ─────────────────────────────────────────

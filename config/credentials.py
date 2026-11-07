@@ -179,9 +179,24 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
 
 # Settings saved to keychain by onboarding but NOT auto-loaded into env
 # (they're read explicitly by the onboarding status endpoint)
-SETTING_KEYS = {"TOTAL_CAPITAL", "DEFAULT_RISK_PCT", "TRADING_MODE", "ONBOARDING_COMPLETE"}
+SETTING_KEYS = {"TOTAL_CAPITAL", "TRADING_CAPITAL", "DEFAULT_RISK_PCT", "ONBOARDING_COMPLETE"}
 
 _KNOWN_KEYS = {k for k, _, _ in KNOWN_CREDENTIALS}
+
+# Security Invariant: Forbidden keys that must NEVER be mutated via set_credential
+_FORBIDDEN_ENV_MUTATION_KEYS = {
+    "ALLOW_LIVE_TRADING",
+    "LIVE_EXECUTION_QUALIFIED",
+    "PILOT_ALLOW_LIVE_EXECUTION",
+    "TRADING_MODE",
+    "DEPLOY_MODE",
+    "PATH",
+    "PYTHONPATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+}
+
+_ALLOWED_CREDENTIAL_KEYS = _KNOWN_KEYS | SETTING_KEYS
 
 
 # ── Keyring helper (graceful fallback if keyring unavailable) ─
@@ -350,6 +365,10 @@ def get_credential(
 
 def set_credential(key: str, value: str) -> None:
     """Save a credential to both the keychain and os.environ."""
+    if key in _FORBIDDEN_ENV_MUTATION_KEYS:
+        raise ValueError(f"Runtime mutation of '{key}' is strictly forbidden.")
+    if key not in _ALLOWED_CREDENTIAL_KEYS:
+        raise ValueError(f"Unknown or unauthorized credential key: '{key}'.")
     os.environ[key] = value
     if not _kr_set(key, value):
         console.print(

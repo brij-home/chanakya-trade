@@ -324,6 +324,7 @@ def test_tier1_gate17_depth_imbalance_supply_trap():
         stop_loss=985.0,  # 15 pts risk
         target_level=1045.0,  # 45 pts reward (1:3.0 R:R)
         metrics={
+            "rvol": 1.5,
             "total_buy_qty": 10000,
             "total_sell_qty": 30000,
             "atr": 15.0,
@@ -389,7 +390,7 @@ def test_tier1_gate17_depth_graceful_pass_when_balanced_or_absent():
         trigger_level=1000.0,
         stop_loss=985.0,
         target_level=1045.0,
-        metrics={"total_buy_qty": 20000, "total_sell_qty": 22000, "atr": 15.0},
+        metrics={"rvol": 1.5, "total_buy_qty": 20000, "total_sell_qty": 22000, "atr": 15.0},
         is_live=True,
         environment="LIVE",
     )
@@ -411,7 +412,7 @@ def test_tier1_gate17_depth_graceful_pass_when_balanced_or_absent():
         trigger_level=1000.0,
         stop_loss=985.0,
         target_level=1045.0,
-        metrics={"atr": 15.0},
+        metrics={"rvol": 1.5, "atr": 15.0},
         is_live=True,
         environment="LIVE",
     )
@@ -445,6 +446,7 @@ def test_tier1_gate18_developing_poc_acceptance_rejection():
         stop_loss=965.0,  # 15 pts risk
         target_level=1025.0,  # 45 pts reward
         metrics={
+            "rvol": 1.5,
             "d_poc": 1005.0,
             "d_val": 995.0,
             "d_vah": 1015.0,
@@ -479,6 +481,7 @@ def test_tier1_gate18_developing_poc_acceptance_success():
         stop_loss=1002.0,  # 16 pts risk
         target_level=1066.0,  # 48 pts reward (1:3.0 R:R)
         metrics={
+            "rvol": 1.5,
             "d_poc": 1005.0,
             "d_val": 995.0,
             "d_vah": 1015.0,
@@ -515,6 +518,7 @@ def test_tier1_gate19_divergence_exhaustion_trap_bullish():
         stop_loss=985.0,
         target_level=1045.0,
         metrics={
+            "rvol": 1.5,
             "divergence_type": "BEARISH_REGULAR",
             "divergence_bias": "BEARISH",
             "atr": 15.0,
@@ -577,7 +581,12 @@ def test_tier1_gate19_divergence_aligned_or_absent_pass():
         trigger_level=1000.0,
         stop_loss=985.0,
         target_level=1045.0,
-        metrics={"divergence_type": "BULLISH_REGULAR", "divergence_bias": "BULLISH", "atr": 15.0},
+        metrics={
+            "rvol": 1.5,
+            "divergence_type": "BULLISH_REGULAR",
+            "divergence_bias": "BULLISH",
+            "atr": 15.0,
+        },
         is_live=True,
         environment="LIVE",
     )
@@ -599,7 +608,7 @@ def test_tier1_gate19_divergence_aligned_or_absent_pass():
         trigger_level=1000.0,
         stop_loss=985.0,
         target_level=1045.0,
-        metrics={"atr": 15.0},
+        metrics={"rvol": 1.5, "atr": 15.0},
         is_live=True,
         environment="LIVE",
     )

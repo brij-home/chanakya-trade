@@ -6,6 +6,14 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def main():
     xml_path = sys.argv[1] if len(sys.argv) > 1 else "junit.xml"

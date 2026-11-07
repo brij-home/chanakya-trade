@@ -597,8 +597,11 @@ def detect_trend_day_pullback(
         actionable_plan=act_plan,
         metrics={
             "rvol": round(rvol_val, 2),
+            "trend_impulse_rvol": trend_rvol,
             "pullback_vol_ratio": pullback_vol_ratio,
             "is_volume_dryup": is_dryup,
+            "is_pullback": True,
+            "setup_archetype": "PULLBACK_RETEST",
             "atr_5m": round(atr_5m, 2),
             "ema_9": round(val_ema9, 2),
             "ema_20": round(val_ema20, 2),

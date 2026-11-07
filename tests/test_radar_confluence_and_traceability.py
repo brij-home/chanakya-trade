@@ -148,7 +148,7 @@ def test_deterministic_asymmetric_alert_id(monkeypatch):
     )
 
     class MockRadar:
-        def scan_asymmetric_opportunities(self, top_n=6):
+        def scan_asymmetric_opportunities(self, top_n=6, **kwargs):
             return [mock_opp]
 
     monkeypatch.setattr("engine.asymmetric_radar.asymmetric_radar", MockRadar())

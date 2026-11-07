@@ -27,8 +27,10 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import threading
@@ -40,7 +42,25 @@ logger = logging.getLogger("engine.detector_circuit_breaker")
 from config.constants import IST
 from config.paths import app_data_path
 
-DetectorStatus = Literal["HEALTHY", "NORMAL", "PROBATION", "HALTED"]
+DetectorStatus = Literal["UNCALIBRATED", "HEALTHY", "NORMAL", "PROBATION", "HALTED"]
+OutcomeProvenance = Literal[
+    "ALERT_FORWARD_PATH_TERMINAL",
+    "VERIFIED_BROKER_FILL",
+    "TEST",
+    "LEGACY_UNVERIFIED",
+]
+CALIBRATABLE_OUTCOME_PROVENANCE = frozenset({"ALERT_FORWARD_PATH_TERMINAL", "TEST"})
+
+
+def _is_test_runtime() -> bool:
+    """Keep synthetic calibration provenance unavailable to normal app runs."""
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _is_calibratable_record(record: "TradeOutcome") -> bool:
+    if record.provenance == "ALERT_FORWARD_PATH_TERMINAL":
+        return True
+    return record.provenance == "TEST" and _is_test_runtime()
 
 
 def get_performance_ledger_file() -> Path:
@@ -52,13 +72,16 @@ def get_performance_ledger_file() -> Path:
 
 @dataclass
 class TradeOutcome:
-    """Single realized forward trade outcome record."""
+    """Single terminal forward-path observation or explicitly tagged test record."""
 
     alert_id: str
     symbol: str
     alert_type: str
-    outcome: Literal["WIN", "LOSS"]
+    outcome: Literal["WIN", "LOSS", "FLAT"]
     realized_r: float
+    # Historical rows without provenance are deliberately retained for audit but
+    # excluded from calibration because older code could write assumed milestone R.
+    provenance: OutcomeProvenance = "LEGACY_UNVERIFIED"
     timestamp: str = field(
         default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     )
@@ -102,6 +125,7 @@ class DetectorCircuitBreaker:
         self.min_samples = min_samples
         self._lock = threading.Lock()
         self._history: dict[str, deque[TradeOutcome]] = {}
+        self._seen_outcomes: dict[str, str] = {}
         self._load()
 
     def record_outcome(
@@ -109,26 +133,73 @@ class DetectorCircuitBreaker:
         alert_id: str,
         symbol: str,
         alert_type: str,
-        outcome: Literal["WIN", "LOSS"],
+        outcome: Literal["WIN", "LOSS", "FLAT"],
         realized_r: float,
+        *,
+        provenance: Literal["ALERT_FORWARD_PATH_TERMINAL", "VERIFIED_BROKER_FILL", "TEST"],
     ) -> DetectorMetrics:
         """
         Records a completed trade outcome and returns recalibrated detector metrics.
         """
         clean_type = alert_type.upper().strip()
+        if not alert_id or not clean_type or not symbol or not math.isfinite(float(realized_r)):
+            raise ValueError(
+                "Outcome requires alert_id, symbol, detector type and finite realized_r."
+            )
+        if provenance == "VERIFIED_BROKER_FILL":
+            raise ValueError(
+                "Verified broker outcomes require an account-scoped reconciled fill-ledger "
+                "writer; a caller-supplied provenance label is insufficient."
+            )
+        if provenance == "TEST" and not _is_test_runtime():
+            raise ValueError("TEST outcome provenance is only accepted while running pytest.")
+        if provenance not in CALIBRATABLE_OUTCOME_PROVENANCE:
+            raise ValueError("Outcome provenance is not eligible for detector calibration.")
+        normalized_r = float(realized_r)
+        if normalized_r > 0 and outcome != "WIN":
+            raise ValueError("Positive realized_r must be recorded as WIN.")
+        if normalized_r < 0 and outcome != "LOSS":
+            raise ValueError("Negative realized_r must be recorded as LOSS.")
+        if normalized_r == 0:
+            outcome = "FLAT"
         record = TradeOutcome(
             alert_id=alert_id,
             symbol=symbol.upper().strip(),
             alert_type=clean_type,
             outcome=outcome,
-            realized_r=float(realized_r),
+            realized_r=normalized_r,
+            provenance=provenance,
         )
+        dedup_key = f"{clean_type}:{record.alert_id}"
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "symbol": record.symbol,
+                    "outcome": record.outcome,
+                    "realized_r": record.realized_r,
+                    "provenance": record.provenance,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
 
         with self._lock:
+            existing_fingerprint = self._seen_outcomes.get(dedup_key)
+            if existing_fingerprint:
+                if existing_fingerprint != fingerprint:
+                    raise ValueError(
+                        f"Conflicting outcome replay for alert {record.alert_id} / {clean_type}."
+                    )
+                duplicate = True
+            else:
+                duplicate = False
+                self._seen_outcomes[dedup_key] = fingerprint
             if clean_type not in self._history:
                 self._history[clean_type] = deque(maxlen=self.rolling_window)
-            self._history[clean_type].append(record)
-            self._save_unlocked()
+            if not duplicate:
+                self._history[clean_type].append(record)
+                self._save_unlocked()
 
         return self.get_metrics(clean_type)
 
@@ -138,45 +209,106 @@ class DetectorCircuitBreaker:
         """
         clean_type = alert_type.upper().strip()
         with self._lock:
-            records = list(self._history.get(clean_type, []))
+            records = [
+                record
+                for record in self._history.get(clean_type, [])
+                if _is_calibratable_record(record)
+            ]
 
         count = len(records)
         now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
+        wins = [r for r in records if r.outcome == "WIN"]
+        losses = [r for r in records if r.outcome == "LOSS"]
         if count < self.min_samples:
             return DetectorMetrics(
                 alert_type=clean_type,
                 sample_count=count,
-                win_rate=0.50,
-                avg_win_r=2.0,
-                avg_loss_r=1.0,
-                payoff_ratio=2.0,
-                expectancy=0.50,
-                kelly_fraction=0.25,
-                half_kelly=0.125,
+                win_rate=0.0,
+                avg_win_r=0.0,
+                avg_loss_r=0.0,
+                payoff_ratio=0.0,
+                expectancy=0.0,
+                kelly_fraction=0.0,
+                half_kelly=0.0,
                 consecutive_losses=0,
-                status="NORMAL",
+                status="UNCALIBRATED",
                 confidence_multiplier=1.0,
                 last_updated=now_str,
             )
 
-        wins = [r for r in records if r.outcome == "WIN"]
-        losses = [r for r in records if r.outcome == "LOSS"]
+        if not wins and not losses:
+            # A sample of flat outcomes contains no directional or risk evidence.
+            return DetectorMetrics(
+                alert_type=clean_type,
+                sample_count=count,
+                win_rate=0.0,
+                avg_win_r=0.0,
+                avg_loss_r=0.0,
+                payoff_ratio=0.0,
+                expectancy=0.0,
+                kelly_fraction=0.0,
+                half_kelly=0.0,
+                consecutive_losses=0,
+                status="UNCALIBRATED",
+                confidence_multiplier=1.0,
+                last_updated=now_str,
+            )
 
-        win_rate = len(wins) / count
-        avg_win_r = float(sum(r.realized_r for r in wins) / len(wins)) if wins else 0.0
-        avg_loss_r = float(sum(abs(r.realized_r) for r in losses) / len(losses)) if losses else 1.0
-        if avg_loss_r <= 0.01:
-            avg_loss_r = 0.5  # Defensive floor
-
-        payoff_ratio = avg_win_r / avg_loss_r if avg_loss_r > 0 else 1.0
-
-        # Mathematical Expectancy E = (W * R) - (1 - W)
-        expectancy = (win_rate * payoff_ratio) - (1.0 - win_rate)
-
-        # Kelly Criterion: K = W - (1 - W) / R
-        kelly = win_rate - ((1.0 - win_rate) / payoff_ratio) if payoff_ratio > 0 else 0.0
-        half_kelly = max(0.0, 0.5 * kelly)
+        if not wins:
+            avg_loss_r = float(sum(abs(r.realized_r) for r in losses) / len(losses))
+            expectancy = float(sum(r.realized_r for r in records) / count)
+            # A run with only losses can justify degradation, but cannot imply a
+            # payoff ratio or positive Kelly allocation.
+            win_rate = 0.0
+            avg_win_r = 0.0
+            payoff_ratio = 0.0
+            kelly = 0.0
+            half_kelly = 0.0
+        elif not losses:
+            # Wins without any observed losses do not estimate downside or a
+            # payoff ratio. Do not convert a one-sided sample into alpha.
+            return DetectorMetrics(
+                alert_type=clean_type,
+                sample_count=count,
+                win_rate=0.0,
+                avg_win_r=0.0,
+                avg_loss_r=0.0,
+                payoff_ratio=0.0,
+                expectancy=0.0,
+                kelly_fraction=0.0,
+                half_kelly=0.0,
+                consecutive_losses=0,
+                status="UNCALIBRATED",
+                confidence_multiplier=1.0,
+                last_updated=now_str,
+            )
+        else:
+            win_rate = len(wins) / count
+            avg_win_r = float(sum(r.realized_r for r in wins) / len(wins))
+            avg_loss_r = float(sum(abs(r.realized_r) for r in losses) / len(losses))
+            if avg_loss_r <= 0.01:
+                return DetectorMetrics(
+                    alert_type=clean_type,
+                    sample_count=count,
+                    win_rate=0.0,
+                    avg_win_r=0.0,
+                    avg_loss_r=0.0,
+                    payoff_ratio=0.0,
+                    expectancy=0.0,
+                    kelly_fraction=0.0,
+                    half_kelly=0.0,
+                    consecutive_losses=0,
+                    status="UNCALIBRATED",
+                    confidence_multiplier=1.0,
+                    last_updated=now_str,
+                )
+            payoff_ratio = avg_win_r / avg_loss_r
+            # Use observed average R per outcome rather than an assumed payoff
+            # floor; the formula is equivalent when wins/losses are directional.
+            expectancy = float(sum(r.realized_r for r in records) / count)
+            kelly = win_rate - ((1.0 - win_rate) / payoff_ratio) if payoff_ratio > 0 else 0.0
+            half_kelly = max(0.0, 0.5 * kelly)
 
         # Consecutive losses from tail in CURRENT session vs historical
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
@@ -191,6 +323,21 @@ class DetectorCircuitBreaker:
             else:
                 break
 
+        # Kelly and positive-edge status require account-bound fill provenance.
+        # Alert market paths may conservatively degrade a detector, but cannot
+        # claim a tradable edge or produce a Kelly allocation.
+        # Until the account-scoped, independently reconciled fill writer exists,
+        # production cannot claim verified performance. TEST samples exercise
+        # the math in pytest but are never trusted by normal application runs.
+        has_verified_performance_provenance = (
+            _is_test_runtime()
+            and bool(records)
+            and all(record.provenance == "TEST" for record in records)
+        )
+        if not has_verified_performance_provenance:
+            kelly = 0.0
+            half_kelly = 0.0
+
         # State Machine Evaluation
         # If 5 consecutive losses occurred in TODAY's session, or deeply negative expectancy with >=3 losses today:
         if today_consecutive_losses >= 5 or (expectancy < -0.60 and today_consecutive_losses >= 3):
@@ -199,12 +346,12 @@ class DetectorCircuitBreaker:
         elif (
             consecutive_losses >= 3
             or expectancy < 0.0
-            or kelly <= 0.0
+            or (has_verified_performance_provenance and kelly <= 0.0)
             or (expectancy < -0.60 and today_consecutive_losses < 3)
         ):
             status = "PROBATION"
             multiplier = 0.75
-        elif expectancy >= 0.20 and win_rate >= 0.40:
+        elif has_verified_performance_provenance and expectancy >= 0.20 and win_rate >= 0.40:
             status = "HEALTHY"
             multiplier = 1.05
         else:
@@ -252,6 +399,13 @@ class DetectorCircuitBreaker:
                 1.05,
                 f"Detector '{alert_type}' institutional alpha confirmed (E={metrics.expectancy:.2f}, W={metrics.win_rate * 100:.1f}%).",
             )
+        if metrics.status == "UNCALIBRATED":
+            return (
+                True,
+                1.0,
+                f"Detector '{alert_type}' is UNCALIBRATED ({metrics.sample_count}/{self.min_samples} "
+                "eligible outcomes or missing both wins and losses); no empirical alpha bonus is applied.",
+            )
         return (True, 1.0, f"Detector '{alert_type}' operating within normal tolerances.")
 
     def get_all_metrics(self) -> dict[str, dict[str, Any]]:
@@ -272,6 +426,7 @@ class DetectorCircuitBreaker:
         """Manually clears history for all detectors and resets ledger file."""
         with self._lock:
             self._history.clear()
+            self._seen_outcomes.clear()
             self._save_unlocked()
 
     def _maybe_reload(self) -> None:
@@ -291,7 +446,7 @@ class DetectorCircuitBreaker:
         """Persists trade history to JSON file atomically."""
         temp_path = None
         try:
-            data = {}
+            data = {"__schema_version__": 3, "__seen_outcomes__": self._seen_outcomes}
             for k, deq in self._history.items():
                 data[k] = [asdict(r) for r in deq]
             self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
@@ -318,16 +473,43 @@ class DetectorCircuitBreaker:
 
     def _load(self) -> None:
         """Loads trade history from JSON file with self-healing recovery on corruption."""
+        self._history.clear()
+        self._seen_outcomes.clear()
         if not self.ledger_file.exists():
             return
         try:
             self._last_mtime = self.ledger_file.stat().st_mtime
             with open(self.ledger_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            for k, records in data.items():
+            self._seen_outcomes = dict(data.get("__seen_outcomes__", {}))
+            detector_data = {
+                key: records for key, records in data.items() if not key.startswith("__")
+            }
+            for k, records in detector_data.items():
                 self._history[k] = deque(
                     [TradeOutcome(**r) for r in records], maxlen=self.rolling_window
                 )
+                for record in self._history[k]:
+                    dedup_key = f"{k}:{record.alert_id}"
+                    self._seen_outcomes.setdefault(
+                        dedup_key,
+                        hashlib.sha256(
+                            json.dumps(
+                                {
+                                    "symbol": record.symbol,
+                                    "outcome": record.outcome,
+                                    "realized_r": record.realized_r,
+                                    **(
+                                        {}
+                                        if record.provenance == "LEGACY_UNVERIFIED"
+                                        else {"provenance": record.provenance}
+                                    ),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    )
         except json.JSONDecodeError as jde:
             # Self-healing: quarantine corrupted file and reinitialize clean ledger
             corrupted_backup = self.ledger_file.with_suffix(f".corrupted.{int(time.time())}.json")

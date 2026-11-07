@@ -38,6 +38,8 @@ class SSEEventBus:
 
     HEARTBEAT_INTERVAL = 15  # seconds
     MAX_QUEUE_SIZE = 100
+    MAX_SUBSCRIBERS_PER_CHANNEL = 50
+    MAX_TOTAL_SUBSCRIBERS = 200
 
     def __init__(self) -> None:
         self._channels: dict[str, list[asyncio.Queue]] = defaultdict(list)
@@ -71,6 +73,19 @@ class SSEEventBus:
 
     async def subscribe(self, channel: str) -> AsyncGenerator[str, None]:
         """Yield SSE-formatted strings: 'data: {...}\\n\\n'"""
+        total_subs = sum(len(qs) for qs in self._channels.values())
+        if (
+            len(self._channels[channel]) >= self.MAX_SUBSCRIBERS_PER_CHANNEL
+            or total_subs >= self.MAX_TOTAL_SUBSCRIBERS
+        ):
+            logger.warning(
+                f"[SSEEventBus] Subscriber rejected: channel '{channel}' cap reached "
+                f"(channel={len(self._channels[channel])}/{self.MAX_SUBSCRIBERS_PER_CHANNEL}, "
+                f"total={total_subs}/{self.MAX_TOTAL_SUBSCRIBERS})"
+            )
+            yield f"event: error\ndata: {json.dumps({'error': 'Channel subscriber capacity reached'})}\n\n"
+            return
+
         q: asyncio.Queue = asyncio.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self._channels[channel].append(q)
         logger.info(

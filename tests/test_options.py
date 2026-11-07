@@ -19,12 +19,21 @@ class TestIVRank:
         assert iv_rank(25.0, [10.0, 40.0]) == pytest.approx(50.0)
 
     def test_empty_history(self):
-        """No historical data → default 50."""
-        assert iv_rank(20.0, []) == pytest.approx(50.0)
+        """No historical data means rank is unknown, never a fabricated neutral 50."""
+        assert iv_rank(20.0, []) is None
 
     def test_flat_history(self):
-        """All same IVs → default 50."""
-        assert iv_rank(20.0, [20.0, 20.0, 20.0]) == pytest.approx(50.0)
+        """A flat range cannot establish relative rank."""
+        assert iv_rank(20.0, [20.0, 20.0, 20.0]) is None
+
+    def test_invalid_or_nonpositive_iv_is_unavailable(self):
+        assert iv_rank(0.0, [10.0, 20.0]) is None
+        assert iv_rank(float("nan"), [10.0, 20.0]) is None
+
+    def test_underlying_price_history_is_not_iv_history(self):
+        from analysis.options import compute_iv_rank_from_history
+
+        assert compute_iv_rank_from_history("NIFTY") is None
 
 
 class TestPayoff:

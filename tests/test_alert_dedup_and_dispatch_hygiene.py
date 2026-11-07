@@ -47,11 +47,24 @@ def clean_engine(tmp_path):
     """Provides an isolated AutoAlertEngine instance backed by a temporary file."""
     data_file = str(tmp_path / "test_auto_alerts.json")
     with patch.dict(os.environ, {"AUTO_ALERTS_FILE": data_file}):
-        engine = AutoAlertEngine()
-        engine._alerts.clear()
-        engine._dispatched_milestones.clear()
-        engine._dispatch_cooldowns.clear()
-        yield engine
+        with patch(
+            "engine.signal_policy.evaluate_candidate_policy",
+            return_value=type(
+                "PolicyRes",
+                (),
+                {
+                    "decision": "ACCEPT",
+                    "conviction_tier": "HIGH",
+                    "blocking_gate": None,
+                    "to_dict": lambda s: {},
+                },
+            )(),
+        ):
+            engine = AutoAlertEngine()
+            engine._alerts.clear()
+            engine._dispatched_milestones.clear()
+            engine._dispatch_cooldowns.clear()
+            yield engine
 
 
 def test_apex_confluence_upgrade_does_not_redispatch_primary_card(clean_engine):
@@ -74,6 +87,8 @@ def test_apex_confluence_upgrade_does_not_redispatch_primary_card(clean_engine):
         option_type="CE",
         contract_symbol="MIDCPNIFTY26OCT12500CE",
         telegram_dispatched=True,
+        telegram_root_message_id=12345,
+        telegram_message_id=12345,
     )
     clean_engine._alerts.append(alert1)
 
@@ -209,6 +224,7 @@ def test_in_session_secondary_reentry_15m_reset_buffer(clean_engine):
         alert_type="INDEX_PUT_SETUP",
         stage="PRIMED",
         created_at=exit_time_recent,
+        metrics={"rvol": 2.5},
         strike=55500.0,
         option_type="PE",
         ltp=100.0,
@@ -292,6 +308,8 @@ def test_universal_signal_once_and_post_terminal_shield(clean_engine):
         environment="LIVE",
         is_live=True,
         telegram_dispatched=True,
+        telegram_root_message_id=12345,
+        telegram_message_id=12345,
     )
 
     with (
@@ -313,7 +331,7 @@ def test_universal_signal_once_and_post_terminal_shield(clean_engine):
         alert.target_status = "T1_ACHIEVED"
         alert.ltp = 112.0
         clean_engine._dispatch(alert)
-        assert mock_tg.call_count == 1
+        assert mock_tg.call_count == 1, f"Suppressed because: {alert.telegram_suppression_reason}"
 
         # 4. First exit: RUNNER_EXIT (allowed through and latches TERMINAL_EXIT)
         alert.stage = "RUNNER_EXIT"

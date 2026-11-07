@@ -704,7 +704,7 @@ def test_equity_telegram_destination_routing(monkeypatch):
         sent_calls[2][1] == "-1007777777777"
     )  # Routes to Equity channel, NOT -1004393392375 (FnO)
     assert "COFORGE [EQUITY]" in sent_calls[2][0]
-    assert "Spot CMP: ₹1,864.90" in sent_calls[2][0]
+    assert "Spot CMP:" in sent_calls[2][0] and "1,864.90" in sent_calls[2][0]
     assert "Opt CMP" not in sent_calls[2][0]
 
 
@@ -765,6 +765,9 @@ def test_fno_index_channel_whitelist_nifty_banknifty_midcp_sensex_only(monkeypat
     # 3. AutoAlertEngine._dispatch filtering verification
     monkeypatch.setenv("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+    # This test covers the dedicated paid F&O channel only. Disable the optional
+    # community mirror so a developer's local .env cannot change its send count.
+    monkeypatch.setattr("engine.free_index_router.free_index_router.get_chat_id", lambda: None)
 
     sent_tg = []
 

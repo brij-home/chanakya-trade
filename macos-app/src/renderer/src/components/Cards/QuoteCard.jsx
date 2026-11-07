@@ -3,6 +3,17 @@ import CandlestickChart from '../Charts/CandlestickChart'
 import { useChatStore } from '../../store/chatStore'
 import { getSymbolExchange } from '../../data/universeData'
 
+function fmt(n) {
+  return Number(n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function vol(n) {
+  const v = Number(n ?? 0)
+  if (v >= 1e7) return `${(v / 1e7).toFixed(2)}Cr`
+  if (v >= 1e5) return `${(v / 1e5).toFixed(2)}L`
+  return v.toLocaleString('en-IN')
+}
+
 export default function QuoteCard({ data }) {
   const [showChart, setShowChart] = useState(false)
   const sendDraft = useChatStore((s) => s.sendDraft)
@@ -99,16 +110,6 @@ export default function QuoteCard({ data }) {
       </div>
     </Card>
   )
-}
-
-const fmt = (n) =>
-  Number(n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-
-const vol = (n) => {
-  const v = Number(n ?? 0)
-  if (v >= 1e7) return `${(v / 1e7).toFixed(2)}Cr`
-  if (v >= 1e5) return `${(v / 1e5).toFixed(2)}L`
-  return v.toLocaleString('en-IN')
 }
 
 function Card({ children }) {

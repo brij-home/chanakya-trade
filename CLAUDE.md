@@ -18,7 +18,7 @@
 - AI providers: Groq, Gemini, Claude, OpenAI, NVIDIA NIM, OpenRouter
 
 ## Safety & Truthfulness Guardrails
-- **Paper Default**: Default to `TRADING_MODE=PAPER`. Live execution requires `ALLOW_LIVE_TRADING=1` and `assert_live_execution_allowed()`.
+- **Paper Default**: Default to `TRADING_MODE=PAPER`. Live broker execution strictly requires triple-gating: `TRADING_MODE=EXECUTE`, `ALLOW_LIVE_TRADING=1`, `LIVE_EXECUTION_QUALIFIED=1`, and pilot qualification `PILOT_ALLOW_LIVE_EXECUTION=1` passing `assert_live_execution_allowed()`.
 - **Fail-Closed Execution**: Ambiguous broker responses or timeouts must transition to `UNKNOWN_FREEZE` with no fabricated IDs.
 - **Truthful Modes**: Mode mapping via `/api/mode` is server-authoritative (`OBSERVE -> DEMO`, `SIMULATE -> PAPER`, `EXECUTE -> LIVE`).
 - **Zero Fabrication**: Security 360 dossiers emit explicit `UNAVAILABLE`/`PARTIAL` states on missing live data. Reconciliation requires authenticated broker snapshots.

@@ -230,7 +230,7 @@ class TestSectorConcurrencyAndTelegramCard:
             stop_loss=540.0,
             ltp=552.0,
             confidence=84,
-            metrics={},
+            metrics={"vix": 14.5, "rvol": 2.2},
             actionable_plan={"recommended_entry": "550.0", "stop_loss": "540.0"},
             is_live=True,
             environment="LIVE",

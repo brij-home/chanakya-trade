@@ -1930,8 +1930,6 @@ class EODReportGenerator:
                 f"Tomorrow is {tomorrow_day_name} ({tomorrow_expiry_index or 'Regular'} weekly settlement)."
             )
 
-            from concurrent.futures import ThreadPoolExecutor
-
             def _chat():
                 return provider.chat(
                     [
@@ -1941,13 +1939,13 @@ class EODReportGenerator:
                     enable_tools=False,
                 )
 
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_chat)
-                response = future.result(timeout=8.0)
-                if response and isinstance(response, str) and len(response.strip()) > 30:
-                    return response.strip()
+            from engine.llm_deadline import run_with_deadline
+
+            response = run_with_deadline(_chat, timeout=8.0, label="eod-report-narrative")
+            if response and isinstance(response, str) and len(response.strip()) > 30:
+                return response.strip()
         except Exception as e:
-            logger.debug(f"[EODReportGenerator] AI CIO synthesis bypassed: {e}")
+            logger.warning("[EODReportGenerator] AI CIO synthesis unavailable: %s", e)
 
         return deterministic_fallback
 
@@ -1977,6 +1975,7 @@ class EODReportGenerator:
         in_flight_count = 0
         untriggered_count = 0
         scratch_count = 0
+        losing_scratch_count = 0
         eod_squareoff_count = 0
         total_realized_r = 0.0
         segment_counts: dict[str, int] = {}
@@ -1993,6 +1992,7 @@ class EODReportGenerator:
         tg_in_flight_count = 0
         tg_untriggered_count = 0
         tg_scratch_count = 0
+        tg_losing_scratch_count = 0
         tg_eod_squareoff_count = 0
         tg_total_realized_r = 0.0
         telegram_star_setups: list[TradeOutcomeSummary] = []
@@ -2006,6 +2006,7 @@ class EODReportGenerator:
         ui_in_flight_count = 0
         ui_untriggered_count = 0
         ui_scratch_count = 0
+        ui_losing_scratch_count = 0
         ui_eod_squareoff_count = 0
         ui_total_realized_r = 0.0
 
@@ -2210,10 +2211,24 @@ class EODReportGenerator:
 
             # Compute theoretical points & risk
             risk = abs(entry - sl) if abs(entry - sl) > 0.001 else 1.0
+            # If invalidated due to velocity time-stop / stagnation scratch (not a stop loss hit),
+            # exit occurs at market price (ltp), not at the full stop-loss.
+            is_scratch_exit = bool(
+                target_status in ("STAGNATION_SCRATCH", "TIME_STOP_EXIT")
+                or stage in ("STAGNATION_EXIT", "TIME_STOP_EXIT")
+                or "velocity stagnation" in lower_inv
+                or "stagnation scratch" in lower_inv
+                or "velocity time-stop" in lower_inv
+                or "time-stop expired" in lower_inv
+                or "scratched early" in lower_inv
+                or "velocity stagnation" in str(a.get("archive_reason", "")).lower()
+                or "stagnation scratch" in str(a.get("archive_reason", "")).lower()
+            )
+            is_sl_hit = is_inv and not is_scratch_exit
             if is_long:
-                gain_pts = (ltp - entry) if not is_inv else (sl - entry)
+                gain_pts = (ltp - entry) if not is_sl_hit else (sl - entry)
             else:
-                gain_pts = (entry - ltp) if not is_inv else (entry - sl)
+                gain_pts = (entry - ltp) if not is_sl_hit else (entry - sl)
             gain_pct = (gain_pts / entry * 100.0) if entry > 0 else 0.0
             r_mult = gain_pts / risk if risk > 0 else 0.0
 
@@ -2446,13 +2461,17 @@ class EODReportGenerator:
                 outcome = "VELOCITY_TIME_STOP"
                 scratch_count += 1
                 detector_stats[det]["scratches"] += 1
-                r_achieved = max(-0.8, min(0.3, round(r_mult, 2)))
+                r_achieved = round(r_mult, 2) if r_mult is not None else 0.0
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
                 if r_achieved > 0:
                     gross_profit_r += r_achieved
-                else:
+                elif r_achieved < 0:
                     gross_loss_r += abs(r_achieved)
+                    losing_scratch_count += 1
+                    detector_stats[det]["losing_scratches"] = (
+                        detector_stats[det].get("losing_scratches", 0) + 1
+                    )
 
                 if is_tg:
                     tg_scratch_count += 1
@@ -2461,8 +2480,12 @@ class EODReportGenerator:
                     detector_stats[det]["tg_net_r"] += r_achieved
                     if r_achieved > 0:
                         tg_gross_profit_r += r_achieved
-                    else:
+                    elif r_achieved < 0:
                         tg_gross_loss_r += abs(r_achieved)
+                        tg_losing_scratch_count += 1
+                        detector_stats[det]["tg_losing_scratches"] = (
+                            detector_stats[det].get("tg_losing_scratches", 0) + 1
+                        )
                 else:
                     ui_scratch_count += 1
                     ui_total_realized_r += r_achieved
@@ -2470,8 +2493,12 @@ class EODReportGenerator:
                     detector_stats[det]["ui_net_r"] += r_achieved
                     if r_achieved > 0:
                         ui_gross_profit_r += r_achieved
-                    else:
+                    elif r_achieved < 0:
                         ui_gross_loss_r += abs(r_achieved)
+                        ui_losing_scratch_count += 1
+                        detector_stats[det]["ui_losing_scratches"] = (
+                            detector_stats[det].get("ui_losing_scratches", 0) + 1
+                        )
 
                 verdict_note = "Momentum stalled after 30m; velocity time-stop saved full SL."
 
@@ -2827,12 +2854,8 @@ class EODReportGenerator:
         # ─────────────────────────────────────────────────────────────────────
         # Quantitative Calculations & Analytics
         # ─────────────────────────────────────────────────────────────────────
-        decisive_trades = win_count + loss_count
-        win_rate = (
-            (win_count / decisive_trades * 100.0)
-            if decisive_trades > 0
-            else (75.0 if total_alerts > 0 else 0.0)
-        )
+        decisive_trades = win_count + loss_count + losing_scratch_count
+        win_rate = (win_count / decisive_trades * 100.0) if decisive_trades > 0 else 0.0
         avg_r = (total_realized_r / decisive_trades) if decisive_trades > 0 else 0.0
         profit_factor = (
             round(gross_profit_r / gross_loss_r, 2)
@@ -2841,12 +2864,8 @@ class EODReportGenerator:
         )
 
         # Telegram Sub-Calculations
-        tg_decisive = tg_win_count + tg_loss_count
-        tg_win_rate = (
-            (tg_win_count / tg_decisive * 100.0)
-            if tg_decisive > 0
-            else (75.0 if tg_total_alerts > 0 else 0.0)
-        )
+        tg_decisive = tg_win_count + tg_loss_count + tg_losing_scratch_count
+        tg_win_rate = (tg_win_count / tg_decisive * 100.0) if tg_decisive > 0 else 0.0
         tg_avg_r = (tg_total_realized_r / tg_decisive) if tg_decisive > 0 else 0.0
         tg_profit_factor = (
             round(tg_gross_profit_r / tg_gross_loss_r, 2)
@@ -2855,12 +2874,8 @@ class EODReportGenerator:
         )
 
         # UI Sub-Calculations
-        ui_decisive = ui_win_count + ui_loss_count
-        ui_win_rate = (
-            (ui_win_count / ui_decisive * 100.0)
-            if ui_decisive > 0
-            else (75.0 if ui_total_alerts > 0 else 0.0)
-        )
+        ui_decisive = ui_win_count + ui_loss_count + ui_losing_scratch_count
+        ui_win_rate = (ui_win_count / ui_decisive * 100.0) if ui_decisive > 0 else 0.0
         ui_avg_r = (ui_total_realized_r / ui_decisive) if ui_decisive > 0 else 0.0
         ui_profit_factor = (
             round(ui_gross_profit_r / ui_gross_loss_r, 2)
@@ -2881,25 +2896,25 @@ class EODReportGenerator:
             wins = stats["wins"]
             losses = stats["losses"]
             scratches = stats["scratches"]
-            decisive = wins + losses
-            wr = (wins / decisive * 100.0) if decisive > 0 else (100.0 if wins > 0 else 0.0)
+            decisive = wins + losses + stats.get("losing_scratches", 0)
+            wr = (wins / decisive * 100.0) if decisive > 0 else 0.0
             net_r = stats["net_r"]
 
             tg_cnt = stats.get("tg_count", 0)
             tg_w = stats.get("tg_wins", 0)
             tg_l = stats.get("tg_losses", 0)
-            tg_dec = tg_w + tg_l
-            tg_wr = (tg_w / tg_dec * 100.0) if tg_dec > 0 else (100.0 if tg_w > 0 else 0.0)
+            tg_dec = tg_w + tg_l + stats.get("tg_losing_scratches", 0)
+            tg_wr = (tg_w / tg_dec * 100.0) if tg_dec > 0 else 0.0
             tg_nr = stats.get("tg_net_r", 0.0)
 
             ui_cnt = stats.get("ui_count", 0)
             ui_w = stats.get("ui_wins", 0)
             ui_l = stats.get("ui_losses", 0)
-            ui_dec = ui_w + ui_l
-            ui_wr = (ui_w / ui_dec * 100.0) if ui_dec > 0 else (100.0 if ui_w > 0 else 0.0)
+            ui_dec = ui_w + ui_l + stats.get("ui_losing_scratches", 0)
+            ui_wr = (ui_w / ui_dec * 100.0) if ui_dec > 0 else 0.0
             ui_nr = stats.get("ui_net_r", 0.0)
 
-            if wins >= 2 and net_r > 0:
+            if wins >= 2 and net_r > 0 and wr >= 50.0:
                 verdict = "🟢 **Core Alpha**: High-conviction expansion vehicle"
             elif losses >= 2 and net_r < 0:
                 verdict = "🔴 **Capital Drag**: Prune or raise conviction bar"
@@ -3103,21 +3118,24 @@ class EODReportGenerator:
         day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         tomorrow_day_name = day_names[tomorrow_dt.weekday()]
 
-        # SEBI Regulatory Mandate: Only NIFTY (Thursday=3) and SENSEX (Friday=4) have weekly expiries.
-        # MIDCPNIFTY, BANKNIFTY, and FINNIFTY are strictly monthly expiries.
-        from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
+        from market.calendar import is_expiry_day
 
-        tomorrow_expiry_index = next(
-            (idx for idx, wd in INDEX_WEEKLY_EXPIRY_WEEKDAY.items() if wd == tomorrow_dt.weekday()),
-            None,
-        )
-
-        tomorrow_recs = [
-            f"Enforce T0.5 quick-scale (+16%) on {tomorrow_expiry_index or 'active'} contracts to neutralize rapid afternoon theta decay.",
-            "Let remaining 65% position ride on 20-EMA trailing stop to participate in asymmetric multi-bagger extensions.",
-            "Maintain strict 82% institutional conviction bar for Telegram broadcast alerts to protect signal-to-noise ratio.",
-            "Watch institutional opening drive (09:15–09:45 IST) for Order Block retests before committing full size.",
+        expiry_indices = [
+            symbol
+            for symbol in ("NIFTY", "SENSEX", "BANKNIFTY")
+            if is_expiry_day(symbol, ref_date=tomorrow_dt)
         ]
+        tomorrow_expiry_index = ", ".join(expiry_indices) if expiry_indices else None
+        if expiry_indices:
+            tomorrow_recs = [
+                "Listed expiry context tomorrow: "
+                + ", ".join(expiry_indices)
+                + ". Verify each active contract, live liquidity and settlement exposure; expiry alone gives no directional signal."
+            ]
+        else:
+            tomorrow_recs = [
+                "No configured benchmark expiry is scheduled tomorrow. Recheck live regime, liquidity and risk before any trade."
+            ]
 
         key_levels = self._compute_key_levels(mkt)
 

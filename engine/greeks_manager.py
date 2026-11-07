@@ -243,7 +243,12 @@ def compute_roll_suggestions(
     Returns:
         List of RollSuggestion for positions needing attention.
     """
-    today = date.today()
+    try:
+        from config.constants import now_ist
+
+        today = now_ist().date()
+    except Exception:
+        today = date.today()
     suggestions = []
 
     for pos in positions:

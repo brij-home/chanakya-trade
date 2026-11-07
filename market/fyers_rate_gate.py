@@ -121,7 +121,10 @@ class UnifiedFyersRateGate:
 
         selected_plan = (plan or os.environ.get("FYERS_PLAN", "PRIME")).upper()
         if selected_plan not in FYERS_PLAN_PRESETS:
-            selected_plan = "PRIME"
+            raise ValueError(
+                f"Unknown FYERS_PLAN {selected_plan!r}; expected one of "
+                f"{', '.join(sorted(FYERS_PLAN_PRESETS))}"
+            )
         self._plan = selected_plan
         preset = FYERS_PLAN_PRESETS[selected_plan]
 

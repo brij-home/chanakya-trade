@@ -60,6 +60,9 @@ def test_fno_stock_enrichment_converts_ticket_to_option_space():
         },
     )
 
+    from datetime import date, datetime, timezone
+    from market.contract_selection import ActiveContractResolution, ListedContract
+
     mock_resolved = MagicMock()
     mock_resolved.contract_symbol = "NSE:LT26OCT3650CE"
     mock_resolved.strike = 3650.0
@@ -73,6 +76,7 @@ def test_fno_stock_enrichment_converts_ticket_to_option_space():
     mock_resolved.t2_premium = 115.00
     mock_resolved.t3_premium = 145.00
     mock_resolved.spot = spot_price
+    mock_resolved.is_estimated = False
     mock_resolved.as_dict.return_value = {
         "contract": "NSE:LT26OCT3650CE",
         "strike": 3650.0,
@@ -87,8 +91,47 @@ def test_fno_stock_enrichment_converts_ticket_to_option_space():
         "spot": spot_price,
     }
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_source = {
+        "provider": "FYERS",
+        "source": "BROKER_REST",
+        "data_state": "LIVE",
+        "is_realtime": True,
+        "is_market_open": True,
+        "as_of": now_iso,
+        "observation_time": now_iso,
+        "receipt_time": now_iso,
+    }
+    mock_chain = [
+        MagicMock(
+            symbol="NSE:LT26OCT3650CE",
+            last_price=54.20,
+            strike=3650.0,
+            option_type="CE",
+            expiry="29-Oct-2026",
+        )
+    ]
+    mock_active = ActiveContractResolution(
+        is_valid=True,
+        contract=ListedContract(
+            symbol="NSE:LT26OCT3650CE",
+            underlying="LT",
+            expiry=date(2026, 10, 29),
+            option_type="CE",
+            strike=3650.0,
+            lot_size=175,
+            tick_size=0.05,
+            token="33333",
+        ),
+    )
+
     with (
         patch("engine.position_sizer.is_fno_symbol", return_value=True),
+        patch(
+            "market.options.get_options_snapshot",
+            return_value=(mock_chain, spot_price, ["29-Oct-2026"], mock_source),
+        ),
+        patch("market.contract_selection.resolve_active_contract", return_value=mock_active),
         patch("engine.option_resolver.resolve_option_contract", return_value=mock_resolved),
     ):
         engine._enrich_fno_contract_if_applicable(alert)

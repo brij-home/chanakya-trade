@@ -46,7 +46,7 @@ def test_stoxkart_auth_flow():
 
     res = broker.authenticate(api_key="key", api_secret="sec", client_code="C123")
     assert res is True
-    assert broker.is_authenticated is True
+    assert broker.is_authenticated() is True
 
 
 def test_stoxkart_auth_failure_never_creates_a_session():
@@ -54,7 +54,7 @@ def test_stoxkart_auth_failure_never_creates_a_session():
     broker._client.post = MagicMock(side_effect=OSError("network unavailable"))
 
     assert broker.authenticate() is False
-    assert broker.is_authenticated is False
+    assert broker.is_authenticated() is False
     with pytest.raises(RuntimeError, match="no live or simulated broker session"):
         broker.complete_login()
 

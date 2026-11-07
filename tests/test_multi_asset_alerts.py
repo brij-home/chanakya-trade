@@ -129,7 +129,7 @@ def test_mcx_commodity_alert_template_rendering():
         symbol="CRUDEOIL",
         exchange="MCX",
         direction="BULLISH",
-        headline="🛢️ [REAL/LIVE] MCX MOMENTUM: CRUDEOIL +1.8% Reclaiming VWAP",
+        headline="🛢️ [LIVE] MCX MOMENTUM: CRUDEOIL +1.8% Reclaiming VWAP",
         summary="Institutional breakout in CRUDEOIL: Trading at ₹6,520.0 (+1.8%).",
         ltp=6520.0,
         trigger_level=6520.0,
@@ -151,10 +151,8 @@ def test_mcx_commodity_alert_template_rendering():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert (
-        "[REAL/LIVE] NEW CALL · MCX MOMENTUM" in rendered or "[REAL/LIVE] MCX MOMENTUM" in rendered
-    )
-    assert rendered.count("[REAL/LIVE]") == 1
+    assert "[LIVE] NEW CALL · MCX MOMENTUM" in rendered or "[LIVE] MCX MOMENTUM" in rendered
+    assert rendered.count("[LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "MCX Commodity Plan" not in rendered
     assert "BUY FUT <b>CRUDEOIL</b>" in rendered or "BUY_FUTURES <b>MCX:CRUDEOIL</b>" in rendered
@@ -173,7 +171,7 @@ def test_cds_currency_alert_template_rendering():
         symbol="USDINR",
         exchange="CDS",
         direction="BULLISH",
-        headline="💱 [REAL/LIVE] CURRENCY BREAKOUT: USDINR +0.14% @ ₹83.9250",
+        headline="💱 [LIVE] CURRENCY BREAKOUT: USDINR +0.14% @ ₹83.9250",
         summary="Macro currency surge in USDINR: Moving +0.14% to ₹83.9250.",
         ltp=83.9250,
         trigger_level=83.9250,
@@ -196,10 +194,9 @@ def test_cds_currency_alert_template_rendering():
 
     rendered = render_auto_alert(alert, in_market=True)
     assert (
-        "[REAL/LIVE] NEW CALL · CURRENCY BREAKOUT" in rendered
-        or "[REAL/LIVE] CURRENCY BREAKOUT" in rendered
+        "[LIVE] NEW CALL · CURRENCY BREAKOUT" in rendered or "[LIVE] CURRENCY BREAKOUT" in rendered
     )
-    assert rendered.count("[REAL/LIVE]") == 1
+    assert rendered.count("[LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "Macro Currency Plan" not in rendered
     assert "BUY FUTURES <b>CDS:USDINR</b>" in rendered

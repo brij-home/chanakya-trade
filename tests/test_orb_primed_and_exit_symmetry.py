@@ -167,7 +167,9 @@ def test_premarket_gap_invalidation_state(tmp_path, monkeypatch):
         is_live=True,
         environment="LIVE",
     )
-    eng.record_alert(alert)
+    # Seed an already-existing setup directly. This test covers lifecycle
+    # monitoring, not admission of a new cash-equity discovery alert.
+    eng._alerts.append(alert)
 
     # Mock pre-market quote indicating opening gap down to 92.0 (< SL 95.0)
     mock_quotes = {

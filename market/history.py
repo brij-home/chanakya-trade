@@ -162,6 +162,14 @@ def get_ohlcv(
         days = min(days, 25)
     elif kite_interval == "day":
         ttl_limit = _DF_TTL_SECONDS
+    elif kite_interval in ("1m", "1minute", "minute"):
+        ttl_limit = 15.0
+    elif kite_interval in ("3m", "3minute"):
+        ttl_limit = 30.0
+    elif kite_interval in ("5m", "5minute"):
+        ttl_limit = 45.0
+    elif kite_interval in ("15m", "15minute"):
+        ttl_limit = 90.0
     else:
         ttl_limit = _INTRADAY_TTL_SECONDS
     is_live_request = (as_of is None) and (
@@ -223,7 +231,17 @@ def get_ohlcv(
 
                 # Ensure stored slice is sufficient for requested horizon (e.g. extended backtests)
                 min_expected_bars = int(days * 0.6) if days > 100 else min(days, 15)
-                if not sliced.empty and len(sliced) >= min_expected_bars:
+                from market.calendar import get_latest_trading_day
+
+                latest_completed_session = get_latest_trading_day(exchange=exchange)
+                stored_last_date = (
+                    stored_df.index[-1].date() if hasattr(stored_df.index[-1], "date") else None
+                )
+                is_eod_fresh = (
+                    stored_last_date is not None and stored_last_date >= latest_completed_session
+                ) or (os.environ.get("CHANAKYA_TESTING") == "1")
+
+                if is_eod_fresh and not sliced.empty and len(sliced) >= min_expected_bars:
                     res_df = sliced.copy()
                     if include_live_candle:
                         res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange)
@@ -280,10 +298,9 @@ def get_ohlcv(
                     if wh_start_dt.date() > (req_start.date() + timedelta(days=5)):
                         wh_covers_horizon = False
 
-                # Data Freshness Guard: For intraday bars during active market hours,
-                # do not return stale cached bars older than 3 intervals.
+                # Data Freshness Guard: Ensure warehouse bars reach the latest completed trading session
                 is_stale = False
-                if kite_interval != "day" and not wh_df.empty:
+                if not wh_df.empty:
                     try:
                         from market.calendar import is_market_open, get_latest_trading_day
 
@@ -300,7 +317,11 @@ def get_ohlcv(
                             and os.environ.get("CHANAKYA_TESTING") != "1"
                         ):
                             is_stale = True
-                        elif is_market_open(exchange) and os.environ.get("CHANAKYA_TESTING") != "1":
+                        elif (
+                            kite_interval != "day"
+                            and is_market_open(exchange)
+                            and os.environ.get("CHANAKYA_TESTING") != "1"
+                        ):
                             from config.constants import IST
 
                             now_loc = datetime.now(IST).replace(tzinfo=None)
@@ -318,7 +339,8 @@ def get_ohlcv(
                                 intv_sec = 1800
                             elif kite_interval in ("60m", "60minute", "1h"):
                                 intv_sec = 3600
-                            if age_sec > max(intv_sec * 3, 900):
+                            max_allowed_age = max(intv_sec * 1.5, 90.0)
+                            if age_sec > max_allowed_age:
                                 is_stale = True
                     except Exception as e_stale:
                         logger.debug(f"[market.history] Freshness evaluation error: {e_stale}")
@@ -356,10 +378,30 @@ def get_ohlcv(
     if kite_interval == "day":
         try:
             from engine.analysis_cache import cache_get
+            from market.calendar import get_latest_trading_day
 
             cached_rows = cache_get(f"ohlcv_{cache_key}", namespace="history", max_age_seconds=900)
             if cached_rows and isinstance(cached_rows, list) and len(cached_rows) >= 10:
-                raw = cached_rows
+                latest_completed_session = get_latest_trading_day(exchange=exchange)
+                last_dt_val = cached_rows[-1].get("date")
+                last_row_date = None
+                if isinstance(last_dt_val, str) and len(last_dt_val) >= 10:
+                    try:
+                        last_row_date = datetime.strptime(last_dt_val[:10], "%Y-%m-%d").date()
+                    except Exception as e_date:
+                        logger.debug(
+                            f"[market.history] Date parse exception for cache date {last_dt_val}: {e_date}"
+                        )
+                if (
+                    last_row_date is None
+                    or last_row_date >= latest_completed_session
+                    or os.environ.get("CHANAKYA_TESTING") == "1"
+                ):
+                    raw = cached_rows
+                else:
+                    logger.debug(
+                        f"[market.history] Tier 2 analysis_cache daily bars stale ({last_row_date} < {latest_completed_session}), refreshing"
+                    )
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -419,6 +461,42 @@ def get_ohlcv(
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
+    # Tier 2.9: In-RAM Synthesized Intraday Bars (LiveCandleWeaver / MarketMatrix)
+    # Serves streaming WebSocket bars in 0.1ms without hitting broker REST /history endpoints
+    if not raw and not as_of and kite_interval != "day" and days <= 3 and not is_crypto:
+        try:
+            from engine.market_matrix import get_market_matrix
+
+            tf_map = {
+                "minute": "1m",
+                "1m": "1m",
+                "1minute": "1m",
+                "3minute": "3m",
+                "3m": "3m",
+                "5minute": "5m",
+                "5m": "5m",
+                "15minute": "15m",
+                "15m": "15m",
+                "30minute": "30m",
+                "30m": "30m",
+                "60minute": "60m",
+                "60m": "60m",
+                "1h": "60m",
+            }
+            tf = tf_map.get(kite_interval)
+            if tf:
+                mm_df = get_market_matrix().get_candles_df(
+                    clean_sym, timeframe=tf, limit=max(30, days * 75)
+                )
+                if mm_df is not None and len(mm_df) >= 3:
+                    with _df_memory_cache_lock:
+                        while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                            _df_memory_cache.popitem(last=False)
+                        _df_memory_cache[cache_key] = (now_ts, mm_df.copy())
+                    return mm_df.copy()
+        except Exception as e_mm:
+            logger.debug(f"[market.history] MarketMatrix check non-fatal: {e_mm}")
+
     # Tier 3: explicit data-provider API → yfinance → disk cache with in-flight coalescing.
     # CRITICAL: Indian equity brokers (Fyers, Zerodha, etc.) do not host crypto assets.
     if not raw and not is_crypto:
@@ -472,6 +550,17 @@ def get_ohlcv(
                     evt.set()
                     with _IN_FLIGHT_HISTORY_LOCK:
                         _IN_FLIGHT_HISTORY_EVENTS.pop(flight_key, None)
+
+    if raw and not is_crypto and provider_name not in ("disk_cache", "cache"):
+        try:
+            from engine.historical_warehouse import historical_warehouse
+
+            df_to_save = pd.DataFrame(raw)
+            historical_warehouse.save_bars(
+                clean_sym, interval=kite_interval, df=df_to_save, provider=provider_name
+            )
+        except Exception as e_save:
+            logger.debug(f"[market.history] Auto-saving broker bars to warehouse: {e_save}")
 
     if not raw:
         raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
@@ -567,7 +656,6 @@ def get_ohlcv(
         return empty_df
 
     df = pd.DataFrame(raw)
-    df.rename(columns={"date": "date"}, inplace=True)
     if exchange.upper() in ("NSE", "BSE", "NFO", "MCX", "CDS"):
         raw_dt = pd.to_datetime(df["date"])
         if raw_dt.dt.tz is not None:
@@ -588,11 +676,11 @@ def get_ohlcv(
         df["date"] = dt_col
     else:
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_localize(None)
-    df.set_index("date", inplace=True)
+    df = df.set_index("date")
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df = df[~df.index.duplicated(keep="last")]
-    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-    df.sort_index(inplace=True)
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df = df.sort_index()
 
     # Live/incomplete candle enrichment is opt-in and is never cached as EOD.
     if include_live_candle and not df.empty:

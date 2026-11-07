@@ -328,6 +328,7 @@ def test_tier1_bearish_with_option_recommendation(auditor: AlertScrutinyAuditor)
         direction="BEARISH",
         headline="Dixon Breakdown Spark",
         summary="Lost VWAP with 2.5x RVOL",
+        metrics={"rvol": 2.5},
         ltp=13500.0,
         trigger_level=13500.0,
         stop_loss=13650.0,  # 150 pts risk (1.11%)
@@ -368,6 +369,7 @@ def test_tier1_options_momentum_put_buyer(auditor: AlertScrutinyAuditor):
         strike=13500.0,
         option_type="PE",
         option_premium=450.0,
+        metrics={"volume": 50000, "oi": 50000, "vol_oi_ratio": 1.0},
         is_live=True,
         environment="LIVE",
     )
@@ -514,7 +516,7 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
         target_level=65.0,
         strike=1100.0,
         option_type="CE",
-        metrics={"oi": 40, "volume": 150},
+        metrics={"oi": 40, "volume": 150, "rvol": 2.5},
         is_live=True,
         environment="LIVE",
     )
@@ -539,7 +541,7 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
         target_level=65.0,
         strike=1100.0,
         option_type="CE",
-        metrics={"oi": 500, "volume": 25},
+        metrics={"oi": 500, "volume": 25, "rvol": 2.5},
         created_at="2026-09-29 11:00:00 IST",
         is_live=True,
         environment="LIVE",
@@ -565,7 +567,7 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
         target_level=65.0,
         strike=1100.0,
         option_type="CE",
-        metrics={"oi": 2500, "volume": 850},
+        metrics={"oi": 2500, "volume": 850, "rvol": 2.5},
         is_live=True,
         environment="LIVE",
     )
@@ -666,7 +668,7 @@ def test_tier1_stock_option_morning_ramp_up_volume(auditor):
         strike=1100.0,
         option_type="CE",
         created_at="2026-09-14 09:25:00 IST",
-        metrics={"oi": 1500, "volume": 20},
+        metrics={"oi": 1500, "volume": 20, "rvol": 2.5},
         is_live=True,
         environment="LIVE",
     )
@@ -695,7 +697,7 @@ def test_tier1_stock_option_shares_to_contracts_normalization(auditor):
         lot_size=500,
         created_at="2026-09-14 11:00:00 IST",
         # 15,000 shares / 500 = 30 contracts < 50 contracts -> VETO
-        metrics={"oi": 15000, "volume": 50000},
+        metrics={"oi": 15000, "volume": 50000, "rvol": 2.5},
         is_live=True,
         environment="LIVE",
     )
@@ -723,7 +725,7 @@ def test_tier1_commodity_option_exemption_from_stock_gate(auditor):
         target_level=220.0,
         strike=6000.0,
         option_type="CE",
-        metrics={"oi": 35, "volume": 18},
+        metrics={"oi": 35, "volume": 18, "rvol": 2.5},
         is_live=True,
         environment="LIVE",
         created_at="2026-09-23 11:00:00",
@@ -731,6 +733,60 @@ def test_tier1_commodity_option_exemption_from_stock_gate(auditor):
     passed, reason, flags = auditor.verify_tier1_sanity(alert_mcx_opt)
     assert passed is True
     assert flags["liquidity_valid"] is True
+
+
+def test_tier1_breakout_without_rvol_is_rejected_even_in_test_runner(auditor):
+    """Pytest must not inject synthetic RVOL into otherwise unverified alerts."""
+    alert = AutoAlert(
+        alert_id="test-missing-rvol",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Index squeeze breakout without volume evidence",
+        summary="No relative volume was supplied",
+        ltp=25000.0,
+        trigger_level=25000.0,
+        stop_loss=24970.0,
+        target_level=25060.0,
+        metrics={},
+        is_live=True,
+        environment="LIVE",
+    )
+
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+
+    assert passed is False
+    assert "Unverified Volume Veto" in reason
+    assert flags["rvol_valid"] is False
+
+
+def test_options_momentum_uses_contract_turnover_not_underlying_rvol(auditor):
+    """Options momentum requires real contract volume/OI and need not claim underlying RVOL."""
+    alert = AutoAlert(
+        alert_id="test-option-turnover-evidence",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Index option turnover with no underlying RVOL claim",
+        summary="Contract volume and OI are independently present",
+        ltp=100.0,
+        trigger_level=100.0,
+        stop_loss=80.0,
+        target_level=160.0,
+        option_type="CE",
+        metrics={"volume": 2500, "oi": 1000, "vol_oi_ratio": 2.5},
+        is_live=True,
+        environment="LIVE",
+    )
+
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+
+    assert passed is True, reason
+    assert flags["option_volume_valid"] is True
 
 
 def test_tier1_opposing_supply_collision_veto(auditor):

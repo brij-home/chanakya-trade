@@ -96,6 +96,23 @@ _SYMBOL_MAP = {
     "NSE:NIFTY REALTY": "NSE:NIFTYREALTY-INDEX",
     "NSE:NIFTY METAL": "NSE:NIFTYMETAL-INDEX",
     "NSE:NIFTY ENERGY": "NSE:NIFTYENERGY-INDEX",
+    "NSE:NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "PSU_BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "PSUBANK": "NSE:NIFTYPSUBANK-INDEX",
+    "NSE:NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
+    "NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
+    "INFRA": "NSE:NIFTYINFRA-INDEX",
+    "NSE:NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "NSE:NIFTY PSE": "NSE:NIFTYPSE-INDEX",
+    "NIFTY PSE": "NSE:NIFTYPSE-INDEX",
+    "PSE": "NSE:NIFTYPSE-INDEX",
+    "NSE:NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "NSE:NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
+    "NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
 }
 
 _INDEX_PREFIXES = (
@@ -423,7 +440,9 @@ class WebSocketManager:
                 get_ws_subscription_manager().on_ws_connected(self)
             except Exception as e_sub:
                 logger.warning(f"[WebSocket] Error calling ws_subscription_manager: {e_sub}")
-                self.subscribe(DEFAULT_SYMBOLS)
+                from config.discovery_policy import allows_context_symbol
+
+                self.subscribe([s for s in DEFAULT_SYMBOLS if allows_context_symbol(s)])
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 

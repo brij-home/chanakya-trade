@@ -11,6 +11,7 @@ Institutional test suite for:
 from __future__ import annotations
 
 import unittest.mock as mock
+from types import SimpleNamespace
 from datetime import datetime, timezone, timedelta
 
 from engine.alert_model import AutoAlert
@@ -34,7 +35,7 @@ class DummyOptionContract:
         oi_change: int = -500,
         bid: float = 0.0,
         ask: float = 0.0,
-        expiry: str = "2026-09-24",
+        expiry: str = "2026-09-29",
     ):
         self.symbol = symbol
         self.strike = strike
@@ -88,20 +89,24 @@ def test_sector_support_gate_aligned_stock():
     ):
         with mock.patch("market.quotes.get_ltp", return_value=1500.0):
             with mock.patch("market.options.get_options_chain", return_value=contracts):
-                with mock.patch("market.options.get_expiries", return_value=["2026-09-24"]):
+                with mock.patch("market.options.get_expiries", return_value=["2026-09-29"]):
                     with mock.patch("market.history.get_ohlcv", return_value=None):
                         with mock.patch(
-                            "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind
+                            "engine.daily_levels.get_daily_levels",
+                            return_value=SimpleNamespace(cpr={}, camarilla={}),
                         ):
                             with mock.patch(
-                                "analysis.universe.get_stock_sector",
-                                return_value=("it", "IT, Software & Technology"),
+                                "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind
                             ):
-                                alerts = detect_options_momentum_breakouts(
-                                    targets=["INFY"],
-                                    watched_indices=[],
-                                    now_dt=now_dt,
-                                )
+                                with mock.patch(
+                                    "analysis.universe.get_stock_sector",
+                                    return_value=("it", "IT, Software & Technology"),
+                                ):
+                                    alerts = detect_options_momentum_breakouts(
+                                        targets=["INFY"],
+                                        watched_indices=[],
+                                        now_dt=now_dt,
+                                    )
 
     assert len(alerts) == 1
     alert = alerts[0]
@@ -141,7 +146,7 @@ def test_sector_support_gate_unaligned_rejected():
     ):
         with mock.patch("market.quotes.get_ltp", return_value=1500.0):
             with mock.patch("market.options.get_options_chain", return_value=contracts):
-                with mock.patch("market.options.get_expiries", return_value=["2026-09-24"]):
+                with mock.patch("market.options.get_expiries", return_value=["2026-09-29"]):
                     with mock.patch("market.history.get_ohlcv", return_value=None):
                         with mock.patch(
                             "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind
@@ -187,7 +192,7 @@ def test_sector_support_extreme_decoupler_escape_hatch():
     ):
         with mock.patch("market.quotes.get_ltp", return_value=1550.0):
             with mock.patch("market.options.get_options_chain", return_value=contracts):
-                with mock.patch("market.options.get_expiries", return_value=["2026-09-24"]):
+                with mock.patch("market.options.get_expiries", return_value=["2026-09-29"]):
                     with mock.patch("market.history.get_ohlcv", return_value=None):
                         with mock.patch(
                             "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind

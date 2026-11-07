@@ -1,0 +1,113 @@
+{
+  "charges": {
+    "FUTURES": 20.0,
+    "OPTIONS": 100.0,
+    "expected_2026_futures_stt": 50.0,
+    "expected_2026_options_stt": 150.0
+  },
+  "october_monthly_calendar_fallback": "2026-10-29",
+  "unknown_equity": {
+    "status": "ACTIVE",
+    "tradable": true
+  },
+  "pretrade": {
+    "Friday_1800_IST_session_gates": {
+      "OPTIONS": {
+        "gate": "market_session",
+        "passed": true,
+        "reason": "Unknown segment 'OPTIONS' \u2014 session check skipped",
+        "details": {}
+      },
+      "FUTURES": {
+        "gate": "market_session",
+        "passed": true,
+        "reason": "Unknown segment 'FUTURES' \u2014 session check skipped",
+        "details": {}
+      },
+      "EQ": {
+        "gate": "market_session",
+        "passed": false,
+        "reason": "Market closed for EQ: 18:00 IST is outside 09:15\u201315:30",
+        "details": {
+          "current_ist": "2026-10-30T18:00:00+05:30"
+        }
+      }
+    },
+    "default_option_lot_accepts_one_unit": true,
+    "OPT_100000_premium_20000_cash": {
+      "gate": "buying_power",
+      "passed": true,
+      "reason": null,
+      "details": {
+        "required_margin": 15000.0,
+        "available_cash": 20000
+      }
+    }
+  },
+  "unobserved_detector": {
+    "alert_type": "REVIEW",
+    "sample_count": 0,
+    "win_rate": 0.5,
+    "avg_win_r": 2.0,
+    "avg_loss_r": 1.0,
+    "payoff_ratio": 2.0,
+    "expectancy": 0.5,
+    "kelly_fraction": 0.25,
+    "half_kelly": 0.125,
+    "consecutive_losses": 0,
+    "status": "NORMAL",
+    "confidence_multiplier": 1.0,
+    "last_updated": "2026-10-31 21:09:37 IST"
+  },
+  "duplicate_outcome_sample_count": 2,
+  "SMC_valid_300_bar_signal_counts": {
+    "0": 300
+  },
+  "physical_settlement_zero_DTE": {
+    "input_days_to_expiry": 0,
+    "reported_days_to_expiry": 4,
+    "reported_margin_rate_pct": 20.0,
+    "reported_risk_level": "ELEVATED_MARGIN"
+  },
+  "LLM_timeout_fake_only": {
+    "requested_timeout_seconds": 0.005,
+    "elapsed_seconds": 0.156,
+    "returned": "FALLBACK"
+  },
+  "pool_autocommit_first_write_survives_rollback": 1,
+  "account_snapshots": {
+    "ACCOUNT_A": {
+      "account_id": "ACCOUNT_A",
+      "positions": [
+        {
+          "symbol": "REVIEW_SYMBOL",
+          "qty": 100,
+          "avg_price": 100.0
+        }
+      ],
+      "cash": 90000.0,
+      "baseline_at": "2026-10-31T15:39:38.704520+00:00",
+      "source": "PERSISTED_ORDER_LEDGER"
+    },
+    "ACCOUNT_B": {
+      "account_id": "ACCOUNT_B",
+      "positions": [
+        {
+          "symbol": "REVIEW_SYMBOL",
+          "qty": 100,
+          "avg_price": 100.0
+        }
+      ],
+      "cash": 90000.0,
+      "baseline_at": "2026-10-31T15:39:38.704520+00:00",
+      "source": "PERSISTED_ORDER_LEDGER"
+    }
+  },
+  "emergency_flatten_mock_only": {
+    "mode": "SIMULATE",
+    "broker_place_order_calls": 1,
+    "fake_broker_response": "REJECTED",
+    "reported_status": "SUCCESS",
+    "reported_flattened_count": 1
+  }
+}

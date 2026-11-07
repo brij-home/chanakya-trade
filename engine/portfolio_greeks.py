@@ -21,6 +21,8 @@ Capabilities:
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import asdict, dataclass, field
 import logging
 import math
@@ -146,7 +148,16 @@ def calculate_portfolio_greeks(
     for pos in positions:
         sym = str(pos.get("symbol") or "").upper()
         underlying = str(pos.get("underlying") or sym).upper()
-        inst_type = str(pos.get("instrument_type") or pos.get("option_type") or "EQUITY").upper()
+        sym_up = sym.upper()
+        explicit_type = pos.get("instrument_type") or pos.get("option_type")
+        if explicit_type:
+            inst_type = str(explicit_type).upper()
+        elif re.search(r"\d+(CE|PE)$", sym_up):
+            inst_type = "CE" if sym_up.endswith("CE") else "PE"
+        elif sym_up.endswith("FUT"):
+            inst_type = "FUT"
+        else:
+            inst_type = "EQUITY"
         qty = int(pos.get("quantity") or pos.get("shares") or 0)
         lots = int(pos.get("lots") or 1)
         ltp = float(pos.get("ltp") or pos.get("price") or 0.0)
@@ -203,7 +214,13 @@ def calculate_portfolio_greeks(
         )
 
     # Convert Net Delta Value into NIFTY contract equivalents (1 NIFTY lot = 25 shares * spot)
-    nifty_lot_val = 25.0 * nifty_spot
+    try:
+        from market.instruments import get_lot_size
+
+        nifty_lot_size = float(get_lot_size("NIFTY") or 65.0)
+    except Exception:
+        nifty_lot_size = 65.0
+    nifty_lot_val = nifty_lot_size * nifty_spot
     net_delta_nifty_eq = round(agg_delta_value / max(1.0, nifty_lot_val), 2)
 
     # Classify Posture

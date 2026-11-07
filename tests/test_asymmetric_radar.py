@@ -496,7 +496,7 @@ def test_resolve_recommended_option_contract_positional_index_dtes(monkeypatch):
     assert "Delta 1.0" in opt["futures_recommendation"]
 
 
-def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
+def test_render_asymmetric_alert_displays_futures_and_rollover_badge(monkeypatch):
     """Verify render_asymmetric_alert displays Futures Preferred and Next-Month Rollover note."""
     from bot.alert_templates import render_asymmetric_alert
 
@@ -517,24 +517,36 @@ def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
         "is_next_month_routed": True,
         "actionable_plan": {
             "option_plan": {
-                "contract_symbol": "RELIANCE26OCT3000CE",
+                "contract_symbol": "NFO:RELIANCE26NOV3000CE",
                 "entry_premium": 65.0,
                 "lot_size": 250,
+                "expiry_date": "2026-11-24",
             },
             "futures_plan": {
-                "contract_symbol": "RELIANCE26OCTFUT",
+                "contract_symbol": "NFO:RELIANCE26NOVFUT",
                 "entry_price": 3010.5,
                 "lot_size": 250,
             },
         },
     }
 
+    import market.symbol_master as symbol_master
+
+    monkeypatch.setattr(
+        symbol_master,
+        "get_symbol_info",
+        lambda symbol, **kwargs: (
+            {"minLotSize": 250} if symbol == "NFO:RELIANCE26NOV3000CE" else None
+        ),
+    )
+    monkeypatch.setattr("engine.position_sizer.get_lot_size", lambda symbol: 250)
+
     rendered = render_asymmetric_alert(sample_alert, in_market=True)
     # Zero-Futures Invariant: Futures Preferred is strictly purged
     assert "Futures Preferred:" not in rendered
-    assert "RELIANCE 26-OCT FUT" not in rendered
+    assert "RELIANCE 26-NOV FUT" not in rendered
     assert "Delta 1.0 · Zero Theta Decay" not in rendered
-    assert "RELIANCE 3000 CE" in rendered or "RELIANCE26OCT3000CE" in rendered
+    assert "RELIANCE 3000 CE" in rendered or "RELIANCE26NOV3000CE" in rendered
 
     assert "NEXT-MONTH ROLLOVER" in rendered
     assert "SEBI Physical Margin Safe" in rendered
@@ -567,7 +579,7 @@ def test_resolve_recommended_option_contract_generates_hedged_spread_and_futures
     assert "Overnight Gap Risk" in res["futures_hedge"]["description"]
 
 
-def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
+def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar(monkeypatch):
     """Verify render_asymmetric_alert prominently renders Hedged Spread and Futures Collar note."""
     from bot.alert_templates import render_asymmetric_alert
 
@@ -602,7 +614,7 @@ def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
         "actionable_plan": {
             "hedge_plan": hedge_plan,
             "futures_plan": {
-                "contract_symbol": "NIFTY26OCTFUT",
+                "contract_symbol": "NFO:NIFTY26NOVFUT",
                 "entry_price": 23209.0,
                 "stop_loss": 22792.7,
                 "target_1": 24064.3,
@@ -610,7 +622,8 @@ def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
                 "futures_hedge": futures_hedge,
             },
             "option_plan": {
-                "contract_symbol": "NIFTY23100CE",
+                "contract_symbol": "NFO:NIFTY26NOV23100CE",
+                "expiry_date": "2026-11-03",
                 "entry_premium": 221.9,
                 "sl_premium": 155.4,
                 "t1_premium": 649.6,
@@ -619,6 +632,15 @@ def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
         },
         "confluences": ["200-EMA Institutional Floor", "14-Day RSI Oversold Climax"],
     }
+
+    import market.symbol_master as symbol_master
+
+    monkeypatch.setattr(
+        symbol_master,
+        "get_symbol_info",
+        lambda symbol, **kwargs: {"minLotSize": 65} if symbol == "NFO:NIFTY26NOV23100CE" else None,
+    )
+    monkeypatch.setattr("engine.position_sizer.get_lot_size", lambda symbol: 65)
 
     rendered = render_asymmetric_alert(alert_dict, in_market=True)
     assert "🛡️ Hedged Spread (Preferred):" in rendered

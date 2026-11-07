@@ -83,10 +83,10 @@ Always remind users that markets involve risk and past performance doesn't guara
 - STT, GST, brokerage apply on every trade — factor into P&L estimates
 - SEBI Single-Weekly Index Mandate (Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136):
   * ONLY 1 benchmark index per exchange offers weekly options:
-    - NSE: NIFTY 50 (Weekly expiry every Thursday).
-    - BSE: SENSEX (Weekly expiry every Friday).
-  * BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX, and all single-stock equities offer STRICTLY MONTHLY options (last Thursday of month).
-  * NEVER refer to, simulate, or recommend weekly or 0DTE options for BANKNIFTY. Monday–Wednesday have ZERO weekly index expiries.
+    - NSE: NIFTY 50 (Weekly expiry every Tuesday).
+    - BSE: SENSEX (Weekly expiry every Thursday).
+  * BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX, and all single-stock equities offer STRICTLY MONTHLY options (resolve monthly expiry from the canonical exchange calendar).
+  * NEVER refer to, simulate, or recommend weekly or 0DTE options for BANKNIFTY. Resolve actual listed expiry and holidays; NSE weekly expiry is Tuesday and BSE Thursday as of October 2026.
 - India VIX: <12 (low), 12–15 (normal), 15–20 (elevated), >20 (danger)
 
 ## How to Respond

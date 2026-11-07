@@ -1,5 +1,5 @@
-import { create } from 'zustand'
-import { isTestOrSimAlert, isAlertActive } from '../components/Views/alerts/alertHelpers'
+﻿import { create } from 'zustand'
+import { isTestOrSimAlert, isAlertActive, INDEX_LOT_SIZES } from '../components/Views/alerts/alertHelpers'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
@@ -29,6 +29,8 @@ function loadStoredNotifications() {
     }
     const now = new Date()
     return sanitized.map((item) => {
+      const normalized = normalizeNotification(item)
+      if (normalized) item = normalized
       const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
       const isSwingOrPositional = ['SWING_SHORT', 'SWING_MID', 'POSITIONAL', 'LONG_TERM', 'MULTIBAGGER'].includes(item.time_horizon || item.timeHorizon)
       const isGammaOrZeroDte = (item.alert_type || '').includes('GAMMA') || (item.alert_type || '').includes('0DTE')
@@ -143,20 +145,95 @@ export function normalizeNotification(rawPayload) {
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
 
-  const optType = payload.option_type || (payload.contract_symbol?.endsWith('PE') ? 'PE' : payload.contract_symbol?.endsWith('CE') ? 'CE' : null)
-  const strikeNum = payload.strike ? Number(String(payload.strike).replace(/[^0-9.-]/g, '')) : null
-  const spotNum = payload.underlying_spot ? Number(payload.underlying_spot) : null
-  const isOption = Boolean(optType || payload.contract_symbol?.endsWith('PE') || payload.contract_symbol?.endsWith('CE') || payload.derivative_type === 'OPTIONS')
+  const text = `${payload.headline || ''} ${payload.summary || ''} ${payload.contract_symbol || ''} ${payload.contract || ''}`
+
+  // Robust Strike & Option Type extraction across standard exchange contract formats
+  let optType = payload.option_type || (payload.contract_symbol?.endsWith('PE') ? 'PE' : payload.contract_symbol?.endsWith('CE') ? 'CE' : null)
+  let strikeNum = payload.strike ? Number(String(payload.strike).replace(/[^0-9.-]/g, '')) : null
+  if (!strikeNum || !optType) {
+    const optMatch = text.match(/(\d{4,6})\s*(CE|PE)\b/i)
+    if (optMatch) {
+      if (!strikeNum) strikeNum = Number(optMatch[1])
+      if (!optType) optType = optMatch[2].toUpperCase()
+    }
+  }
+
+  // Defined-Risk Neutral Corridor extraction
+  const condorCorridor = payload.hedged_spread?.profit_corridor ||
+    payload.actionable_plan?.profit_corridor ||
+    payload.condor_corridor ||
+    payload.profit_corridor ||
+    (payload.metrics?.short_put_strike && payload.metrics?.short_call_strike ? `₹${Number(payload.metrics.short_put_strike).toLocaleString('en-IN')} – ₹${Number(payload.metrics.short_call_strike).toLocaleString('en-IN')}` : null) ||
+    text.match(/Corridor\s*\[([^\]]+)\]/i)?.[1] ||
+    text.match(/Safe corridor\s*(₹?[\d,]+(?:\.\d+)?\s*(?:to|–|-)\s*₹?[\d,]+(?:\.\d+)?)/i)?.[1] ||
+    null
+
+  let spotNum = payload.underlying_spot ? Number(payload.underlying_spot) : (payload.spot ? Number(payload.spot) : null)
+  if (!spotNum) {
+    const spotMatch = text.match(/(?:Spot|Coiling at|@)\s*₹?([0-9,.]+)/i)
+    if (spotMatch) {
+      const v = Number(spotMatch[1].replace(/,/g, ''))
+      if (v > 1000) spotNum = v
+    }
+  }
+
+  const isOption = Boolean(optType || payload.contract_symbol?.endsWith('PE') || payload.contract_symbol?.endsWith('CE') || payload.derivative_type === 'OPTION' || payload.derivative_type === 'OPTIONS')
   const rawLtp = payload.ltp ? Number(String(payload.ltp).replace(/[^0-9.-]/g, '')) : null
   const isSpotLeak = isOption && rawLtp != null && (rawLtp > 5000 || (spotNum && Math.abs(rawLtp - spotNum) < 10))
-  const premiumNum = payload.option_premium ? Number(payload.option_premium) : (isSpotLeak ? null : rawLtp)
+  let premiumNum = payload.option_premium ? Number(payload.option_premium) : (payload.premium ? Number(payload.premium) : (isSpotLeak ? null : rawLtp))
   const ltpNum = isSpotLeak ? null : rawLtp
 
-  const slNum = optPlan?.sl_premium ? Number(optPlan.sl_premium) : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (payload.stop_loss ? Number(payload.stop_loss) : (payload.sl ? Number(payload.sl) : null)))
-  const entryNum = optPlan?.entry_premium ? Number(optPlan.entry_premium) : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (payload.trigger_level ? Number(payload.trigger_level) : (payload.entry ? Number(payload.entry) : (premiumNum || ltpNum))))
-  const t1Num = optPlan?.t1_premium ? Number(optPlan.t1_premium) : (tradePlan.target_1 ? Number(tradePlan.target_1) : (payload.target_level ? Number(payload.target_level) : (payload.t1 ? Number(payload.t1) : null)))
-  const t2Num = optPlan?.t2_premium ? Number(optPlan.t2_premium) : (tradePlan.target_2 ? Number(tradePlan.target_2) : (payload.t2 ? Number(payload.t2) : null))
-  const t3Num = optPlan?.t3_premium ? Number(optPlan.t3_premium) : (tradePlan.target_3 ? Number(tradePlan.target_3) : (payload.t3 ? Number(payload.t3) : null))
+  const parseN = (val) => {
+    if (val == null) return null
+    if (typeof val === 'number') return isNaN(val) ? null : val
+    const m = String(val).replace(/,/g, '').match(/[-+]?[0-9]+(?:\.[0-9]+)?/)
+    return m ? Number(m[0]) : null
+  }
+
+  let slNum = parseN(optPlan?.sl_premium) || parseN(tradePlan.invalidation_stop) || parseN(payload.stop_loss) || parseN(payload.sl) || parseN(plan.stop_loss) || parseN(plan.invalidation_stop)
+  let entryNum = parseN(optPlan?.entry_premium) || parseN(tradePlan.entry_price) || parseN(payload.trigger_level) || parseN(payload.entry_price) || parseN(payload.entry) || parseN(plan.entry_price) || parseN(plan.trigger_level) || (premiumNum || ltpNum)
+  let t1Num = parseN(optPlan?.t1_premium) || parseN(tradePlan.target_1) || parseN(payload.target_level) || parseN(payload.target_1) || parseN(payload.t1) || parseN(plan.target_1)
+  let t2Num = parseN(optPlan?.t2_premium) || parseN(tradePlan.target_2) || parseN(payload.target_2) || parseN(payload.t2) || parseN(plan.target_2)
+  let t3Num = parseN(optPlan?.t3_premium) || parseN(tradePlan.target_3) || parseN(payload.target_3) || parseN(payload.t3) || parseN(plan.target_3)
+
+  // Robust Text Fallbacks for missing levels
+  if (condorCorridor || text.includes('CONDOR') || text.includes('Iron Condor') || payload.alert_type === 'DEFINED_RISK_NEUTRAL') {
+    const effLot = payload.lot_size || payload.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
+    const credMatch = text.match(/(?:Credit|collects)\s*₹?([0-9,.]+)/i)
+    const rawCredit = credMatch ? parseN(credMatch[1]) : (payload.metrics?.net_credit || payload.hedged_spread?.net_cashflow || parseN(payload.entry_price) || parseN(payload.entry) || null)
+    if (rawCredit != null) {
+      entryNum = (rawCredit > 1000 && effLot > 1) ? Math.round((rawCredit / effLot) * 100) / 100 : rawCredit
+      const lossMatch = text.match(/(?:Capped max loss|Max Loss)\s*₹?([0-9,.]+)/i)
+      const rawLoss = lossMatch ? parseN(lossMatch[1]) : (payload.metrics?.max_loss || payload.hedged_spread?.max_loss || parseN(payload.stop_loss) || parseN(payload.sl) || null)
+      if (rawLoss != null) {
+        slNum = (rawLoss > 1000 && effLot > 1) ? Math.round((rawLoss / effLot) * 100) / 100 : rawLoss
+      }
+      t1Num = Math.round(entryNum * 0.5 * 100) / 100
+      t2Num = Math.round(entryNum * 0.2 * 100) / 100
+      t3Num = 0
+    }
+  } else {
+    if (!entryNum) {
+      const entryMatch = text.match(/(?:Buy above|ignited at|Coiling at|@|Entry:\s*₹?)\s*₹?([0-9,.]+)/i)
+      if (entryMatch) entryNum = parseN(entryMatch[1])
+    }
+    if (!slNum) {
+      const slMatch = text.match(/(?:SL|Stop-Loss|invalidation at)\s*₹?([0-9,.]+)/i)
+      if (slMatch) slNum = parseN(slMatch[1])
+    }
+    if (!t1Num) {
+      const t1Match = text.match(/(?:T1(?:\s*\([^)]+\))?|Target 1)\s*₹?([0-9,.]+)/i)
+      if (t1Match) t1Num = parseN(t1Match[1])
+    }
+    if (!t2Num) {
+      const t2Match = text.match(/(?:T2(?:\s*\([^)]+\))?|Target 2)\s*₹?([0-9,.]+)/i)
+      if (t2Match) t2Num = parseN(t2Match[1])
+    }
+    if (!t3Num) {
+      const t3Match = text.match(/(?:Runner|T3(?:\s*\([^)]+\))?|Target 3)\s*₹?([0-9,.]+)/i)
+      if (t3Match) t3Num = parseN(t3Match[1])
+    }
+  }
 
   const rawTime = payload.created_at || payload.timestamp || payload.triggered_at || now.toISOString()
   const isIntradayType = Boolean(
@@ -207,6 +284,20 @@ export function normalizeNotification(rawPayload) {
     t1: t1Num,
     t2: t2Num,
     t3: t3Num,
+    trigger_level: payload.trigger_level != null ? payload.trigger_level : entryNum,
+    stop_loss: payload.stop_loss != null ? payload.stop_loss : slNum,
+    target_level: payload.target_level != null ? payload.target_level : t1Num,
+    target_1: payload.target_1 != null ? payload.target_1 : t1Num,
+    target_2: payload.target_2 != null ? payload.target_2 : t2Num,
+    target_3: payload.target_3 != null ? payload.target_3 : t3Num,
+    underlying_spot: payload.underlying_spot != null ? payload.underlying_spot : spotNum,
+    option_premium: payload.option_premium != null ? payload.option_premium : premiumNum,
+    hedged_spread: payload.hedged_spread || plan.hedged_spread || payload.metrics?.hedged_spread || null,
+    derivative_type: payload.derivative_type || (isOption ? 'OPTION' : (condorCorridor ? 'SPREAD' : null)),
+    initial_entry_premium: payload.initial_entry_premium || entryNum,
+    initial_stop_loss: payload.initial_stop_loss || slNum,
+    condor_corridor: condorCorridor,
+    profit_corridor: condorCorridor,
     confidence: Number(payload.confidence || payload.metrics?.scrutiny?.score || 75),
     headline: payload.headline || `${cleanSym} ${payload.alert_type || 'Signal'}`,
     summary: payload.invalidation_reason || payload.trailing_rationale || payload.summary || payload.message || payload.description || '',

@@ -10,6 +10,8 @@ Provides:
 """
 
 from __future__ import annotations
+from market.rule_schedule import expiry_weekday
+
 
 import re
 from dataclasses import asdict, dataclass
@@ -563,7 +565,7 @@ def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> d
     und_up = underlying.upper()
     if exch_up == "BSE" or und_up in ("SENSEX", "BANKEX"):
         d = date(yr, mo, num_days)
-        while d.weekday() != 4:  # Last Friday
+        while d.weekday() != expiry_weekday("BSE", d):
             d -= timedelta(days=1)
     elif exch_up == "MCX" or und_up in COMMODITY_SYMBOLS:
         if "CRUDE" in und_up:
@@ -573,7 +575,7 @@ def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> d
             d = date(yr, mo, num_days)
     else:
         d = date(yr, mo, num_days)
-        while d.weekday() != 3:  # Last Thursday
+        while d.weekday() != expiry_weekday("NSE", d):
             d -= timedelta(days=1)
     try:
         from market.calendar import get_adjusted_expiry_date

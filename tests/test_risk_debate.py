@@ -21,6 +21,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from engine.risk_gate import AllowedAction
+
 from agent.multi_agent import (
     RiskDebateResult,
     DebateResult,
@@ -35,6 +37,18 @@ from agent.multi_agent import (
 
 
 # ── Fixtures ──────────────────────────────────────────────────
+
+
+def _make_allowed_action() -> AllowedAction:
+    return AllowedAction(
+        symbol="RELIANCE",
+        allowed=True,
+        direction="BOTH",
+        max_qty=100,
+        max_capital=100000.0,
+        flags=[],
+        block_reason="",
+    )
 
 
 def _make_scorecard(verdict: str = "BUY") -> AnalystScorecard:
@@ -292,6 +306,7 @@ class TestRiskDebateSkippedOnHold:
             patch("agent.multi_agent.compute_scorecard", return_value=scorecard),
             patch("agent.multi_agent.console"),
             patch("engine.memory.trade_memory.store_from_analysis"),
+            patch("engine.risk_gate.compute_allowed_actions", return_value=_make_allowed_action()),
         ):
             analyzer.analyze("RELIANCE")
 
@@ -314,6 +329,7 @@ class TestRiskDebateSkippedOnHold:
             patch("agent.multi_agent.compute_scorecard", return_value=scorecard),
             patch("agent.multi_agent.console"),
             patch("engine.memory.trade_memory.store_from_analysis"),
+            patch("engine.risk_gate.compute_allowed_actions", return_value=_make_allowed_action()),
         ):
             analyzer.analyze("RELIANCE")
 
@@ -338,6 +354,7 @@ class TestRiskDebateSkippedOnHold:
             patch("agent.multi_agent.compute_scorecard", return_value=scorecard),
             patch("agent.multi_agent.console"),
             patch("engine.memory.trade_memory.store_from_analysis"),
+            patch("engine.risk_gate.compute_allowed_actions", return_value=_make_allowed_action()),
         ):
             analyzer.analyze("RELIANCE")
 

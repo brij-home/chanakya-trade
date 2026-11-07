@@ -90,7 +90,7 @@ def _generate_synthetic_candles(n_bars: int = 30, pattern: str = "TREND_UP") -> 
         )
 
     df = pd.DataFrame(records)
-    df.set_index("datetime", inplace=True)
+    df = df.set_index("datetime")
     return df
 
 

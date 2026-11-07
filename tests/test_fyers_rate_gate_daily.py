@@ -8,6 +8,13 @@ calendar rollover, and emergency order preservation in UnifiedFyersRateGate.
 from market.fyers_rate_gate import FyersCallCategory, UnifiedFyersRateGate
 
 
+def test_unknown_plan_does_not_silently_enable_prime():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown FYERS_PLAN"):
+        UnifiedFyersRateGate(plan="PREMIUM")
+
+
 def test_daily_soft_cap_rejects_non_order_calls(tmp_path, monkeypatch):
     test_file = tmp_path / "fyers_daily_quota.json"
     monkeypatch.setattr("market.fyers_rate_gate._QUOTA_FILE", test_file)

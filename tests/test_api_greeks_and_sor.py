@@ -18,11 +18,11 @@ def test_api_smart_route_endpoint():
     payload = {
         "symbol": "NIFTY",
         "side": "BUY",
-        "quantity": 100,  # 4 lots (lot size 25)
+        "quantity": 2600,  # 40 current NIFTY lots (lot size 65)
         "ltp": 24500.0,
         "bid_price": 24495.0,
         "ask_price": 24505.0,
-        "lot_size": 25,
+        "lot_size": 65,
         "urgency": "NORMAL",
     }
 
@@ -31,7 +31,7 @@ def test_api_smart_route_endpoint():
     data = resp.json()
     assert data["symbol"] == "NIFTY"
     assert data["side"] == "BUY"
-    assert data["total_lots"] == 4
+    assert data["total_lots"] == 40
     assert data["routing_mode"] == "ICEBERG"
     assert len(data["tranches"]) >= 2
     assert data["estimated_spread_savings_inr"] > 0

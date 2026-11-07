@@ -251,7 +251,9 @@ class DhanBroker(BrokerAPI):
             "orderType": self._map_order_type(order.order_type),
             "validity": order.validity or "DAY",
             "tradingSymbol": order.symbol.upper(),
-            "securityId": "",  # Must be resolved from symbol → securityId
+            "securityId": str(
+                getattr(order, "instrument_token", "") or getattr(order, "security_id", "") or ""
+            ),
             "quantity": order.quantity,
             "price": order.price or 0,
             "triggerPrice": order.trigger_price or 0,
@@ -261,9 +263,13 @@ class DhanBroker(BrokerAPI):
         }
         resp = self._post("/v2/orders", payload)
         data = resp if isinstance(resp, dict) else {}
+        oid = str(data.get("orderId", ""))
+        raw_st = data.get("orderStatus")
+        if not oid:
+            raise RuntimeError(f"Dhan order placement failed or missing order ID: {data}")
         return OrderResponse(
-            order_id=str(data.get("orderId", "")),
-            status=str(data.get("orderStatus", "OPEN")),
+            order_id=oid,
+            status=str(raw_st or "UNKNOWN"),
             message=str(data.get("remarks", "")),
         )
 

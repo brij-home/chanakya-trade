@@ -71,6 +71,12 @@ class OrderExecuteRequest(BaseModel):
     order_id: str
 
 
+class OrderCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: str = Field(min_length=1, max_length=128)
+
+
 class OrderConfirmRequest(OrderExecuteRequest):
     preview_hash: str
 
@@ -219,6 +225,35 @@ async def api_order_execute(req: OrderExecuteRequest, request: Request):
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 409
         raise HTTPException(status_code, str(exc)) from exc
+
+
+@router.post("/api/orders/cancel")
+async def api_order_cancel(req: OrderCancelRequest, request: Request):
+    """Request cancellation for an OMS-owned order and report only confirmed state."""
+    from engine.order_lifecycle import cancel_order_intent
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if getattr(request.state, "user", None):
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+    try:
+        result = await asyncio.to_thread(cancel_order_intent, req.order_id)
+        await asyncio.to_thread(
+            record_audit_event,
+            event_type="ORDER_CANCEL_REQUESTED",
+            mode=result["mode"],
+            actor=actor,
+            details=result,
+        )
+        return JSONResponse(result)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            500, "Order cancellation could not be completed; reconcile with broker."
+        ) from exc
 
 
 @router.post("/api/orders/batch/execute")
@@ -471,15 +506,13 @@ async def api_cancel_gtt(gtt_id: str):
     """Cancel an active server-side GTT order."""
     from engine.modes import get_trading_mode
     from engine.paper import PaperBroker
-    from brokers.session import get_execution_broker
 
     mode = get_trading_mode()
     if mode.is_execute:
-        broker = get_execution_broker()
-        if broker is None or not hasattr(broker, "cancel_gtt"):
-            raise HTTPException(503, "Live broker GTT cancellation not available")
-        success = await asyncio.to_thread(broker.cancel_gtt, gtt_id)
-        return {"status": "ok" if success else "error", "gtt_id": gtt_id, "cancelled": success}
+        raise HTTPException(
+            409,
+            "Live GTT cancellation is disabled until GTT ownership, protection state, and broker outcome are tracked in the OMS. Use the broker app, then reconcile before retrying.",
+        )
     else:
         paper = PaperBroker()
         success = await asyncio.to_thread(paper.cancel_gtt, gtt_id)

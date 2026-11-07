@@ -246,19 +246,35 @@ def classify_alert_segment(alert: Any) -> str:
         if isinstance(alert, dict)
         else getattr(alert, "actionable_plan", None)
     ) or {}
+    plan_opt = {}
     if isinstance(plan, dict):
+        plan_opt = plan.get("option_plan") if isinstance(plan.get("option_plan"), dict) else {}
         if not contract:
             contract = str(
-                plan.get("contract") or plan.get("contract_symbol") or plan.get("instrument") or ""
+                plan.get("contract")
+                or plan.get("contract_symbol")
+                or plan.get("instrument")
+                or plan_opt.get("contract_symbol")
+                or plan_opt.get("contract")
+                or ""
             ).upper()
         if not op_type:
-            op_type = str(plan.get("option_type") or "").upper()
+            op_type = str(plan.get("option_type") or plan_opt.get("option_type") or "").upper()
         if strike is None:
-            strike = plan.get("strike")
+            strike = (
+                plan.get("strike") if plan.get("strike") is not None else plan_opt.get("strike")
+            )
         if not expiry:
-            expiry = plan.get("expiry_date") or plan.get("expiry")
+            expiry = (
+                plan.get("expiry_date")
+                or plan.get("expiry")
+                or plan_opt.get("expiry_date")
+                or plan_opt.get("expiry")
+            )
         plan_action = str(plan.get("action") or "").upper()
-        plan_inst = str(plan.get("instrument_type") or "").upper()
+        plan_inst = str(
+            plan.get("instrument_type") or plan_opt.get("instrument_type") or ""
+        ).upper()
     else:
         plan_action = ""
         plan_inst = ""

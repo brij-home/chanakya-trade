@@ -249,6 +249,23 @@ def test_hierarchical_position_sizing_sebi_physical_delivery_warning():
     assert "SEBI PHYSICAL SETTLEMENT NOTICE" in size["notes"]
 
 
+def test_hierarchical_fno_sizing_does_not_force_lot_when_risk_budget_is_smaller():
+    size = calculate_hierarchical_position_size(
+        symbol="NIFTY",
+        entry_price=25000.0,
+        stop_loss=24900.0,
+        capital=2_000_000.0,
+        target_risk_pct=0.01,
+        max_capital_pct=100.0,
+        is_fno=True,
+    )
+
+    assert size["lot_size"] == 65
+    assert size["shares"] == 0
+    assert size["lots"] == 0
+    assert size["risk_amount"] == 0
+
+
 def test_timeframe_adaptive_risk_scaling():
     """
     Verifies that dynamic risk is timeframe-agnostic and adaptively scales

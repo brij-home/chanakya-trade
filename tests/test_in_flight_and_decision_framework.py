@@ -69,7 +69,7 @@ class TestDecisionMakingFramework:
             stop_loss=1480.0,
             target_level=1550.0,
             confidence=85,
-            metrics={"mtf_15m_trend": "BEARISH_DOWNTREND"},  # Direct conflict!
+            metrics={"mtf_15m_trend": "BEARISH_DOWNTREND", "rvol": 1.5},  # Direct conflict!
         )
         with patch(
             "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
@@ -95,7 +95,7 @@ class TestDecisionMakingFramework:
             stop_loss=3950.0,
             target_level=4120.0,
             confidence=88,
-            metrics={"mtf_15m_trend": "BULLISH_UPTREND"},
+            metrics={"mtf_15m_trend": "BULLISH_UPTREND", "rvol": 1.5},
         )
         passed, reason, flags = auditor.verify_tier1_sanity(alert)
         assert passed is True
@@ -142,6 +142,7 @@ class TestDecisionMakingFramework:
                 target_level=220.0,
                 strike=24500,
                 option_type="CE",
+                metrics={"volume": 5000, "oi": 10000},
                 actionable_plan={"action": "BUY"},
                 confidence=90,
             )
@@ -282,9 +283,9 @@ class TestInFlightDecayAlerts:
 
     def test_0dte_afternoon_theta_cliff_8min_threshold(self):
         """0DTE option post-13:30 IST compresses stagnation threshold to 8m (480s)."""
-        thursday_afternoon = datetime(2026, 9, 10, 14, 0, 0, tzinfo=IST)
+        tuesday_afternoon = datetime(2026, 9, 8, 14, 0, 0, tzinfo=IST)
         with patch("engine.alert_evaluator.datetime") as mock_dt:
-            mock_dt.now.return_value = thursday_afternoon
+            mock_dt.now.return_value = tuesday_afternoon
             mock_dt.strptime.side_effect = datetime.strptime
 
             # 9 minutes elapsed (540s > 480s) -> MUST trigger 0DTE_AFTERNOON_THETA_CLIFF
@@ -292,7 +293,7 @@ class TestInFlightDecayAlerts:
                 alert_id="0dte-cliff-1",
                 alert_type="OPTIONS_MOMENTUM_BREAKOUT",
                 stage="IGNITED",
-                symbol="NIFTY",  # Thursday expiry = 0DTE
+                symbol="NIFTY",
                 exchange="NFO",
                 direction="BULLISH",
                 headline="Nifty 0DTE Call",
@@ -304,7 +305,8 @@ class TestInFlightDecayAlerts:
                 stop_loss=70.0,
                 option_type="CE",
                 strike=24200,
-                created_at="2026-09-10 13:51:00",
+                created_at="2026-09-08 13:51:00",
+                expiry_date="2026-09-08",
                 is_live=True,
             )
             eval_res = evaluate_alert_in_flight_decay(alert_9m, current_ltp=95.0)
@@ -332,7 +334,8 @@ class TestInFlightDecayAlerts:
                 stop_loss=70.0,
                 option_type="CE",
                 strike=24200,
-                created_at="2026-09-10 13:54:00",
+                created_at="2026-09-08 13:54:00",
+                expiry_date="2026-09-08",
                 is_live=True,
             )
             eval_res_6m = evaluate_alert_in_flight_decay(alert_6m, current_ltp=95.0)
@@ -340,9 +343,9 @@ class TestInFlightDecayAlerts:
 
     def test_0dte_morning_decay_10min_threshold(self):
         """0DTE option morning session compresses stagnation threshold to 10m (600s)."""
-        thursday_morning = datetime(2026, 9, 10, 10, 30, 0, tzinfo=IST)
+        tuesday_morning = datetime(2026, 9, 8, 10, 30, 0, tzinfo=IST)
         with patch("engine.alert_evaluator.datetime") as mock_dt:
-            mock_dt.now.return_value = thursday_morning
+            mock_dt.now.return_value = tuesday_morning
             mock_dt.strptime.side_effect = datetime.strptime
 
             # 11 minutes elapsed (660s > 600s) -> MUST trigger 0DTE_INTRADAY_DECAY
@@ -362,7 +365,8 @@ class TestInFlightDecayAlerts:
                 stop_loss=70.0,
                 option_type="CE",
                 strike=24200,
-                created_at="2026-09-10 10:19:00",
+                created_at="2026-09-08 10:19:00",
+                expiry_date="2026-09-08",
                 is_live=True,
             )
             eval_res = evaluate_alert_in_flight_decay(alert_11m, current_ltp=96.0)
@@ -371,6 +375,29 @@ class TestInFlightDecayAlerts:
             assert eval_res.warning_type == "0DTE_INTRADAY_DECAY"
             assert eval_res.coaching_decision == "EXIT_0DTE_STAGNANT_OPTION"
             assert "0DTE Decay: 11m No Progress" in eval_res.headline
+
+            # A weekday-derived expiry guess is insufficient evidence for an
+            # eight/ten-minute 0DTE exit policy.
+            alert_missing_expiry = AutoAlert(
+                alert_id="missing-expiry-weekday-guess",
+                alert_type="OPTIONS_MOMENTUM_BREAKOUT",
+                stage="IGNITED",
+                symbol="NIFTY",
+                exchange="NFO",
+                direction="BULLISH",
+                headline="Nifty option without expiry evidence",
+                summary="Unknown expiry must not be inferred from weekday",
+                trigger_level=100.0,
+                target_level=160.0,
+                ltp=96.0,
+                option_premium=100.0,
+                stop_loss=70.0,
+                option_type="CE",
+                strike=24200,
+                created_at="2026-09-08 10:19:00",
+                is_live=True,
+            )
+            assert evaluate_alert_in_flight_decay(alert_missing_expiry, current_ltp=96.0) is None
 
             # Non-0DTE alert (e.g. Friday for Nifty) at 11m -> Standard 15m threshold -> Must NOT trigger
             friday_morning = datetime(2026, 9, 11, 10, 30, 0, tzinfo=IST)
@@ -603,6 +630,7 @@ class TestInFlightDecayAlerts:
             in_flight_warning_sent=True,
             in_flight_warning_reason="DANGER ZONE: 84% risk budget consumed.",
             telegram_dispatched=True,
+            telegram_root_message_id=12345,
         )
         with patch("engine.alerts._telegram_notify") as mock_notify:
             # First dispatch -> dispatches to Telegram

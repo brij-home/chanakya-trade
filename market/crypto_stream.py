@@ -228,8 +228,15 @@ class CryptoStreamManager:
     def is_connected(self) -> bool:
         return self._connected and self._running
 
-    def start(self) -> None:
+    def start(self, *, risk_monitoring: bool = False) -> None:
         """Start the background streaming worker."""
+        from config.discovery_policy import get_discovery_policy
+
+        if get_discovery_policy().fno_only and not risk_monitoring:
+            logger.info(
+                "FILTERED_BY_FOCUS crypto transport startup; explicit existing-exposure monitoring remains available"
+            )
+            return
         with self._lock:
             if self._running:
                 return
@@ -566,7 +573,7 @@ class CryptoStreamManager:
                 )
             df = pd.DataFrame(rows)
             if not df.empty:
-                df.set_index("date", inplace=True)
+                df = df.set_index("date")
                 df["date"] = df.index
             return df
         except Exception as e:
@@ -652,7 +659,7 @@ class CryptoStreamManager:
                 candles = list(self._klines.get(canon_sym, []))
             if len(candles) >= min(limit, 100):
                 df = pd.DataFrame(candles[-limit:])
-                df.set_index("date", inplace=True)
+                df = df.set_index("date")
                 df["date"] = df.index
                 return df
 

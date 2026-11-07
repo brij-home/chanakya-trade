@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Any, Optional
 
 from engine.alert_expiry import is_alert_option_premium_level
-from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
 
 logger = logging.getLogger(__name__)
 from config.constants import IST
@@ -2593,7 +2592,7 @@ def evaluate_alert_in_flight_decay(
     is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (
         not getattr(alert, "is_live", True)
     )
-    env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+    env_tag = "[TEST]" if is_test else "[LIVE]"
 
     # 2. Extract Entry Price
     entry = None
@@ -2931,8 +2930,6 @@ def evaluate_alert_in_flight_decay(
     if is_deriv_alert and not is_option_sell and created_dt:
         # Detect 0DTE (Same-Day Expiry) status
         is_0dte = False
-        clean_sym = str(getattr(alert, "symbol", "")).upper()
-        exp_type = str(getattr(alert, "expiry_type", "")).upper()
         exp_raw = getattr(alert, "expiry_date", None) or (
             alert.metrics.get("expiry_date") if isinstance(alert.metrics, dict) else None
         )
@@ -2951,14 +2948,12 @@ def evaluate_alert_in_flight_decay(
                         f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
-        if not is_0dte and not has_future_exp and exp_type != "MONTHLY":
-            if (
-                clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
-                and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
-            ):
-                is_0dte = True
-            elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
-                is_0dte = True
+        if not is_0dte and not has_future_exp:
+            # A weekday/calendar guess is not evidence that this listed contract
+            # expires today (holidays and contract-specific schedules matter).
+            # Only explicit DTE metadata can establish same-day expiry here.
+            explicit_dte = getattr(alert, "dte", None)
+            is_0dte = explicit_dte == 0 or getattr(alert, "is_0dte", False)
 
         # Dynamic Greeks-Aware Decay Horizon
         # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.

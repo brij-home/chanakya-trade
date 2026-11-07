@@ -222,4 +222,33 @@ describe('Notification UI Components', () => {
       })
     )
   })
+
+  it('correctly renders and formats spot, premium, ltp, sl, and t1 without fmt reference errors', () => {
+    useNotificationStore.getState().addNotification({
+      id: 'full-levels-test',
+      symbol: 'BANKNIFTY',
+      contract_symbol: 'BANKNIFTY 55000 CE',
+      direction: 'BULLISH',
+      spot: 54950,
+      premium: 320.5,
+      ltp: 325.0,
+      sl: 280,
+      t1: 410,
+      confidence: 88,
+    })
+
+    render(
+      <NotificationDropdown
+        isOpen={true}
+        onClose={vi.fn()}
+        onOpenOrderTicket={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText(/Spot/i)).toBeInTheDocument()
+    expect(screen.getByText(/Prem/i)).toBeInTheDocument()
+    expect(screen.getByText(/SL ₹/i)).toBeInTheDocument()
+    expect(screen.getByText(/T1 ₹/i)).toBeInTheDocument()
+    expect(screen.getByText('88%')).toBeInTheDocument()
+  })
 })

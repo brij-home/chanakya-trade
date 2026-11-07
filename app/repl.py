@@ -2356,6 +2356,8 @@ def run_repl(broker: BrokerAPI) -> None:
 
             elif command == "cancel":
                 # cancel ORDER_ID  |  cancel all  |  cancel (shows open orders to pick)
+                from engine.order_lifecycle import cancel_order_intent as _cancel_via_oms
+
                 if not broker:
                     console.print("[red]No broker connected. Run: broker connect[/red]")
                 else:
@@ -2381,17 +2383,19 @@ def run_repl(broker: BrokerAPI) -> None:
                             if _Confirm.ask("  Confirm?", default=False):
                                 for _o in _open:
                                     try:
-                                        _exec_broker.cancel_order(_o.order_id)
+                                        _cancel_result = _cancel_via_oms(_o.order_id)
                                         console.print(
-                                            f"  [green]✓[/green] Cancelled {_o.symbol} {_o.order_id}"
+                                            f"  [yellow]{_cancel_result['status']}[/yellow] {_o.symbol} {_o.order_id}"
                                         )
                                     except Exception as _e:
                                         console.print(f"  [red]✗[/red] Failed {_o.order_id}: {_e}")
                         elif args:
                             _oid = args[0]
                             try:
-                                _exec_broker.cancel_order(_oid)
-                                console.print(f"  [green]✓ Cancelled order {_oid}[/green]")
+                                _cancel_result = _cancel_via_oms(_oid)
+                                console.print(
+                                    f"  [yellow]{_cancel_result['status']}[/yellow] order {_oid}"
+                                )
                             except Exception as _e:
                                 console.print(f"  [red]Cancel failed:[/red] {_e}")
                         else:
@@ -2411,17 +2415,19 @@ def run_repl(broker: BrokerAPI) -> None:
                             elif _pick.lower() == "all":
                                 for _o in _open:
                                     try:
-                                        _exec_broker.cancel_order(_o.order_id)
-                                        console.print(f"  [green]✓[/green] Cancelled {_o.symbol}")
+                                        _cancel_result = _cancel_via_oms(_o.order_id)
+                                        console.print(
+                                            f"  [yellow]{_cancel_result['status']}[/yellow] {_o.symbol}"
+                                        )
                                     except Exception as _e:
                                         console.print(f"  [red]✗[/red] {_e}")
                             else:
                                 try:
                                     _idx = int(_pick) - 1
                                     _o = _open[_idx]
-                                    _exec_broker.cancel_order(_o.order_id)
+                                    _cancel_result = _cancel_via_oms(_o.order_id)
                                     console.print(
-                                        f"  [green]✓ Cancelled {_o.symbol} {_o.order_id}[/green]"
+                                        f"  [yellow]{_cancel_result['status']}[/yellow] {_o.symbol} {_o.order_id}"
                                     )
                                 except (ValueError, IndexError):
                                     console.print("[red]Invalid selection.[/red]")
@@ -2471,46 +2477,58 @@ def run_repl(broker: BrokerAPI) -> None:
                     except ValueError as _e:
                         console.print(f"[red]Sizing error:[/red] {_e}")
                         continue
-                    _mode = _os.environ.get("TRADING_MODE", "PAPER")
+                    from engine.modes import get_trading_mode as _get_mode
+
+                    _mode = _get_mode().mode.name
                     _side = "BUY" if command == "buy" else "SELL"
                     _otype = "LIMIT" if _limit else "MARKET"
                     _price_str = f"₹{_limit}" if _limit else "MARKET"
 
                     console.print(
                         f"\n  [bold]{_side} {_qty} × {_sym}[/bold] @ {_price_str}"
-                        f"  [{'bold red' if _mode == 'LIVE' else 'green'}]({_mode})[/{'bold red' if _mode == 'LIVE' else 'green'}]"
+                        f"  [{'bold red' if _mode == 'EXECUTE' else 'green'}]({_mode})[/{'bold red' if _mode == 'EXECUTE' else 'green'}]"
                     )
+
+                    if _qty <= 0:
+                        console.print(
+                            "  [red]Quantity must be at least one unit; no order submitted.[/red]"
+                        )
+                        continue
+                    if _mode != "SIMULATE":
+                        console.print(
+                            "  [yellow]Direct CLI broker placement is disabled. Use the authenticated "
+                            "order ticket for live orders.[/yellow]"
+                        )
+                        continue
 
                     from rich.prompt import Confirm as _Confirm
 
-                    if _mode == "LIVE":
-                        console.print(
-                            "  [red]⚠  This will place a REAL order with real money.[/red]"
-                        )
                     if _Confirm.ask("  Confirm?", default=False):
                         try:
-                            from brokers.base import OrderRequest as _OR
-                            from brokers.session import get_execution_broker as _get_exec
+                            _reference_price = _limit
+                            if not _reference_price:
+                                from market.quotes import get_ltp as _get_ltp
 
-                            _req = _OR(
+                                _reference_price = _get_ltp(f"NSE:{_sym}")
+                            from engine.order_lifecycle import (
+                                submit_simulated_order_intent as _submit_paper,
+                            )
+
+                            _resp = _submit_paper(
                                 symbol=_sym,
-                                exchange="NSE",
-                                transaction_type=_side,
+                                side=_side,
                                 quantity=_qty,
+                                price=float(_reference_price or 0.0),
                                 order_type=_otype,
-                                price=_limit,
                                 product="CNC",
                             )
-                            _resp = _get_exec().place_order(_req)
-                            if _resp.status in ("OPEN", "COMPLETE", "PUT ORDER REQ RECEIVED"):
+                            if _resp.status in ("FILLED_PAPER", "OPEN"):
                                 console.print(
-                                    f"  [green]✓ Order placed![/green]  ID: {_resp.order_id}  Status: {_resp.status}"
+                                    f"  [green]✓ Paper OMS order:[/green] ID: {_resp.order_id}  Status: {_resp.status}"
                                 )
-                                if _resp.message:
-                                    console.print(f"    {_resp.message}")
                             else:
                                 console.print(
-                                    f"  [red]✗ Order {_resp.status}:[/red] {_resp.message}"
+                                    f"  [red]✗ Order {_resp.status}:[/red] {_resp.rejection_reason}"
                                 )
                         except Exception as e:
                             console.print(f"  [red]Order error:[/red] {e}")

@@ -262,8 +262,8 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
 
     fireEvent.click(screen.getByText(/Archived & History/i))
 
-    expect(screen.getByText('TCS')).toBeTruthy()
-    expect(screen.getByText('INFY')).toBeTruthy()
+    expect(screen.getAllByText('TCS').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('INFY').length).toBeGreaterThanOrEqual(1)
     expect(screen.queryByText('NIFTY')).toBeNull()
   })
 

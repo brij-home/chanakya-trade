@@ -64,7 +64,7 @@ def _build_sweep_df(
         )
 
     df = pd.DataFrame(rows)
-    df.set_index("date", inplace=True)
+    df = df.set_index("date")
     return df
 
 

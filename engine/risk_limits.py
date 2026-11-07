@@ -112,6 +112,21 @@ class RiskLimits:
         """Max allowed daily portfolio drawdown in percentage (e.g. 2.0 = 2%)."""
         return float(os.environ.get("MAX_DAILY_DRAWDOWN_PCT", "2.0"))
 
+    @property
+    def max_order_notional(self) -> float:
+        """Max allowed single order notional value in INR (default: 25 Lakh)."""
+        return float(os.environ.get("MAX_ORDER_NOTIONAL", "2500000.0"))
+
+    @property
+    def max_position_value(self) -> float:
+        """Max allowed aggregate position value in INR (default: 50 Lakh)."""
+        return float(os.environ.get("MAX_POSITION_VALUE", "5000000.0"))
+
+    @property
+    def max_risk_per_trade(self) -> float:
+        """Max allowed risk per trade in INR (default: 50,000)."""
+        return float(os.environ.get("MAX_RISK_PER_TRADE", "50000.0"))
+
     # ── DB setup ──────────────────────────────────────────────
 
     def _init_db(self) -> None:
@@ -125,12 +140,26 @@ class RiskLimits:
                     quantity    INTEGER NOT NULL,
                     price       REAL NOT NULL,
                     pnl         REAL NOT NULL DEFAULT 0.0,
-                    recorded_at TEXT NOT NULL
+                    recorded_at TEXT NOT NULL,
+                    account_id  TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    mode        TEXT NOT NULL DEFAULT 'UNKNOWN'
                 )
             """)
+            # Migration check: if table already existed without account_id / mode
+            cursor = conn.execute("PRAGMA table_info(daily_trades)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "account_id" not in cols:
+                conn.execute(
+                    "ALTER TABLE daily_trades ADD COLUMN account_id TEXT NOT NULL DEFAULT 'UNKNOWN'"
+                )
+            if "mode" not in cols:
+                conn.execute(
+                    "ALTER TABLE daily_trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'UNKNOWN'"
+                )
+
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trade_date
-                ON daily_trades (trade_date)
+                CREATE INDEX IF NOT EXISTS idx_trade_date_account_mode
+                ON daily_trades (trade_date, account_id, mode)
             """)
 
     @contextmanager
@@ -146,41 +175,76 @@ class RiskLimits:
             conn.close()
 
     def _today(self) -> str:
-        return date.today().isoformat()
+        try:
+            from config.constants import now_ist
+
+            return now_ist().date().isoformat()
+        except Exception:
+            try:
+                from market.instruments import get_current_ist_time
+
+                return get_current_ist_time().date().isoformat()
+            except Exception:
+                return date.today().isoformat()
 
     # ── Read helpers ──────────────────────────────────────────
 
-    def _daily_loss(self) -> float:
+    def _daily_loss(self, account_id: Optional[str] = None, mode: Optional[str] = None) -> float:
+        query = "SELECT COALESCE(SUM(pnl), 0.0) FROM daily_trades WHERE trade_date = ?"
+        params: list[Any] = [self._today()]
+        if account_id:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(pnl), 0.0) FROM daily_trades WHERE trade_date = ?",
-                (self._today(),),
-            ).fetchone()
+            row = conn.execute(query, tuple(params)).fetchone()
         return float(row[0]) if row else 0.0
 
-    def _trades_today(self) -> int:
+    def _trades_today(self, account_id: Optional[str] = None, mode: Optional[str] = None) -> int:
+        query = "SELECT COUNT(*) FROM daily_trades WHERE trade_date = ?"
+        params: list[Any] = [self._today()]
+        if account_id:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM daily_trades WHERE trade_date = ?",
-                (self._today(),),
-            ).fetchone()
+            row = conn.execute(query, tuple(params)).fetchone()
         return int(row[0]) if row else 0
 
-    def _trades_today_for_symbol(self, symbol: str) -> int:
+    def _trades_today_for_symbol(
+        self, symbol: str, account_id: Optional[str] = None, mode: Optional[str] = None
+    ) -> int:
+        query = "SELECT COUNT(*) FROM daily_trades WHERE trade_date = ? AND symbol = ?"
+        params: list[Any] = [self._today(), symbol.upper()]
+        if account_id:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM daily_trades WHERE trade_date = ? AND symbol = ?",
-                (self._today(), symbol.upper()),
-            ).fetchone()
+            row = conn.execute(query, tuple(params)).fetchone()
         return int(row[0]) if row else 0
 
-    def _consecutive_losses_today(self) -> int:
+    def _consecutive_losses_today(
+        self, account_id: Optional[str] = None, mode: Optional[str] = None
+    ) -> int:
         """Count consecutive losing trades from the most recent trade backwards today."""
+        query = "SELECT pnl FROM daily_trades WHERE trade_date = ?"
+        params: list[Any] = [self._today()]
+        if account_id:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY id DESC"
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT pnl FROM daily_trades WHERE trade_date = ? ORDER BY id DESC",
-                (self._today(),),
-            ).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
         streak = 0
         for (pnl,) in rows:
             if pnl < 0:
@@ -199,6 +263,8 @@ class RiskLimits:
         price: float,
         current_position: Optional[dict] = None,
         allow_override: bool = False,
+        account_id: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> RiskPreflightResult:
         """
         Evaluate an order against risk rules, returning structured behavioral disclaimers
@@ -210,8 +276,29 @@ class RiskLimits:
         disclaimers = []
         recs = []
 
-        # 1. Daily Loss Cap
-        current_loss = self._daily_loss()
+        # 0. Order Size & Notional Gate
+        notional = float(price or 0.0) * int(quantity or 0)
+        if notional > self.max_order_notional:
+            flags.append("MAX_ORDER_NOTIONAL")
+            disclaimers.append(
+                f"Order notional ₹{notional:,.2f} exceeds institutional threshold of ₹{self.max_order_notional:,.2f}. "
+                f"Slicing or risk reduction required."
+            )
+            recs.append("Reduce quantity to stay within risk limits.")
+
+        # 1. Daily Loss Cap & Drawdown %
+        current_loss = self._daily_loss(account_id=account_id, mode=mode)
+        total_cap = float(
+            os.environ.get("TRADING_CAPITAL", os.environ.get("TOTAL_CAPITAL", "200000.0"))
+        )
+        if current_loss < 0 and total_cap > 0:
+            dd_pct = (abs(current_loss) / total_cap) * 100.0
+            if dd_pct >= self.max_daily_drawdown_pct:
+                flags.append("MAX_DAILY_DRAWDOWN")
+                disclaimers.append(
+                    f"Daily portfolio drawdown threshold reached ({dd_pct:.1f}% vs limit {self.max_daily_drawdown_pct:.1f}% of capital ₹{total_cap:,.0f})."
+                )
+                recs.append("Take the remainder of the trading session off to protect capital.")
         if current_loss <= self.max_daily_loss:
             flags.append("DAILY_LOSS_CAP")
             disclaimers.append(
@@ -223,7 +310,7 @@ class RiskLimits:
             )
 
         # 2. Consecutive Losses (Tilt / Revenge Trading)
-        streak = self._consecutive_losses_today()
+        streak = self._consecutive_losses_today(account_id=account_id, mode=mode)
         if streak >= self.max_consecutive_losses:
             flags.append("TILT_LOCKOUT")
             disclaimers.append(
@@ -235,7 +322,7 @@ class RiskLimits:
             )
 
         # 3. Max Daily Trades
-        trades = self._trades_today()
+        trades = self._trades_today(account_id=account_id, mode=mode)
         if trades >= self.max_daily_trades:
             flags.append("MAX_DAILY_TRADES")
             disclaimers.append(
@@ -244,7 +331,7 @@ class RiskLimits:
             recs.append("Wait for A+ high-conviction setups only.")
 
         # 4. Max Trades per Symbol
-        sym_trades = self._trades_today_for_symbol(sym)
+        sym_trades = self._trades_today_for_symbol(sym, account_id=account_id, mode=mode)
         if sym_trades >= self.max_trades_per_symbol:
             flags.append("MAX_SYMBOL_TRADES")
             disclaimers.append(
@@ -312,6 +399,8 @@ class RiskLimits:
         price: float,
         current_position: Optional[dict] = None,
         allow_override: bool = False,
+        account_id: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> RiskPreflightResult:
         """
         Validate an order against risk rules with advisory guidance and override support.
@@ -334,6 +423,8 @@ class RiskLimits:
             price=price,
             current_position=current_position,
             allow_override=allow_override,
+            account_id=account_id,
+            mode=mode,
         )
         if not res.allowed:
             raise RiskLimitError(
@@ -353,14 +444,18 @@ class RiskLimits:
         quantity: int,
         price: float,
         pnl: float = 0.0,
+        account_id: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> None:
-        """Record a completed trade for daily tracking."""
+        """Record a completed trade for daily tracking with account and mode scoping."""
+        acc = account_id or "UNKNOWN"
+        md = mode or os.environ.get("TRADING_MODE", "UNKNOWN")
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO daily_trades
-                    (trade_date, symbol, action, quantity, price, pnl, recorded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (trade_date, symbol, action, quantity, price, pnl, recorded_at, account_id, mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self._today(),
@@ -370,17 +465,21 @@ class RiskLimits:
                     price,
                     pnl,
                     datetime.now().isoformat(),
+                    acc,
+                    md,
                 ),
             )
 
     # ── Status ────────────────────────────────────────────────
 
-    def get_status(self) -> dict:
+    def get_status(self, account_id: Optional[str] = None, mode: Optional[str] = None) -> dict:
         """Return current risk usage."""
-        loss = self._daily_loss()
-        trades = self._trades_today()
-        streak = self._consecutive_losses_today()
-        remaining_loss = max(0.0, loss - self.max_daily_loss)
+        loss = self._daily_loss(account_id=account_id, mode=mode)
+        trades = self._trades_today(account_id=account_id, mode=mode)
+        streak = self._consecutive_losses_today(account_id=account_id, mode=mode)
+        allowed_loss = abs(self.max_daily_loss)
+        current_l = abs(min(0.0, loss))
+        remaining_loss = max(0.0, allowed_loss - current_l)
 
         return {
             "daily_loss": loss,
@@ -390,7 +489,7 @@ class RiskLimits:
             "max_daily_loss": self.max_daily_loss,
             "max_daily_trades": self.max_daily_trades,
             "max_trades_per_symbol": self.max_trades_per_symbol,
-            "remaining_loss_room": -remaining_loss if loss < 0 else abs(self.max_daily_loss),
+            "remaining_loss_room": remaining_loss,
             "remaining_trades": max(0, self.max_daily_trades - trades),
             "tilt_lockout_active": streak >= self.max_consecutive_losses,
             "limits_hit": loss <= self.max_daily_loss

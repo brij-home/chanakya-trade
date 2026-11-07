@@ -29,8 +29,8 @@ def client(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(key, raising=False)
 
-    # Self-hosted mode with empty auth DB — bypasses auth middleware
-    monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+    # Local/test mode with empty auth DB — bypasses auth middleware
+    monkeypatch.setenv("DEPLOY_MODE", "test")
     monkeypatch.setenv("AUTH_DB_PATH", str(tmp_path / "test.db"))
 
     # Mock keychain to avoid picking up real credentials

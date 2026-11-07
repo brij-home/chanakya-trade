@@ -146,6 +146,7 @@ def test_detector_circuit_breaker_halts_degraded_detector(tmp_path):
             alert_type="GAMMA_BLAST",
             outcome="LOSS",
             realized_r=-1.0,
+            provenance="TEST",
         )
 
     metrics = cb.get_metrics("GAMMA_BLAST")
@@ -297,8 +298,8 @@ def test_predatory_position_sizing_timing_calibration():
     assert power_res.lots >= base_res.lots
 
 
-def test_trade_lifecycle_manager_records_target_milestones_as_wins_in_circuit_breaker(tmp_path):
-    """Regression test: Milestone wins (T0_5, T1, T2, TARGET) MUST record as WIN in circuit breaker."""
+def test_trade_lifecycle_manager_does_not_treat_partial_milestones_as_final_outcomes(tmp_path):
+    """A target event is not a completed outcome without a reconstructed final path."""
     from engine.detector_circuit_breaker import DetectorCircuitBreaker
     import engine.detector_circuit_breaker
     from unittest.mock import patch
@@ -349,9 +350,8 @@ def test_trade_lifecycle_manager_records_target_milestones_as_wins_in_circuit_br
             now_str="2026-10-14 11:38:00 IST",
         )
 
-        # Check circuit breaker history
+        # Partial target observations are not terminal and must not enter the
+        # detector's completed-outcome sample.
         assert cb.get_metrics("ORB_PRIMED") is not None
         records = list(cb._history.get("ORB_PRIMED", []))
-        assert len(records) == 1
-        assert records[0].outcome == "WIN"
-        assert records[0].realized_r == 1.0
+        assert records == []

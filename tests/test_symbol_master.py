@@ -24,23 +24,23 @@ def mock_master_data():
             "isin": "INE062A01020",
             "lastUpdate": "2026-10-03",
         },
-        "NSE:NIFTY26OCT25000CE": {
-            "symTicker": "NSE:NIFTY26OCT25000CE",
-            "exSymName": "NIFTY 29 OCT 26 25000 CE",
-            "minLotSize": 25,
+        "NSE:NIFTY26NOV25000CE": {
+            "symTicker": "NSE:NIFTY26NOV25000CE",
+            "exSymName": "NIFTY 03 NOV 26 25000 CE",
+            "minLotSize": 65,
             "tickSize": 0.05,
             "optType": "CE",
             "strikePrice": 25000,
-            "expiryDate": "1793260800",
+            "expiryDate": "1793700000",
             "fyToken": "1011126102925000",
             "isin": "",
-            "lastUpdate": "2026-10-03",
+            "lastUpdate": "2026-10-30",
         },
     }
 
 
 def test_search_symbols(mock_master_data, monkeypatch):
-    monkeypatch.setattr(sm, "load_master", lambda master: mock_master_data)
+    monkeypatch.setattr(sm, "load_master", lambda master, **kwargs: mock_master_data)
 
     res = sm.search_symbols("SBIN", master="NSE_CM")
     assert len(res) == 1
@@ -50,28 +50,30 @@ def test_search_symbols(mock_master_data, monkeypatch):
 
     res_opt = sm.search_symbols("NIFTY", opt_type="CE")
     assert len(res_opt) == 1
-    assert res_opt[0]["symbol"] == "NSE:NIFTY26OCT25000CE"
-    assert res_opt[0]["lot_size"] == 25
+    assert res_opt[0]["symbol"] == "NSE:NIFTY26NOV25000CE"
+    assert res_opt[0]["lot_size"] == 65
 
 
 def test_get_symbol_info_and_validation(mock_master_data, monkeypatch):
-    monkeypatch.setattr(sm, "load_master", lambda master: mock_master_data)
+    monkeypatch.setattr(sm, "load_master", lambda master, **kwargs: mock_master_data)
 
     info = sm.get_symbol_info("NSE:SBIN-EQ")
     assert info is not None
     assert info["minLotSize"] == 1
 
-    val = sm.validate_symbol("NSE:NIFTY26OCT25000CE")
-    assert val["minLotSize"] == 25
+    val = sm.validate_symbol("NSE:NIFTY26NOV25000CE")
+    assert val["minLotSize"] == 65
+    # Broker order symbols use NFO, while the canonical FYERS row is keyed NSE.
+    assert sm.get_symbol_info("NFO:NIFTY26NOV25000CE") is mock_master_data["NSE:NIFTY26NOV25000CE"]
 
     with pytest.raises(ValueError, match="not found in exchange master"):
         sm.validate_symbol("NSE:NONEXISTENT999")
 
 
 def test_get_lot_size_and_tick_size(mock_master_data, monkeypatch):
-    monkeypatch.setattr(sm, "load_master", lambda master: mock_master_data)
+    monkeypatch.setattr(sm, "load_master", lambda master, **kwargs: mock_master_data)
 
-    assert sm.get_lot_size("NSE:NIFTY26OCT25000CE") == 25
+    assert sm.get_lot_size("NSE:NIFTY26NOV25000CE") == 65
     assert sm.get_lot_size("NSE:UNKNOWN", fallback=50) == 50
 
     assert sm.get_tick_size("NSE:SBIN-EQ") == 0.05

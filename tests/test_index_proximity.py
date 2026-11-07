@@ -67,7 +67,7 @@ def _make_dummy_5m_ohlcv(
         )
         curr = c
     df = pd.DataFrame(records)
-    df.set_index("timestamp", inplace=True)
+    df = df.set_index("timestamp")
     return df
 
 

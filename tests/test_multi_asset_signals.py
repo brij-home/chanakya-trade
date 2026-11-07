@@ -263,7 +263,10 @@ def test_commodity_target_hierarchy_monotonicity():
 
 def test_auto_alert_engine_option_enrichment_signature():
     """Verify AutoAlertEngine calls resolve_option_contract with correct signature."""
+    from datetime import datetime, timezone
+    from unittest.mock import patch, MagicMock
     from engine.auto_alert_engine import AutoAlertEngine
+    from market.options import OptionsContract
 
     engine = AutoAlertEngine()
     test_alert = AutoAlert(
@@ -283,8 +286,46 @@ def test_auto_alert_engine_option_enrichment_signature():
         metrics={"segment": "INDEX"},
     )
 
+    c1 = OptionsContract(
+        symbol="NSE:NIFTY26NOV25000CE",
+        underlying="NIFTY",
+        expiry="2026-11-26",
+        strike=25000.0,
+        option_type="CE",
+        last_price=150.0,
+        oi=5000,
+        oi_change=100,
+        volume=1000,
+        bid=149.0,
+        ask=151.0,
+        lot_size=65,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_source = {
+        "provider": "FYERS",
+        "source": "BROKER_REST",
+        "data_state": "LIVE",
+        "is_realtime": True,
+        "is_market_open": True,
+        "as_of": now_iso,
+        "observation_time": now_iso,
+        "receipt_time": now_iso,
+    }
+
     # Should execute without throwing unexpected keyword argument 'spot_price'
-    engine._enrich_fno_contract_if_applicable(test_alert)
+    with (
+        patch(
+            "market.options.get_options_snapshot",
+            return_value=([c1], 25000.0, ["2026-11-26"], mock_source),
+        ),
+        patch("analysis.regime_governor._fresh_live_vix", return_value=15.3),
+        patch(
+            "market.contract_selection.resolve_active_contract",
+            return_value=MagicMock(is_valid=True, contract=c1),
+        ),
+    ):
+        engine._enrich_fno_contract_if_applicable(test_alert)
+
     # Underlying NIFTY should be enriched with strike / contract symbol / option type
     assert test_alert.option_type == "CE"
     assert test_alert.contract_symbol is not None

@@ -231,6 +231,7 @@ def test_settlement_invalidation_permitted_post_market(clean_engine, monkeypatch
         is_live=True,
         environment="LIVE",
         telegram_dispatched=True,
+        telegram_message_id=12345,
     )
 
     with patch("engine.alerts._telegram_notify") as mock_tg:

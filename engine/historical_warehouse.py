@@ -96,7 +96,7 @@ class HistoricalWarehouse:
         # Ensure datetime index
         if "date" in norm_df.columns and not isinstance(norm_df.index, pd.DatetimeIndex):
             norm_df["date"] = pd.to_datetime(norm_df["date"])
-            norm_df.set_index("date", inplace=True)
+            norm_df = norm_df.set_index("date")
 
         if not isinstance(norm_df.index, pd.DatetimeIndex):
             norm_df.index = pd.to_datetime(norm_df.index)

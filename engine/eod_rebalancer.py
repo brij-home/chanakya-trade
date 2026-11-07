@@ -269,7 +269,13 @@ def audit_open_positions_for_physical_delivery(
         lot_sz = int(pos.get("lot_size", 250) or 250)
 
         # Estimate DTE (default to 4 days if near month-end)
-        dte = int(pos.get("days_to_expiry", 4) or 4)
+        dte_value = pos.get("days_to_expiry")
+        if dte_value is None:
+            logger.error(
+                "[EODRebalancer] Missing expiry metadata for %s; assessment unavailable", sym
+            )
+            continue
+        dte = int(dte_value)
 
         underlying = sym.split()[0] if " " in sym else sym
         spot = float(pos.get("spot_price", 0.0) or 0.0)

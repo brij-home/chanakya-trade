@@ -131,6 +131,7 @@ def test_high_vix_attaches_defined_risk_spread(monkeypatch):
     )
     # Mock VIX to 21.0
     monkeypatch.setattr("market.indices.get_vix", lambda: 21.0)
+    monkeypatch.setattr("analysis.regime_governor._fresh_live_vix", lambda: 21.0)
 
     alert = detect_opening_drive(
         symbol="NIFTY",

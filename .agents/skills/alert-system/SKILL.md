@@ -6,6 +6,8 @@ description: >-
   how to add new detector types in engine/detectors/.
 ---
 
+> **Current safety contract (31 October 2026):** Read `docs/SAFETY_CONTRACTS.md` before any change. It supersedes older weekday, STT, session, synthetic-data and one-lot-floor examples in this document. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
+
 # Alert System Runbook
 
 > The alert system spans 7+ modules and 16 detector files. Read this before
@@ -28,6 +30,7 @@ description: >-
 - [12. Data Reliability & Honest Provenance](#12-data-reliability-honest-provenance--zero-silent-swallowing-standard)
 - [13. Detector Degradation Circuit Breakers](#13-detector-degradation-circuit-breakers--scrutiny-conviction-integrity)
 - [14. Tri-Directional Holistic Calibration & Universal Options Symmetry](#14-tri-directional-holistic-calibration--universal-options-symmetry-standard)
+- [15. Anti-Stale Data Governance, Delta Parity & Hedged Spreads](#15-anti-stale-data-governance-delta-parity--hedged-spreads)
 <!-- /TOC -->
 
 ---
@@ -392,9 +395,12 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
 2. **Conviction Integrity Across Scrutiny Layers**:
    - Downstream AI Scrutiny (Tier-2 LLM or quantitative fallback) and `_async_enrich_scrutiny` MUST NEVER wipe out a probation discount.
    - When updating alert confidence after scrutiny, the discount multiplier must be preserved: `target.confidence = max(target.confidence, int(round(scrutiny.score * cb_multiplier)))`.
-3. **Continuous Realized Outcome Feedback Loop**:
-   - Target milestone hits (T1, T2) and runner trail exits feed `outcome="WIN"` into `detector_circuit_breaker.record_outcome(...)`.
-   - Thesis stop-loss invalidations feed `outcome="LOSS"` into `detector_circuit_breaker.record_outcome(...)`.
+3. **Evidence-Qualified Detector Feedback**:
+   - T0.5/T1/T2 milestones are path events, not terminal outcomes; never feed them into `detector_circuit_breaker.record_outcome(...)` as completed trades.
+   - Only a terminal alert-path observation with an explicit current quote and immutable entry/initial-stop anchors may be recorded. Skip untriggered alerts, partial-scale paths, runners, stale quote fallbacks, and incomplete anchors until weighted broker fills are durable.
+   - `ALERT_FORWARD_PATH_TERMINAL` samples may conservatively degrade a detector; they cannot produce `HEALTHY`, positive confidence bonus, or Kelly sizing. Only verified broker-fill provenance can establish those. Unlabeled legacy rows remain audit-only.
+   - Pattern-learning milestones may be retained as event history, but MUST NOT be reported as account win rate/realized R or recalibrate performance weights. Unverified historical fingerprints must not match candidates.
+   - The current writer rejects caller-supplied `VERIFIED_BROKER_FILL` labels until account-scoped fill reconciliation is integrated. `TEST` records are pytest-only. Historical fingerprints cannot consume current chain/sector/fundamental state. Neutral or unknown payoffs require leg evidence and cannot default to long-price arithmetic.
 4. **Hermetic Test Isolation**:
    - `detector_circuit_breaker.reset_all()` must be invoked in test cleanup (configured autouse in `tests/conftest.py::sanitize_test_env`) so that failed test setups never bleed degraded states into unrelated test suites.
 
@@ -430,6 +436,42 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
    - **Defensive Serialization Quarantine**: `engine/storage/alert_repository.py` must isolate per-alert serialization errors via defensive `try / except` quarantine so that an isolated formatting bug never aborts atomic JSON persistence or SQLite ledger sync for the rest of the alerts.
    - **Milestone Decoupling**: Target scaling milestones (e.g. `DE_RISK_0_5R` at +0.5R) must remain distinct from full breakeven locking (`T1_ACHIEVED` / `BREAKEVEN_LOCKED` at +2.0R) in `engine/alert_evaluator.py`, avoiding false breakeven gate warnings.
 
+---
 
+## 15. Anti-Stale Data Governance, Delta Parity & Hedged Spreads
 
+### 1. Active Market Warehouse & In-Memory TTL Limits
+- **Warehouse Staleness Rule**: In `market/history.py`, historical warehouse intraday bars (`kite_interval != "day"`) during active trading sessions (`is_market_open(exchange)`) must never lag by more than 1.5 bar intervals (`max(intv_sec * 1.5, 90.0s)`). If disk warehouse bars exceed this age, they are discarded as stale and fresh bars are fetched directly from Fyers API.
+- **Granular Tier-1 Memory TTL**: `_df_memory_cache` applies sub-minute TTLs:
+  - 1-minute: `15.0s`
+  - 3-minute: `30.0s`
+  - 5-minute: `45.0s`
+  - 15-minute: `90.0s`
+  - Daily: `3600.0s`
+- **Daily Bar Calendar Validation**: Both `eod_store` (Tier 1.5) and `analysis_cache` (Tier 2) assert that cached daily rows reach the latest completed trading session (`get_latest_trading_day()`), preventing historical sessions from masquerading as current.
 
+### 2. VWAP Session Dynamism & include_live_candle Mandate
+- **Dynamic VWAP TTL**: In `market/vwap_session_cache.py`, VWAP is cached for at most `60.0s` during active market hours (09:15–15:30 IST), with negative caches retrying after `30.0s`.
+- **Day Rollover Quarantine**: `_ensure_current_session()` purges memory cache whenever calendar date changes, preventing previous session VWAP leakage.
+- **Live Candle Synthesis**: `_compute_raw_vwap` in `market/quotes.py` passes `include_live_candle=True` to `get_ohlcv`, embedding the latest live price tick directly into the VWAP accumulation.
+
+### 3. Temporal Bar Freshness Invariant
+- All intraday detectors (`index_put_setup`, `index_call_setup`, `gamma_blast`, etc.) and `DetectionContext` inspect `active_ohlcv.index[-1]`.
+- If `(now_dt - last_bar_time) > 15.0 minutes` during active market hours, the detector immediately aborts the scan with a diagnostic warning (`DATA_FEED_STALE`), preventing false pattern signals on lagging data feeds.
+
+### 4. Spot-to-Option Delta Parity & Spread Mandate
+- **Mathematical Delta Parity**: Option Stop Loss is anchored to Spot Invalidation Stop Loss via Delta:
+  $$\text{Option Risk} = |\text{Spot SL} - \text{Spot}| \times |\Delta|$$
+- **Wide Spot Risk Gate**: If the required Spot SL is $> 55$ pts on Nifty ($> 125$ pts on BankNifty) or if delta option risk exceeds $28\%$ of option premium, trading naked options is prohibited (`preferred_vehicle = "SPREAD_ONLY"`).
+- In wide risk regimes, the alert mandates a Defined-Risk Hedged Spread (Bear Put Spread for puts, Bull Call Spread for calls), protecting traders against normal market oscillation and freak wick stop-outs.
+
+### 5. Mean-Reversion Directional Boundary
+- Top-reversal mean-reversion setups targeting VWAP (e.g. `INTRADAY_CAPITULATION_TOP`) require spot to be strictly above VWAP ($	ext{spot} \ge 	ext{VWAP} 	imes 1.0002$).
+- Bottom-reversal mean-reversion setups targeting VWAP (e.g. `INTRADAY_CAPITULATION_REVERSAL`) require spot to be strictly below VWAP ($	ext{spot} \le 	ext{VWAP} 	imes 0.9998$).
+- Once price has penetrated to the other side of VWAP, the mean-reversion move is finished; entering there is chasing an extended move and is rejected.
+- Maximum allowable retreat/bounce from session extreme is capped at $0.35\%$ ($0.08\% \le 	ext{retreat} \le 0.35\%$).
+
+### 6. Fyers Prime Level-3 TBT Channel Pinning
+- Fyers Level-3 TBT WebSocket supports 15 symbols across 3 physical channels (max 5 symbols per channel).
+- Partitioning must be strictly pinned: Slots 0..4 $\to$ Channel 1, Slots 5..9 $\to$ Channel 2, Slots 10..14 $\to$ Channel 3.
+- Dynamic subscription workers must never chunk by incremental slice index, preserving channel limits permanently.

@@ -1,15 +1,15 @@
 """
 engine/paper_execute.py
 ───────────────────────
-Execute trade plans in paper trading mode.
+Execute trade plans through the simulated order lifecycle.
 
 After `analyze RELIANCE` generates a trade plan, the user can run:
     paper-execute          → execute the neutral risk plan
     paper-execute aggressive  → execute the aggressive plan
     paper-execute conservative → execute the conservative plan
 
-This places paper orders using the PaperBroker (or mock broker),
-simulating real execution without risk.
+This never routes to a configured real broker. Orders are persisted through
+the central OMS and simulated in SIMULATE mode.
 
 Usage:
     from engine.paper_execute import execute_trade_plan
@@ -26,7 +26,7 @@ logger = logging.getLogger("engine.paper_execute")
 from rich.console import Console
 from rich.panel import Panel
 
-from brokers.base import OrderRequest, BrokerAPI
+from brokers.base import BrokerAPI
 
 console = Console()
 
@@ -46,12 +46,18 @@ def execute_trade_plan(plan, broker: BrokerAPI) -> list[dict]:
         console.print("[dim]No trade plan to execute (verdict was HOLD).[/dim]")
         return []
 
+    from engine.modes import get_trading_mode
+
+    _ = broker  # Retained only for compatibility with existing callers.
+    if get_trading_mode().mode.name != "SIMULATE":
+        raise PermissionError("Paper execution is available only in SIMULATE mode.")
+
     results = []
     console.print()
     console.print(
         Panel(
             f"  Executing: [bold]{plan.strategy_name}[/bold] on {plan.symbol}\n"
-            f"  Mode: {'PAPER' if _is_paper(broker) else 'LIVE'}\n"
+            "  Mode: SIMULATE (paper OMS)\n"
             f"  Orders: {len(plan.entry_orders)}",
             title="[bold yellow]Order Execution[/bold yellow]",
             border_style="yellow",
@@ -60,25 +66,29 @@ def execute_trade_plan(plan, broker: BrokerAPI) -> list[dict]:
 
     for i, leg in enumerate(plan.entry_orders, 1):
         try:
-            order_req = OrderRequest(
-                symbol=leg.instrument.split()[0],  # "RELIANCE" from "RELIANCE ATM CE"
-                exchange=leg.exchange,
-                transaction_type=leg.action,
+            order_symbol = leg.instrument.split()[0]
+            reference_price = float(leg.price or 0.0)
+            if reference_price <= 0:
+                from market.quotes import get_ltp
+
+                reference_price = float(get_ltp(f"{leg.exchange}:{order_symbol}") or 0.0)
+            from engine.order_lifecycle import submit_simulated_order_intent
+
+            response = submit_simulated_order_intent(
+                symbol=order_symbol,
+                side=leg.action,
                 quantity=leg.quantity,
+                price=reference_price,
                 order_type=leg.order_type,
                 product=leg.product,
-                price=leg.price,
                 trigger_price=leg.trigger_price,
-                tag=leg.tag or f"plan_{plan.symbol}",
             )
-
-            response = broker.place_order(order_req)
-            status_style = "green" if response.status in ("COMPLETE", "OPEN") else "red"
+            status_style = "green" if response.status in ("FILLED_PAPER", "OPEN") else "red"
 
             console.print(
                 f"  [{i}] {leg.action} {leg.quantity} {leg.instrument} "
                 f"({leg.order_type}) → [{status_style}]{response.status}[/{status_style}] "
-                f"(ID: {response.order_id})"
+                f"(OMS ID: {response.order_id})"
             )
 
             results.append(
@@ -88,7 +98,7 @@ def execute_trade_plan(plan, broker: BrokerAPI) -> list[dict]:
                     "action": leg.action,
                     "quantity": leg.quantity,
                     "status": response.status,
-                    "message": response.message,
+                    "message": response.rejection_reason,
                 }
             )
 
@@ -136,16 +146,9 @@ def execute_trade_plan(plan, broker: BrokerAPI) -> list[dict]:
             )
             console.print("[dim]  Auto-created alerts for SL and Target 1.[/dim]")
         except Exception as e_suppressed:
-            logger.debug(f"[engine.paper_execute] Non-fatal exception suppressed: {e_suppressed}")
+            logger.warning(
+                "[engine.paper_execute] Could not create paper risk alerts: %s", e_suppressed
+            )
 
     console.print()
     return results
-
-
-def _is_paper(broker: BrokerAPI) -> bool:
-    """Check if the broker is a paper/mock broker."""
-    try:
-        profile = broker.get_profile()
-        return profile.broker.upper() in ("PAPER", "MOCK", "DEMO")
-    except Exception:
-        return True

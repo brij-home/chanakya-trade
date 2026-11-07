@@ -28,6 +28,7 @@ Core Capabilities:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -183,6 +184,21 @@ class PrecursorRadarScanner:
         segment: 'INDEX' | 'FNO' | 'NON_FNO' | 'ALL' | None
         """
         seg = (segment or "ALL").upper().replace("CASH", "NON_FNO")
+        from config.discovery_policy import get_discovery_policy
+
+        if get_discovery_policy().fno_only:
+            if seg not in {"ALL", "INDEX", "FNO"}:
+                return []
+            from analysis.universe import resolve_dynamic_universe
+            from engine.option_resolver import is_index_symbol
+
+            symbols, _ = resolve_dynamic_universe("fno_universe", max_stocks=3000)
+            return [
+                s
+                for s in symbols
+                if seg == "ALL"
+                or (is_index_symbol(s) if seg == "INDEX" else not is_index_symbol(s))
+            ]
 
         index_universe = [
             "NIFTY",
@@ -678,10 +694,20 @@ class PrecursorRadarScanner:
                 ) or (get_lot_size(clean_sym) > 1)
                 if is_fno:
                     try:
-                        from market.options import get_options_chain
+                        from market.options import _CHAIN_CACHE, _CHAIN_CACHE_LOCK
 
                         if chain is None:
-                            chain = get_options_chain(clean_sym)
+                            # Strict SLA: Only inspect option chain if already cached in RAM;
+                            # avoid slow synchronous web scraper in batch background scans
+                            with _CHAIN_CACHE_LOCK:
+                                chain = next(
+                                    (
+                                        v[1]
+                                        for k, v in _CHAIN_CACHE.items()
+                                        if k.startswith(f"{clean_sym}_")
+                                    ),
+                                    None,
+                                )
                     except Exception as e_suppressed:
                         logger.debug(
                             f"[precursor_radar] Options chain lookup suppressed for {clean_sym}: {e_suppressed}"
@@ -807,14 +833,23 @@ class PrecursorRadarScanner:
         segment: Optional[str] = None,
         top_n: int = 5,
         force_refresh: bool = False,
+        quotes_map: Optional[dict[str, Any]] = None,
+        timeout_sec: float = 16.0,
     ) -> list[PrecursorCandidate]:
         """
         Scans universe and returns top N high-conviction pre-ignition candidates.
         Can be filtered by segment ('INDEX' | 'FNO' | 'NON_FNO' | 'ALL').
+        Binds evaluation to timeout_sec (default 16s) to ensure strict adherence
+        to terminal scanner SLA (18.0s official SLA) without blocking the desk.
         """
         import time
 
+        from config.discovery_policy import get_discovery_policy, allows_context_symbol
+
+        policy = get_discovery_policy()
         cache_key = (tuple(universe) if universe else None, segment)
+        if policy.fno_only:
+            cache_key = (policy.profile, cache_key)
         now = time.monotonic()
         if not force_refresh:
             with self._cache_lock:
@@ -824,61 +859,78 @@ class PrecursorRadarScanner:
                     return list(self._cache[cache_key][:top_n])
 
         symbols = universe or self.get_scan_universe(segment=segment)
+        if policy.fno_only:
+            symbols = [s for s in symbols if allows_context_symbol(s if ":" in s else f"NSE:{s}")]
+            if not symbols:
+                return []
         candidates: list[PrecursorCandidate] = []
 
         logger.info(
             f"[PrecursorRadar] Scanning {len(symbols)} tickers ({segment or 'ALL'}) for pre-move precursor DNA..."
         )
 
-        # Batch pre-fetch quotes across universe in a single network round-trip
-        quotes_map: dict[str, Any] = {}
-        try:
-            from market.quotes import get_quote
+        # Batch pre-fetch quotes across universe if not supplied
+        active_quotes = quotes_map or {}
+        if not active_quotes:
+            try:
+                from market.quotes import get_quote
 
-            formatted_syms = []
-            for s in symbols:
-                if ":" in s:
-                    formatted_syms.append(s)
-                else:
-                    seg = classify_symbol_segment(s)
-                    if seg == "CRYPTO":
-                        formatted_syms.append(f"CRYPTO:{s}")
-                    elif seg == "COMMODITY":
-                        formatted_syms.append(f"MCX:{s}")
+                formatted_syms = []
+                for s in symbols:
+                    if ":" in s:
+                        formatted_syms.append(s)
                     else:
-                        formatted_syms.append(f"NSE:{s}")
+                        seg = classify_symbol_segment(s)
+                        if seg == "CRYPTO":
+                            formatted_syms.append(f"CRYPTO:{s}")
+                        elif seg == "COMMODITY":
+                            formatted_syms.append(f"MCX:{s}")
+                        else:
+                            formatted_syms.append(f"NSE:{s}")
 
-            q_res = get_quote(formatted_syms)
-            if isinstance(q_res, dict):
-                quotes_map = q_res
-        except Exception as e:
-            logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
+                q_res = get_quote(formatted_syms)
+                if isinstance(q_res, dict):
+                    active_quotes = q_res
+            except Exception as e:
+                logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
 
         def _worker(sym: str) -> Optional[PrecursorCandidate]:
             clean = canonical_alert_symbol(sym)
             q = (
-                quotes_map.get(f"CRYPTO:{clean}")
-                or quotes_map.get(f"NSE:{clean}")
-                or quotes_map.get(f"MCX:{clean}")
-                or quotes_map.get(clean)
-                or quotes_map.get(sym)
+                active_quotes.get(f"CRYPTO:{clean}")
+                or active_quotes.get(f"NSE:{clean}")
+                or active_quotes.get(f"MCX:{clean}")
+                or active_quotes.get(clean)
+                or active_quotes.get(sym)
             )
             return self.evaluate_symbol(sym, quote=q)
 
         import concurrent.futures
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(6, len(symbols) or 1)
-        ) as executor:
+        # Institutional I/O concurrency scaled to CPU count
+        pool_workers = min(16, max(6, (os.cpu_count() or 4) * 2))
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=pool_workers, thread_name_prefix="precursor-scan"
+        )
+        try:
             future_to_sym = {executor.submit(_worker, s): s for s in symbols}
-            for fut in concurrent.futures.as_completed(future_to_sym):
-                s = future_to_sym[fut]
-                try:
-                    candidate = fut.result()
-                    if candidate:
-                        candidates.append(candidate)
-                except Exception as e:
-                    logger.debug(f"[PrecursorRadar] Evaluation error on {s}: {e}")
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=timeout_sec):
+                    s = future_to_sym[fut]
+                    try:
+                        candidate = fut.result()
+                        if candidate:
+                            candidates.append(candidate)
+                    except Exception as e:
+                        logger.debug(f"[PrecursorRadar] Evaluation error on {s}: {e}")
+            except concurrent.futures.TimeoutError:
+                incomplete = [s for fut, s in future_to_sym.items() if not fut.done()]
+                logger.warning(
+                    f"[PrecursorRadar] Bounded SLA limit reached ({timeout_sec:.1f}s)! "
+                    f"Proceeding safely with {len(candidates)} candidates ({len(incomplete)} remaining)."
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Sort descending by conviction score
         candidates.sort(key=lambda c: c.conviction_score, reverse=True)

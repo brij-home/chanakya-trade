@@ -48,24 +48,26 @@ def test_fyers_gtt_endpoints(client):
                 "limit_price": 2505.0,
             },
         )
-        assert res_post.status_code == 200
-        assert res_post.json()["id"] == "GTT-102"
+        assert res_post.status_code == 409
+        mock_broker.place_gtt_order.assert_not_called()
 
         # 3. DELETE GTT
         res_del = client.delete("/api/fyers/gtt/GTT-102")
-        assert res_del.status_code == 200
-        assert res_del.json()["cancelled"] is True
+        assert res_del.status_code == 409
+        mock_broker.cancel_gtt_order.assert_not_called()
 
 
 def test_fyers_exit_all_endpoint(client):
-    mock_broker = MagicMock()
-    mock_broker.exit_all_positions.return_value = {"s": "ok", "message": "Positions squared off"}
-
-    with patch("brokers.session.get_execution_broker", return_value=mock_broker):
+    expected = {"status": "PENDING_RECONCILIATION", "mode": "SIMULATE"}
+    with patch(
+        "engine.order_lifecycle.emergency_flatten_all_positions", return_value=expected
+    ) as emergency:
         res = client.post("/api/fyers/exit-all", json={"segment": "EQUITY"})
         assert res.status_code == 200
-        assert res.json()["s"] == "ok"
-        mock_broker.exit_all_positions.assert_called_once_with(segment="EQUITY")
+        assert res.json() == expected
+        emergency.assert_called_once_with(
+            actor="FYERS_ADVANCED_API", reason="USER_PANIC_EXIT", segment="EQUITY"
+        )
 
 
 def test_fyers_screeners_endpoints(client):
@@ -92,20 +94,12 @@ def test_fyers_screeners_endpoints(client):
 
 
 def test_fyers_patch_order_endpoint(client):
-    from brokers.base import OrderResponse
-
     mock_broker = MagicMock()
-    mock_broker.modify_order.return_value = OrderResponse(
-        order_id="ORD-101", status="OPEN", message="Modified"
-    )
 
     with patch("brokers.session.get_execution_broker", return_value=mock_broker):
         res = client.patch("/api/fyers/orders/ORD-101", json={"price": 2550.0, "qty": 50})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "ok"
-        assert data["order_id"] == "ORD-101"
-        assert data["broker_status"] == "OPEN"
+        assert res.status_code == 404
+        mock_broker.modify_order.assert_not_called()
 
 
 def test_fyers_attach_position_legs_endpoint(client):
@@ -122,16 +116,8 @@ def test_fyers_attach_position_legs_endpoint(client):
                 "leg_type": 1,
             },
         )
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "ok"
-        mock_broker.attach_position_legs.assert_called_once_with(
-            position_id="NSE:SBIN-EQ-INTRADAY",
-            take_profit=15.0,
-            stop_loss=5.0,
-            leg_type=1,
-            qty=None,
-        )
+        assert res.status_code == 409
+        mock_broker.attach_position_legs.assert_not_called()
 
 
 def test_fyers_convert_position_endpoint(client):
@@ -149,15 +135,27 @@ def test_fyers_convert_position_endpoint(client):
                 "convert_to": "MARGIN",
             },
         )
-        assert res.status_code == 200
-        assert res.json()["status"] == "ok"
-        mock_broker.convert_position.assert_called_once_with(
-            symbol="NSE:SBIN-EQ",
-            position_side=1,
-            convert_qty=25,
-            convert_from="INTRADAY",
-            convert_to="MARGIN",
+        assert res.status_code == 409
+        mock_broker.convert_position.assert_not_called()
+
+
+def test_fyers_smart_trail_endpoint_rejects_untracked_order(client):
+    mock_broker = MagicMock()
+
+    with patch("brokers.session.get_execution_broker", return_value=mock_broker):
+        res = client.post(
+            "/api/fyers/smart-trail",
+            json={
+                "symbol": "SBIN",
+                "qty": 10,
+                "side": "SELL",
+                "stop_price": 590.0,
+                "trail_amount": 5.0,
+            },
         )
+
+    assert res.status_code == 409
+    mock_broker.create_smart_trailing_order.assert_not_called()
 
 
 def test_fyers_smart_orders_and_smartexit_endpoints(client):
@@ -168,29 +166,27 @@ def test_fyers_smart_orders_and_smartexit_endpoints(client):
     mock_broker.get_smartexit_triggers.return_value = [{"flowId": "FLOW-1", "name": "ProfitGuard"}]
 
     with patch("brokers.session.get_execution_broker", return_value=mock_broker):
-        # 1. Smart limit
+        # Broker-hosted order mutations are blocked until the OMS can track them.
         r_lim = client.post(
             "/api/fyers/smart-orders/limit",
             json={"symbol": "RELIANCE", "qty": 10, "side": 1, "limit_price": 2500.0},
         )
-        assert r_lim.status_code == 200
-        assert r_lim.json()["status"] == "ok"
+        assert r_lim.status_code == 409
 
-        # 2. Smart step
         r_step = client.post(
             "/api/fyers/smart-orders/step",
             json={"symbol": "RELIANCE", "qty": 50, "side": 1, "avg_qty": 10, "avg_diff": 2.0},
         )
-        assert r_step.status_code == 200
-        assert r_step.json()["status"] == "ok"
+        assert r_step.status_code == 409
 
-        # 3. Create smartexit
         r_se_post = client.post(
             "/api/fyers/smart-exit/triggers",
             json={"name": "ProfitGuard", "type": 2, "profit_rate": 5000},
         )
-        assert r_se_post.status_code == 200
-        assert r_se_post.json()["status"] == "ok"
+        assert r_se_post.status_code == 409
+        mock_broker.create_smart_order_limit.assert_not_called()
+        mock_broker.create_smart_order_step.assert_not_called()
+        mock_broker.create_smartexit_trigger.assert_not_called()
 
         # 4. Get smartexit
         r_se_get = client.get("/api/fyers/smart-exit/triggers")
@@ -258,7 +254,9 @@ def test_fyers_audit_and_accounting_endpoints(client):
         assert r_ledger.json()["data"]["ledger"][0]["balance"] == 50000.0
 
 
-def test_fyers_postback_webhook_endpoint(client):
+def test_fyers_postback_webhook_endpoint(client, monkeypatch):
+    monkeypatch.delenv("FYERS_SECRET_KEY", raising=False)
+    monkeypatch.delenv("FYERS_WEBHOOK_SECRET", raising=False)
     with patch("web.sse.event_bus.publish_sync") as mock_pub:
         # 1. /api/fyers/postback
         r1 = client.post(

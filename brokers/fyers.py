@@ -27,7 +27,8 @@ Fallback login flow (browser OAuth):
   2. User logs in via browser → redirected with ?auth_code=...&state=...
   3. `complete_login(auth_code=...)` exchanges code for access token
 
-Session token is saved to ~/.trading_platform/fyers.json and reused (12h TTL).
+Session token is saved to ~/.trading_platform/fyers.json and reused until the
+documented daily 06:30 IST expiry (with a defensive 24-hour maximum age).
 
 Install: pip install fyers-apiv3 pyotp
 
@@ -39,6 +40,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
+import math
 import threading
 import time
 import datetime as dt
@@ -63,8 +65,27 @@ from brokers.base import (
 )
 
 TOKEN_FILE = Path.home() / ".trading_platform" / "fyers.json"
-TOKEN_EXPIRY = 12 * 3600  # Fyers tokens valid ~12 h
+TOKEN_EXPIRY = 24 * 3600  # FYERS tokens expire daily at 06:30 IST; hard upper bound.
 _GLOBAL_FYERS_AUTH_LOCK = threading.RLock()
+_GLOBAL_AUTH_LAST_ATTEMPT_TS: float = 0.0
+_GLOBAL_AUTH_BACKOFF_UNTIL: float = 0.0
+_GLOBAL_AUTH_FAILURE_COUNT: int = 0
+_GLOBAL_AUTH_LAST_ERROR: str = ""
+_GLOBAL_AUTH_LAST_WARNING_TS: float = 0.0
+
+
+def _get_auth_backoff_remaining() -> float:
+    global _GLOBAL_AUTH_BACKOFF_UNTIL
+    now = time.time()
+    return max(0.0, _GLOBAL_AUTH_BACKOFF_UNTIL - now)
+
+
+def _reset_auth_backoff() -> None:
+    global _GLOBAL_AUTH_BACKOFF_UNTIL, _GLOBAL_AUTH_FAILURE_COUNT, _GLOBAL_AUTH_LAST_ERROR
+    _GLOBAL_AUTH_BACKOFF_UNTIL = 0.0
+    _GLOBAL_AUTH_FAILURE_COUNT = 0
+    _GLOBAL_AUTH_LAST_ERROR = ""
+
 
 # ── Symbol mapping (instrument format → Fyers format) ────────
 
@@ -97,6 +118,23 @@ _FYERS_INDEX_MAP = {
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "PSU_BANK": "NSE:NIFTYPSUBANK-INDEX",
+    "PSUBANK": "NSE:NIFTYPSUBANK-INDEX",
+    "NSE:NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
+    "NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
+    "INFRA": "NSE:NIFTYINFRA-INDEX",
+    "NSE:NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "NSE:NIFTY PSE": "NSE:NIFTYPSE-INDEX",
+    "NIFTY PSE": "NSE:NIFTYPSE-INDEX",
+    "PSE": "NSE:NIFTYPSE-INDEX",
+    "NSE:NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "NSE:NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
+    "NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
 }
 
 _INDEX_PREFIXES = (
@@ -106,6 +144,8 @@ _INDEX_PREFIXES = (
     "FINNIFTY",
     "MIDCPNIFTY",
     "INDIAVIX",
+    "NIFTYNXT50",
+    "NIFTYNEXT50",
 )
 
 
@@ -161,12 +201,11 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
       - Oct-Dec: NSE:NIFTY26O0824000CE → YY=26, M=O (Oct), DD=08 → 2026-10-08
       - Nov:     NSE:NIFTY26N1524000CE → YY=26, M=N (Nov), DD=15 → 2026-11-15
       - Dec:     NSE:NIFTY26D2424000CE → YY=26, M=D (Dec), DD=24 → 2026-12-24
-    Fyers monthly format: NSE:NIFTY26APR22100CE → YY=26, MMM=APR, last Thursday
+    Fyers monthly format: NSE:NIFTY26APR22100CE → YY=26, MMM=APR, effective-dated monthly expiry
     Returns YYYY-MM-DD string or empty string on failure.
     """
     import re
     import datetime as dt
-    from calendar import monthrange
 
     try:
         sym = re.sub(r"^[A-Z]+:", "", symbol)  # strip "NSE:"
@@ -174,10 +213,10 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
 
         # Match: underlying + YY(2 digits) + date_part + strike(digits)
         # Monthly: 3 letters; Weekly: [1-9OND] + 2 digits, or 4 digits
-        m = re.match(r"^[A-Za-z0-9_&]+?(\d{2})([A-Za-z]{3}|[1-9ONDond]\d{2}|\d{4})(\d+)$", sym)
+        m = re.match(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3}|[1-9ONDond]\d{2}|\d{4})(\d+)$", sym)
         if not m:
             return ""
-        yy, date_part, _ = m.groups()
+        underlying, yy, date_part, _ = m.groups()
         year = int("20" + yy)
 
         # Monthly: 3-letter month e.g. APR, OCT
@@ -185,10 +224,9 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
             month = int(_MONTH_MAP.get(date_part.lower(), "0"))
             if not month:
                 return ""
-            days = monthrange(year, month)[1]
-            d = dt.date(year, month, days)
-            while d.weekday() != 3:  # last Thursday
-                d -= dt.timedelta(days=1)
+            from market.calendar import get_monthly_expiry_for_month
+
+            d = get_monthly_expiry_for_month(underlying, year, month)
             return d.strftime("%Y-%m-%d")
 
         # Weekly single-char month code (1-9, O=Oct, N=Nov, D=Dec) + 2-digit day
@@ -237,23 +275,22 @@ def format_fyers_option_symbol(
     """
     Format canonical Fyers option symbol string matching Fyers API v3 specifications.
     Distinguishes automatically between:
-      - Monthly contracts (NSE: last Thursday / BSE: last Friday) -> 3-letter month (e.g. 26OCT)
+      - Listed monthly contracts from the effective-dated calendar -> 3-letter month (e.g. 26OCT)
       - Weekly contracts (NIFTY/SENSEX) -> single-char month + 2-digit day (e.g. 26O08)
     """
     import datetime as dt_mod
-    from calendar import monthrange
 
     if isinstance(expiry_date, str):
         try:
             exp_d = dt_mod.date.fromisoformat(expiry_date)
-        except Exception:
-            exp_d = dt_mod.date.today()
+        except ValueError as exc:
+            raise ValueError(f"Invalid derivative expiry date: {expiry_date!r}") from exc
     elif isinstance(expiry_date, dt_mod.datetime):
         exp_d = expiry_date.date()
     elif isinstance(expiry_date, dt_mod.date):
         exp_d = expiry_date
     else:
-        exp_d = dt_mod.date.today()
+        raise ValueError("A canonical listed derivative expiry date is required")
 
     clean_und = (
         underlying.upper().replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").strip()
@@ -263,28 +300,21 @@ def format_fyers_option_symbol(
     opt = option_type.upper().strip()
     strike_str = format_strike(strike)
 
-    # SEBI mandate: Only NIFTY & SENSEX have weekly contracts; BANKNIFTY, MIDCPNIFTY, FINNIFTY and stocks are strictly monthly
-    is_weekly_allowed = clean_und in ("NIFTY", "SENSEX")
     month_map = _REVERSE_WEEKLY_MONTH_MAP
     m_char = month_map.get(exp_d.month, str(exp_d.month))
     weekly_cand = f"{prefix}:{clean_und}{yy}{m_char}{exp_d.day:02d}{strike_str}{opt}"
     mo_str = exp_d.strftime("%b").upper()
     monthly_cand = f"{prefix}:{clean_und}{yy}{mo_str}{strike_str}{opt}"
 
-    if not is_weekly_allowed:
-        return monthly_cand
+    from engine.alert_expiry import classify_expiry_type
+    from market.calendar import get_monthly_expiry_for_month
 
-    # Check if monthly expiry: last Thursday (NSE) or last Friday (BSE) of the month
-    is_bse = prefix == "BSE"
-    days_in_month = monthrange(exp_d.year, exp_d.month)[1]
-    last_day = dt_mod.date(exp_d.year, exp_d.month, days_in_month)
-    target_weekday = 4 if is_bse else 3
-    while last_day.weekday() != target_weekday:
-        last_day -= dt_mod.timedelta(days=1)
-
-    if exp_d == last_day:
+    monthly_expiry = get_monthly_expiry_for_month(clean_und, exp_d.year, exp_d.month)
+    if exp_d == monthly_expiry:
         return monthly_cand
-    return weekly_cand
+    if classify_expiry_type(exp_d.isoformat(), clean_und) == "WEEKLY":
+        return weekly_cand
+    raise ValueError(f"{exp_d.isoformat()} is not a listed expiry for {clean_und}")
 
 
 # ── Precision Order Utilities (Decimal Tick Rounding & Lot Validation) ─────────
@@ -541,6 +571,8 @@ def to_fyers_symbol(instrument: str) -> str:
                 for pfx in (
                     "NIFTY50",
                     "NIFTYBANK",
+                    "NIFTYPSUBANK",
+                    "NIFTYPSU",
                     "NIFTYIT",
                     "NIFTYAUTO",
                     "NIFTYFMCG",
@@ -554,6 +586,8 @@ def to_fyers_symbol(instrument: str) -> str:
                     "NIFTYFINSERVICE",
                     "NIFTYMIDSELECT",
                     "NIFTYMIDCAP100",
+                    "NIFTYNXT50",
+                    "NIFTYNEXT50",
                 )
             )
             or clean in ("VIX", "INDIAVIX")
@@ -731,8 +765,9 @@ class FyersAPI(BrokerAPI):
     def _is_token_expired(self, ts: float) -> bool:
         """
         Validates token freshness against maximum TTL and market session boundaries.
-        Fyers invalidates tokens daily at 06:00 AM IST (daily session cutoff).
-        Any token generated prior to the most recent 06:00 AM IST cutoff is expired.
+        FYERS documents daily token expiry at 06:30 AM IST. Any token generated
+        before the most recent 06:30 AM IST cutoff is expired. A 24-hour age
+        limit remains as a defensive bound if local clock or provider policy drifts.
         """
         if not ts or ts <= 0:
             return True
@@ -746,9 +781,9 @@ class FyersAPI(BrokerAPI):
             dt_token = datetime.fromtimestamp(ts, tz=IST)
             dt_now = datetime.fromtimestamp(now, tz=IST)
 
-            # Fyers daily server session reset occurs at 06:00 AM IST.
-            # Determine the latest 06:00 AM IST boundary at or prior to dt_now.
-            today_reset = dt_now.replace(hour=6, minute=0, second=0, microsecond=0)
+            # FYERS documents daily access-token expiry at 06:30 AM IST.
+            # Determine the latest 06:30 boundary at or prior to dt_now.
+            today_reset = dt_now.replace(hour=6, minute=30, second=0, microsecond=0)
             latest_reset = today_reset if dt_now >= today_reset else today_reset - timedelta(days=1)
 
             if dt_token < latest_reset:
@@ -777,15 +812,17 @@ class FyersAPI(BrokerAPI):
             logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     def _save_token(self, token: str) -> None:
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        from brokers.base import save_secure_token
+
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "access_token": token,
                     "app_id": self._app_id,
                     "timestamp": time.time(),
                 }
-            )
+            ),
         )
         # Instantly propagate renewed token to background streaming sockets
         try:
@@ -817,7 +854,7 @@ class FyersAPI(BrokerAPI):
 
     # ── Auth ──────────────────────────────────────────────────
 
-    def get_login_url(self) -> str:
+    def get_login_url(self, state: Optional[str] = None) -> str:
         """Returns the Fyers OAuth2 authorization URL using the official SDK."""
         fyersModel = _get_sdk()
         session = fyersModel.SessionModel(
@@ -826,7 +863,7 @@ class FyersAPI(BrokerAPI):
             redirect_uri=self._redirect_uri,
             response_type="code",
             grant_type="authorization_code",
-            state="chanakya_trade",
+            state=state or "chanakya_trade",
         )
         return session.generate_authcode()
 
@@ -1030,6 +1067,9 @@ class FyersAPI(BrokerAPI):
         instance, the headless TOTP auto-login path is used first (no browser).
         Otherwise falls back to the standard OAuth auth_code exchange.
         """
+        global _GLOBAL_AUTH_LAST_ATTEMPT_TS, _GLOBAL_AUTH_BACKOFF_UNTIL
+        global _GLOBAL_AUTH_FAILURE_COUNT, _GLOBAL_AUTH_LAST_ERROR, _GLOBAL_AUTH_LAST_WARNING_TS
+
         with _GLOBAL_FYERS_AUTH_LOCK:
             # ── Path A: Headless auto-login (TOTP + PIN) ──────────────────────
             if self._fy_id and self._totp_secret and self._pin and not auth_code:
@@ -1037,12 +1077,65 @@ class FyersAPI(BrokerAPI):
                 if self._access_token and not self._is_token_expired(self._token_ts):
                     return self.get_profile()
 
-                token = self._auto_login_totp()
-                self._access_token = token
-                self._token_ts = time.time()
-                self._fyers = None
-                self._save_token(token)
-                return self.get_profile()
+                # Check if token on disk was refreshed by another process
+                self._load_token()
+                if self._access_token and not self._is_token_expired(self._token_ts):
+                    _reset_auth_backoff()
+                    return self.get_profile()
+
+                # Check if currently cooling down from previous failure / 429
+                backoff_rem = _get_auth_backoff_remaining()
+                if backoff_rem > 0:
+                    now = time.time()
+                    if now - _GLOBAL_AUTH_LAST_WARNING_TS >= 30.0:
+                        _GLOBAL_AUTH_LAST_WARNING_TS = now
+                        logger.warning(
+                            f"[FyersAPI] Headless auto-login suppressed by active backoff ({backoff_rem:.1f}s remaining). "
+                            f"Last error: {_GLOBAL_AUTH_LAST_ERROR or 'rate limit'}"
+                        )
+                    raise RuntimeError(
+                        f"Fyers auto-login in cooldown ({backoff_rem:.1f}s remaining): {_GLOBAL_AUTH_LAST_ERROR}"
+                    )
+                try:
+                    _GLOBAL_AUTH_LAST_ATTEMPT_TS = time.time()
+                    token = self._auto_login_totp()
+                    self._access_token = token
+                    self._token_ts = time.time()
+                    self._fyers = None
+                    self._save_token(token)
+                    _reset_auth_backoff()
+                    try:
+                        get_fyers_circuit_breaker().record_auth_success()
+                    except Exception as e_cb:
+                        logger.debug(
+                            f"[brokers.fyers] Error recording circuit breaker auth success: {e_cb}"
+                        )
+                    try:
+                        from web.api import _invalidate_auth_cache
+
+                        _invalidate_auth_cache("fyers")
+                    except Exception as e_ac:
+                        logger.debug(f"[brokers.fyers] Error invalidating web auth cache: {e_ac}")
+                    return self.get_profile()
+                except Exception as e:
+                    _GLOBAL_AUTH_FAILURE_COUNT += 1
+                    _GLOBAL_AUTH_LAST_ERROR = str(e)
+                    is_429 = "429" in str(e) or "too many requests" in str(e).lower()
+                    if is_429:
+                        backoff_duration = max(
+                            60.0, 30.0 * (2 ** min(_GLOBAL_AUTH_FAILURE_COUNT, 3))
+                        )
+                        _GLOBAL_AUTH_BACKOFF_UNTIL = time.time() + backoff_duration
+                        try:
+                            get_fyers_circuit_breaker().record_failure("Fyers Auth 429 Rate Limit")
+                        except Exception as e_cb:
+                            logger.debug(f"[brokers.fyers] Error tripping circuit breaker: {e_cb}")
+                    else:
+                        backoff_duration = min(
+                            15.0 * (2 ** min(_GLOBAL_AUTH_FAILURE_COUNT, 3)), 120.0
+                        )
+                        _GLOBAL_AUTH_BACKOFF_UNTIL = time.time() + backoff_duration
+                    raise
 
             # ── Path B: Standard OAuth auth_code exchange ─────────────────────
             fyersModel = _get_sdk()
@@ -1182,6 +1275,10 @@ class FyersAPI(BrokerAPI):
             self._load_token()
             if self._access_token and not self._is_token_expired(self._token_ts):
                 return True
+
+            # If backoff is active from a recent failure / 429, do NOT hammer network
+            if _get_auth_backoff_remaining() > 0:
+                return False
 
             if (
                 self._fy_id
@@ -1689,7 +1786,7 @@ class FyersAPI(BrokerAPI):
 
         # Zero-latency L3 TBT stream bridge: check Fyers TBT Manager 50-Depth first (0 REST calls)
         try:
-            from market.fyers_tbt_manager import FyersTbtManager
+            from market.fyers_tbt_manager import FyersTbtManager, is_fresh_tbt_depth
 
             tbt = FyersTbtManager()
             with tbt._depth_lock:
@@ -1698,7 +1795,11 @@ class FyersAPI(BrokerAPI):
                     or tbt._depth_cache.get(fyers_sym)
                     or tbt._depth_cache.get(symbol.split(":")[-1])
                 )
-            if tbt_obj and (tbt_obj.get("bids") or tbt_obj.get("asks")):
+            if (
+                tbt_obj
+                and is_fresh_tbt_depth(tbt_obj)
+                and (tbt_obj.get("bids") or tbt_obj.get("asks"))
+            ):
                 bids = [
                     {"price": b["price"], "volume": b["qty"], "orders": b["orders"]}
                     for b in tbt_obj.get("bids", [])[:5]
@@ -1709,7 +1810,7 @@ class FyersAPI(BrokerAPI):
                 ]
                 tbq = int(tbt_obj.get("tbq", 0))
                 tsq = int(tbt_obj.get("tsq", 0))
-                ratio = round(tbq / max(tsq, 1), 3) if tsq > 0 else 1.0
+                ratio = round(tbq / tsq, 3) if tsq > 0 else None
                 ltp_val = float(tbt_obj.get("ltp", 0.0))
                 depth_res = {
                     "status": "ok",
@@ -1722,22 +1823,27 @@ class FyersAPI(BrokerAPI):
                     "total_sell_qty": tsq,
                     "bid_ask_ratio": ratio,
                     "order_book_imbalance_ratio": ratio,
-                    "atp": float(tbt_obj.get("rolling_tick_vwap") or ltp_val),
-                    "upper_circuit": 0.0,
-                    "lower_circuit": 0.0,
+                    "atp": None,
+                    "rolling_tick_vwap": tbt_obj.get("rolling_tick_vwap"),
+                    "upper_circuit": None,
+                    "lower_circuit": None,
                     "ltp": ltp_val,
-                    "open": ltp_val,
-                    "high": ltp_val,
-                    "low": ltp_val,
-                    "close": ltp_val,
-                    "volume": tbq + tsq,
-                    "oi": 0,
-                    "pdoi": 0,
-                    "oi_pct_change": 0.0,
+                    "open": None,
+                    "high": None,
+                    "low": None,
+                    "close": None,
+                    "volume": None,
+                    "oi": None,
+                    "pdoi": None,
+                    "oi_pct_change": None,
+                    "ohlcv_status": "UNAVAILABLE",
+                    "oi_status": "UNAVAILABLE",
+                    "session_vwap_status": "UNAVAILABLE",
+                    "received_at": tbt_obj["received_at"],
                     "provider": "FYERS_TBT_50",
                 }
-                with self._depth_cache_lock:
-                    self._depth_cache[symbol] = (now_mono, depth_res)
+                # The TBT manager owns packet freshness; do not recache its book
+                # behind the REST off-market TTL and relabel an old packet LIVE.
                 return depth_res
         except Exception as e_tbt:
             logger.debug(f"[FyersAPI] TBT depth cache check error: {e_tbt}")
@@ -2141,14 +2247,15 @@ class FyersAPI(BrokerAPI):
         """Map order type to Fyers API v3 numeric code.
         1: LIMIT, 2: MARKET, 3: STOP (SL-M), 4: STOP_LIMIT (SL-L).
         """
-        ot = str(order_type or "").upper().strip()
-        if ot in ("MARKET", "MKT"):
-            return 2
-        if ot in ("SL", "STOP", "SL-M", "STOP_MARKET"):
-            return 3
-        if ot in ("SL-L", "STOP_LIMIT", "STOPLIMIT"):
-            return 4
-        return 1  # LIMIT default
+        from brokers.order_types import normalize_order_type
+
+        norm = normalize_order_type(order_type)
+        return {
+            "LIMIT": 1,
+            "MARKET": 2,
+            "SL_MARKET": 3,
+            "SL_LIMIT": 4,
+        }[norm]
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
         if not self.is_authenticated():
@@ -2179,12 +2286,29 @@ class FyersAPI(BrokerAPI):
             round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
         )
         stop_px = round_price_to_tick(float(req.trigger_price)) if req.trigger_price else 0.0
+        tx_type = (req.transaction_type or "").upper()
+        if tx_type == "BUY":
+            side = 1
+        elif tx_type == "SELL":
+            side = -1
+        else:
+            raise ValueError(
+                f"Invalid transaction type: '{req.transaction_type}'. Must be 'BUY' or 'SELL'."
+            )
+
+        prod_key = (req.product or "").upper()
+        if prod_key not in product_map:
+            raise ValueError(
+                f"Invalid product type: '{req.product}'. Supported products: {list(product_map.keys())}"
+            )
+        fyers_product = product_map[prod_key]
+
         payload = {
             "symbol": fyers_sym,
             "qty": int(req.quantity),
             "type": eff_type,
-            "side": 1 if req.transaction_type == "BUY" else -1,
-            "productType": product_map.get(req.product, "CNC"),
+            "side": side,
+            "productType": fyers_product,
             "limitPrice": limit_px,
             "stopPrice": stop_px,
             "validity": req.validity or "DAY",
@@ -2197,7 +2321,12 @@ class FyersAPI(BrokerAPI):
                 status="REJECTED",
                 message="Fyers circuit breaker is OPEN. Live order placement blocked to prevent uncoordinated submission.",
             )
-        _fyers_rate_limiter.acquire()
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return OrderResponse(
+                order_id="",
+                status="REJECTED",
+                message="Fyers rate gate rejected order: emergency order cap reached or rate limit exceeded.",
+            )
         data = fyers.place_order(payload)
         if _is_fyers_auth_error(data):
             failed_ts = self._token_ts
@@ -2616,15 +2745,22 @@ class FyersAPI(BrokerAPI):
         orders = []
         for item in data.get("orderBook", []):
             symbol = item.get("symbol", "")
+            exch = symbol.split(":")[0] if ":" in symbol else "NSE"
             ticker = symbol.split(":")[-1].split("-")[0] if ":" in symbol else symbol
+            raw_t = item.get("type", 1)
+            mapped_type = (
+                "LIMIT"
+                if raw_t == 1
+                else ("MARKET" if raw_t == 2 else ("SL_MARKET" if raw_t == 3 else "SL_LIMIT"))
+            )
             orders.append(
                 Order(
                     order_id=str(item.get("id", "")),
                     symbol=ticker,
-                    exchange="NSE",
+                    exchange=exch,
                     transaction_type="BUY" if item.get("side", 0) == 1 else "SELL",
                     quantity=int(item.get("qty", 0)),
-                    order_type="MARKET" if item.get("type") == 1 else "LIMIT",
+                    order_type=mapped_type,
                     product=item.get("productType", "CNC"),
                     status=str(item.get("status", "")),
                     price=float(item.get("limitPrice", 0)) or None,
@@ -2926,23 +3062,239 @@ class FyersAPI(BrokerAPI):
         interval: str = "day",
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        *,
+        include_oi: bool = True,
+        include_greeks: bool = True,
     ) -> list[dict]:
         """
-        Historical derivative contract retriever with expired contract resilience.
-        Per Fyers API v3 specifications, expired F&O contracts are unlisted from the active cluster
-        and return code -300. This method safely queries the broker and returns empty/logged records
-        without raising unhandled exceptions.
+        Fetch expired derivative candles through FYERS' dedicated Prime endpoint.
+
+        Optional values are parsed by response column name. Null provider Greeks stay
+        null; this method never carries values forward or substitutes zero. Unsupported
+        shapes, unavailable history, and provider failures produce no fabricated rows.
         """
         try:
-            return self.get_historical_data(
-                symbol=symbol,
-                exchange=exchange,
-                interval=interval,
-                from_date=from_date,
-                to_date=to_date,
+            fyers = self._get_fyers()
+            if not fyers or not hasattr(fyers, "fno_historical_data"):
+                logger.warning("[FyersAPI] Expired F&O endpoint unavailable for %s", symbol)
+                return []
+
+            exchange_prefix = {"NFO": "NSE", "BFO": "BSE", "NSE": "NSE", "BSE": "BSE"}.get(
+                exchange.upper(), exchange.upper()
             )
+            qualified_symbol = symbol if ":" in symbol else f"{exchange_prefix}:{symbol}"
+            fyers_symbol = _to_fyers_symbol(qualified_symbol)
+            normalized_interval = str(interval).strip().lower()
+            resolution_map = {
+                "day": "1D",
+                "1d": "1D",
+                "d": "1D",
+                "week": "1W",
+                "1w": "1W",
+                "month": "1M",
+                "1mth": "1M",
+                "minute": "1",
+                "1minute": "1",
+                "1m": "1",
+                "2minute": "2",
+                "2m": "2",
+                "3minute": "3",
+                "3m": "3",
+                "5minute": "5",
+                "5m": "5",
+                "10minute": "10",
+                "10m": "10",
+                "15minute": "15",
+                "15m": "15",
+                "20minute": "20",
+                "20m": "20",
+                "30minute": "30",
+                "30m": "30",
+                "45minute": "45",
+                "45m": "45",
+                "60minute": "60",
+                "60m": "60",
+                "1hour": "60",
+                "5s": "5S",
+                "5seconds": "5S",
+            }
+            resolution = resolution_map.get(normalized_interval)
+            if resolution is None:
+                raise ValueError(f"Unsupported expired F&O resolution: {interval}")
+
+            is_option = fyers_symbol.endswith(("CE", "PE"))
+            request_greeks = bool(include_greeks and is_option)
+            if include_greeks and not is_option:
+                logger.info(
+                    "[FyersAPI] Historical Greeks omitted for non-option contract %s",
+                    fyers_symbol,
+                )
+
+            now = datetime.now()
+            range_to = to_date or now
+            range_from = from_date or (range_to - dt.timedelta(days=365))
+            if range_from > range_to:
+                range_from, range_to = range_to, range_from
+
+            # FYERS caps each expired intraday request at 100 calendar days; seconds
+            # history is available only over a shorter recent window.
+            max_chunk_days = 25 if resolution.endswith("S") else 90
+            chunks: list[tuple[datetime, datetime]] = []
+            cursor = range_from
+            while cursor <= range_to:
+                chunk_end = min(cursor + dt.timedelta(days=max_chunk_days - 1), range_to)
+                chunks.append((cursor, chunk_end))
+                cursor = chunk_end + dt.timedelta(days=1)
+
+            rows_by_epoch: dict[int, dict[str, Any]] = {}
+            for chunk_start, chunk_end in chunks:
+                if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
+                    logger.warning(
+                        "[FyersAPI] Historical rate gate denied expired F&O request for %s",
+                        fyers_symbol,
+                    )
+                    break
+                payload: dict[str, Any] = {
+                    "symbol": fyers_symbol,
+                    "resolution": resolution,
+                    "date_format": 1,
+                    "range_from": chunk_start.strftime("%Y-%m-%d"),
+                    "range_to": chunk_end.strftime("%Y-%m-%d"),
+                    "include_oi": int(include_oi),
+                    "include_greeks": int(request_greeks),
+                }
+                response = fyers.fno_historical_data(payload)
+                if not isinstance(response, dict):
+                    logger.warning(
+                        "[FyersAPI] Invalid expired F&O response for %s (%s)",
+                        fyers_symbol,
+                        type(response).__name__,
+                    )
+                    continue
+                if response.get("s") == "no_data":
+                    continue
+                if response.get("s") != "ok":
+                    error_message = str(
+                        response.get("message", response.get("code", "unknown provider error"))
+                    )
+                    error_code = response.get("code", -1)
+                    logger.warning(
+                        "[FyersAPI] Expired F&O history unavailable for %s: %s",
+                        fyers_symbol,
+                        error_message,
+                    )
+                    if _is_fyers_auth_error(response) or error_code in (-360, 429):
+                        get_fyers_circuit_breaker().record_failure(
+                            status_code=error_code,
+                            error_message=error_message,
+                        )
+                    break
+
+                get_fyers_circuit_breaker().record_success()
+
+                columns = response.get("columns")
+                column_positions = (
+                    {
+                        str(name).strip().lower(): index
+                        for index, name in enumerate(columns)
+                        if isinstance(name, str)
+                    }
+                    if isinstance(columns, list)
+                    else {}
+                )
+                iv_index = column_positions.get("implied_volatility", column_positions.get("iv"))
+                optional_positions = {
+                    "open_interest": column_positions.get("open_interest"),
+                    "implied_volatility": iv_index,
+                    "delta": column_positions.get("delta"),
+                    "gamma": column_positions.get("gamma"),
+                    "theta": column_positions.get("theta"),
+                    "vega": column_positions.get("vega"),
+                }
+                expected_greek_fields = (
+                    "implied_volatility",
+                    "delta",
+                    "gamma",
+                    "theta",
+                    "vega",
+                )
+                greek_columns_present = request_greeks and all(
+                    optional_positions[field] is not None for field in expected_greek_fields
+                )
+                oi_column_present = bool(
+                    include_oi and optional_positions["open_interest"] is not None
+                )
+
+                for candle in response.get("candles", []):
+                    if not isinstance(candle, (list, tuple)) or len(candle) < 6:
+                        continue
+                    try:
+                        epoch = int(candle[0])
+                        candle_date = datetime.fromtimestamp(epoch, tz=dt.timezone.utc)
+                        base = {
+                            "date": candle_date,
+                            "open": float(candle[1]),
+                            "high": float(candle[2]),
+                            "low": float(candle[3]),
+                            "close": float(candle[4]),
+                            "volume": float(candle[5]),
+                            "data_provenance": "FYERS_EXPIRED_FNO_HISTORICAL",
+                            "greeks_at": response.get("greeks_at", "candle_close"),
+                        }
+                        if include_oi:
+                            base["open_interest"] = None
+                        if request_greeks:
+                            for field in expected_greek_fields:
+                                base[field] = None
+                            # FYERS publishes IV in percentage points (e.g. 18.5),
+                            # while Greeks otherwise use their documented raw units.
+                            base["implied_volatility_unit"] = "PERCENT"
+                        for field, index in optional_positions.items():
+                            if index is None or index >= len(candle):
+                                continue
+                            value = candle[index]
+                            if value is None:
+                                base[field] = None
+                                continue
+                            parsed = float(value)
+                            if not math.isfinite(parsed):
+                                base[field] = None
+                            else:
+                                base[field] = parsed
+                        base["open_interest_status"] = (
+                            (
+                                "AVAILABLE"
+                                if oi_column_present and base.get("open_interest") is not None
+                                else "UNAVAILABLE"
+                            )
+                            if include_oi
+                            else "NOT_REQUESTED"
+                        )
+                        if not request_greeks or not greek_columns_present:
+                            base["historical_greeks_status"] = (
+                                "NOT_REQUESTED" if not request_greeks else "UNAVAILABLE"
+                            )
+                        else:
+                            present_greeks = sum(
+                                base.get(field) is not None for field in expected_greek_fields
+                            )
+                            base["historical_greeks_status"] = (
+                                "AVAILABLE"
+                                if present_greeks == len(expected_greek_fields)
+                                else "PARTIAL"
+                                if present_greeks > 0
+                                else "UNAVAILABLE"
+                            )
+                        rows_by_epoch[epoch] = base
+                    except (TypeError, ValueError, OverflowError, OSError) as exc:
+                        logger.warning(
+                            "[FyersAPI] Ignoring malformed expired F&O candle for %s: %s",
+                            fyers_symbol,
+                            exc,
+                        )
+            return [rows_by_epoch[key] for key in sorted(rows_by_epoch)]
         except Exception as e:
-            logger.warning(f"[FyersAPI] get_expired_fno_history failed for {symbol}: {e}")
+            logger.warning("[FyersAPI] get_expired_fno_history failed for %s: %s", symbol, e)
             return []
 
     # ── Advanced Institutional Orders & Screeners ─────────────

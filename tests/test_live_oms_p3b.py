@@ -686,6 +686,8 @@ def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
     In EXECUTE mode without ALLOW_LIVE_TRADING=1,
     execute_order_intent must raise PermissionError — never fabricate an order.
     """
+    import sqlite3
+
     monkeypatch.setenv("TRADING_MODE", "EXECUTE")
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "0")
 
@@ -711,8 +713,16 @@ def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
     with pytest.raises(PermissionError, match="ALLOW_LIVE_TRADING"):
         execute_order_intent(order.order_id)
 
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM orders_ledger WHERE order_id = ?", (order.order_id,)
+        ).fetchone()
+    assert row[0] == "CONFIRMED", "A rejected live gate must not strand the order as SUBMITTING."
+
 
 def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.modes.assert_live_execution_allowed", lambda: None)
+    monkeypatch.setattr("engine.pilot_safety.assert_pilot_execution_allowed", lambda **kwargs: None)
     """
     In EXECUTE mode with ALLOW_LIVE_TRADING=1, execute_order_intent must run
     validate_pretrade. If pretrade validation blocks, the order must be rejected
@@ -792,6 +802,12 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
     monkeypatch.setenv("PILOT_ALLOWED_SEGMENTS", "EQUITY_INTRADAY")
     monkeypatch.setenv("PILOT_ALLOWED_PRODUCTS", "MIS")
     monkeypatch.setenv("PILOT_MAX_ORDER_NOTIONAL", "1000000")
+    monkeypatch.setattr("engine.modes.assert_live_execution_allowed", lambda: None)
+    monkeypatch.setattr("engine.pilot_safety.assert_pilot_execution_allowed", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "market.symbol_master.get_quantity_freeze_info",
+        lambda symbol, *, segment=None: {"quantity": 1000, "source": "TEST_FIXTURE"},
+    )
 
     from engine import kill_switch as ks_module
     from engine.order_lifecycle import confirm_order_intent

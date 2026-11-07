@@ -21,6 +21,7 @@ Guarantees:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -130,6 +131,8 @@ def resolve_option_contract(
     prefer_spread: Optional[bool] = None,
     strike_tier: str = "ATM",  # "ATM" | "HIGH_GAMMA_ASYMMETRY" | "DEEP_ITM"
     roc_velocity: Optional[float] = None,
+    contracts_override: Optional[list[Any]] = None,
+    require_listed_contract: bool = False,
 ) -> Optional[ResolvedOptionPlan]:
     """
     Resolves real option contract and premium levels for an index or F&O stock.
@@ -145,6 +148,7 @@ def resolve_option_contract(
     tier_upper = (strike_tier or "ATM").upper().strip()
 
     # Determine Option Type
+    is_est = False
     is_bull = direction.upper() in ("BULLISH", "BUY", "LONG")
     opt_type = "CE" if is_bull else "PE"
 
@@ -163,19 +167,43 @@ def resolve_option_contract(
     if not is_idx and not prefer_options and lot_sz <= 1:
         return None
 
-    # Step 1: Resolve India VIX Regime
-    vix_val = 14.5
-    if india_vix is not None and float(india_vix) > 0:
-        vix_val = float(india_vix)
-    else:
+    # Step 1: Resolve India VIX Regime via shared verified volatility authority
+    vix_val: Optional[float] = None
+    if india_vix is not None:
+        try:
+            v_float = float(india_vix)
+            if v_float > 0 and math.isfinite(v_float):
+                vix_val = v_float
+        except (TypeError, ValueError):
+            vix_val = None
+
+    if vix_val is None:
+        try:
+            from analysis.regime_governor import _fresh_live_vix
+
+            vix_val = _fresh_live_vix()
+        except Exception:
+            vix_val = None
+
+    if vix_val is None:
         try:
             from market.indices import get_vix
 
             fetched_vix = get_vix()
-            if fetched_vix and float(fetched_vix) > 0:
+            if fetched_vix and float(fetched_vix) > 0 and math.isfinite(float(fetched_vix)):
                 vix_val = float(fetched_vix)
         except Exception:
-            vix_val = 14.5
+            vix_val = None
+
+    if vix_val is None:
+        if require_listed_contract:
+            logger.info(
+                "[OptionResolver] Holding actionable resolution for %s: verified India VIX quote unavailable",
+                clean_sym,
+            )
+            return None
+        vix_val = 14.5
+        is_est = True
 
     # VIX Regime Classification: Mandate Defined-Risk Spreads when VIX >= 16.0 or momentum velocity is slow (< 0.20%)
     is_slow_momentum = roc_velocity is not None and abs(float(roc_velocity)) < 0.20
@@ -203,9 +231,12 @@ def resolve_option_contract(
     step = get_strike_step(clean_sym, spot=spot)
 
     try:
-        from market.options import get_options_chain
+        if contracts_override is not None:
+            raw_chain = contracts_override
+        else:
+            from market.options import get_options_chain
 
-        raw_chain = get_options_chain(clean_sym)
+            raw_chain = get_options_chain(clean_sym)
         contracts = (
             raw_chain.contracts
             if hasattr(raw_chain, "contracts")
@@ -315,7 +346,10 @@ def resolve_option_contract(
                         realized_vol = (calib_adr / spot) * 15.8745 * 100.0
                         iv_rv_ratio = contract_iv / max(1.0, realized_vol)
                     else:
-                        iv_rv_ratio = contract_iv / (13.5 if is_idx else 30.0)
+                        iv_rv_ratio = contract_iv / max(
+                            1.0,
+                            vix_val if (vix_val and vix_val > 0) else (14.5 if is_idx else 30.0),
+                        )
 
                     # When IV is bloated (IV/RV >= 1.40 or raw IV elevated), mandate defined-risk spread
                     if (
@@ -350,10 +384,10 @@ def resolve_option_contract(
     except Exception as e:
         logger.debug(f"[OptionResolver] Options chain query error for {clean_sym}: {e}")
 
-    # Step 3: Deterministic Fallback if Live Chain is Down / Degraded
-    is_est = False
+    # Step 3: Deterministic Fallback if Live Chain is Down / Degraded (Preserve is_est)
     if not chosen_contract or opt_ltp <= 0:
-        import math
+        if require_listed_contract:
+            return None
 
         if tier_upper == "HIGH_GAMMA_ASYMMETRY":
             if is_bull:
@@ -374,6 +408,35 @@ def resolve_option_contract(
         opt_sym = f"{clean_sym} {format_strike(opt_strike)} {opt_type}"
         is_est = True
 
+    if require_listed_contract:
+        if is_est:
+            logger.info(
+                "[OptionResolver] Holding %s: estimated pricing is not allowed for listed contract requirement",
+                opt_sym,
+            )
+            return None
+        try:
+            from market.contract_selection import resolve_active_contract
+
+            active_res = resolve_active_contract(
+                str(opt_sym), expected_underlying=clean_sym, require_fresh=True
+            )
+            if not active_res.is_valid or not active_res.contract:
+                logger.warning(
+                    "[OptionResolver] Holding %s: selected contract has no fresh active master lot: %s",
+                    opt_sym,
+                    active_res.rejection_reason,
+                )
+                return None
+            lot_sz = active_res.contract.lot_size
+        except Exception as exc:
+            logger.warning(
+                "[OptionResolver] Holding %s: exact master contract lookup failed: %s",
+                opt_sym,
+                exc,
+            )
+            return None
+
     # Step 4: Compute Premium-Space Invalidation Stop and Targets with Tiered Feasibility
     if tier_upper == "HIGH_GAMMA_ASYMMETRY":
         # High Gamma Asymmetry: -24% disciplined stop floor, explosive target expansion
@@ -384,6 +447,7 @@ def resolve_option_contract(
         opt_t3 = round(opt_ltp * 2.80, 2)
         t1_ceiling = round(opt_ltp * 1.90, 2)
         t2_ceiling = round(opt_ltp * 2.90, 2)
+        t3_ceiling = round(opt_ltp * 4.00, 2)
         exec_trig = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
         conf_rule = "1_MIN_CANDLE_CLOSE_MANDATORY"
         exec_notes = (
@@ -401,6 +465,7 @@ def resolve_option_contract(
             opt_t3 = round(opt_ltp * 1.55, 2)
             t1_ceiling = round(opt_ltp * 1.22, 2)
             t2_ceiling = round(opt_ltp * 1.38, 2)
+            t3_ceiling = round(opt_ltp * 1.65, 2)
         else:
             # Lower-premium Index contracts (e.g. Nifty ATM ₹80-₹200):
             opt_t0_5 = round(opt_ltp * 1.10, 2)
@@ -409,6 +474,7 @@ def resolve_option_contract(
             opt_t3 = round(opt_ltp * 1.90, 2)
             t1_ceiling = round(opt_ltp * 1.60, 2)
             t2_ceiling = round(opt_ltp * 2.20, 2)
+            t3_ceiling = round(opt_ltp * 3.00, 2)
         exec_trig = f"CMP_OR_PULLBACK_₹{opt_ltp:,.1f}"
         conf_rule = "STANDARD_EXECUTION"
         exec_notes = f"Enter near ₹{opt_ltp:,.1f} on pullback or confirmation."
@@ -421,6 +487,7 @@ def resolve_option_contract(
         opt_t3 = round(opt_ltp * 1.60, 2)
         t1_ceiling = round(opt_ltp * 1.24, 2)
         t2_ceiling = round(opt_ltp * 1.42, 2)
+        t3_ceiling = round(opt_ltp * 1.80, 2)
         exec_trig = f"CMP_OR_PULLBACK_₹{opt_ltp:,.1f}"
         conf_rule = "STANDARD_EXECUTION"
         exec_notes = f"Enter near ₹{opt_ltp:,.1f} on pullback or confirmation."
@@ -445,13 +512,21 @@ def resolve_option_contract(
         if estimated_prem_gain > 0:
             opt_t1 = round(min(t1_ceiling, max(opt_t1, opt_ltp + estimated_prem_gain)), 2)
             opt_t2 = round(min(t2_ceiling, max(opt_t2, opt_ltp + 1.8 * estimated_prem_gain)), 2)
-            opt_t3 = round(max(opt_t3, opt_t2 * 1.18, opt_ltp + 2.6 * estimated_prem_gain), 2)
+            opt_t3 = round(
+                min(t3_ceiling, max(opt_t3, opt_t2 * 1.18, opt_ltp + 2.6 * estimated_prem_gain)), 2
+            )
 
     # Defensive guarantee: Strict ascending target hierarchy
     if opt_t2 <= opt_t1:
         opt_t2 = round(opt_t1 * 1.15, 2)
     if opt_t3 <= opt_t2:
         opt_t3 = round(opt_t2 * 1.18, 2)
+
+    if is_est:
+        exec_notes = (
+            f"[ESTIMATE - RESEARCH ONLY] Modeled option levels (live chain unavailable; assumed VIX={vix_val:.1f}). "
+            f"Not verified for execution. {exec_notes}"
+        )
 
     opt_exp = getattr(chosen_contract, "expiry", None) if chosen_contract else None
 
@@ -472,65 +547,177 @@ def resolve_option_contract(
 
         chosen_hedge = None
         if contracts:
+            prim_exp_str = (
+                str(getattr(chosen_contract, "expiry", "") or "").strip() if chosen_contract else ""
+            )
             hedge_matches = [
                 c
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
                 and float(getattr(c, "strike", 0.0) or 0.0) == hedge_strike
                 and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                and (
+                    not prim_exp_str or str(getattr(c, "expiry", "") or "").strip() == prim_exp_str
+                )
             ]
             if hedge_matches:
                 chosen_hedge = hedge_matches[0]
+
+        if require_listed_contract:
+            # Actionable spread: require exact active listed hedge, matching expiry/lot/venue, non-crossed book, viable debit
+            hedge_valid = False
+            if chosen_hedge and chosen_contract:
+                try:
+                    from market.contract_selection import resolve_active_contract
+
+                    hedge_sym_val = getattr(chosen_hedge, "symbol", "")
+                    active_hedge = resolve_active_contract(
+                        str(hedge_sym_val), expected_underlying=clean_sym, require_fresh=True
+                    )
+                    if active_hedge.is_valid and active_hedge.contract:
+                        hedge_exp = getattr(chosen_hedge, "expiry", None)
+                        prim_exp = getattr(chosen_contract, "expiry", None)
+                        same_exp = bool(hedge_exp and prim_exp and str(hedge_exp) == str(prim_exp))
+                        same_lot = bool(active_hedge.contract.lot_size == lot_sz)
+                        valid_strikes = (
+                            opt_strike < hedge_strike if is_bull else hedge_strike < opt_strike
+                        )
+                        buy_ask = float(getattr(chosen_contract, "ask", 0.0) or 0.0)
+                        buy_bid = float(getattr(chosen_contract, "bid", 0.0) or 0.0)
+                        sell_bid = float(getattr(chosen_hedge, "bid", 0.0) or 0.0)
+                        sell_ask = float(getattr(chosen_hedge, "ask", 0.0) or 0.0)
+
+                        valid_quotes = (
+                            buy_ask > 0
+                            and buy_bid > 0
+                            and buy_bid <= buy_ask
+                            and sell_bid > 0
+                            and sell_ask > 0
+                            and sell_bid <= sell_ask
+                        )
+
+                        if same_exp and same_lot and valid_strikes and valid_quotes:
+                            indicative_debit = round(buy_ask - sell_bid, 2)
+                            strike_width = abs(hedge_strike - opt_strike)
+                            if 0 < indicative_debit < strike_width:
+                                hedge_valid = True
+                                hedge_contract_sym = chosen_hedge.symbol
+                                hedge_prem = sell_bid
+                                net_debit = indicative_debit
+                                max_loss = round(net_debit * lot_sz, 2)
+                                max_profit = round((strike_width - net_debit) * lot_sz, 2)
+                                rr_spread = round(max_profit / max(1.0, max_loss), 2)
+                            else:
+                                logger.info(
+                                    "[OptionResolver] Actionable spread held: debit ₹%.2f unviable for width ₹%.2f",
+                                    indicative_debit,
+                                    strike_width,
+                                )
+                except Exception as e_spr:
+                    logger.debug("[OptionResolver] Spread validation exception: %s", e_spr)
+
+            if hedge_valid:
+                spread_dict = {
+                    "strategy_name": strategy_type,
+                    "sentiment": "BULLISH" if is_bull else "BEARISH",
+                    "net_cashflow": net_debit,
+                    "flow_type": "NET_DEBIT",
+                    "max_loss": max_loss,
+                    "max_profit": max_profit,
+                    "risk_reward_ratio": rr_spread,
+                    "legs": [
+                        {
+                            "option_type": opt_type,
+                            "strike": opt_strike,
+                            "side": "BUY",
+                            "symbol": opt_sym,
+                            "premium": round(buy_ask, 2),
+                            "quantity": lot_sz,
+                        },
+                        {
+                            "option_type": opt_type,
+                            "strike": hedge_strike,
+                            "side": "SELL",
+                            "symbol": hedge_contract_sym,
+                            "premium": round(sell_bid, 2),
+                            "quantity": lot_sz,
+                        },
+                    ],
+                    "breakeven_point": round(
+                        opt_strike + net_debit if is_bull else opt_strike - net_debit, 1
+                    ),
+                    "thesis": (
+                        f"Elevated India VIX ({vix_val:.1f} >= 16.0) favors defined-risk vertical spread to mitigate volatility crush and limit maximum risk to net debit."
+                    ),
+                }
+            else:
+                hedge_contract_sym = None
+                hedge_strike = None
+                hedge_prem = None
+                net_debit = None
+                max_loss = None
+                max_profit = None
+                spread_dict = None
+                if exec_mandate == "HEDGED_SPREAD_MANDATORY":
+                    logger.info(
+                        "[OptionResolver] Holding actionable setup for %s: hedged spread mandatory but no viable listed hedge found",
+                        clean_sym,
+                    )
+                    return None
+                strategy_type = "NAKED_DIRECTIONAL"
+        else:
+            # Research / Estimate Mode
+            if chosen_hedge and float(getattr(chosen_hedge, "last_price", 0.0) or 0.0) > 0:
                 hedge_contract_sym = chosen_hedge.symbol
                 hedge_prem = float(chosen_hedge.last_price)
+            else:
+                hedge_contract_sym = f"{clean_sym} {format_strike(hedge_strike)} {opt_type}"
+                hedge_prem = round(max(2.0, opt_ltp * 0.42), 1)
+                is_est = True
 
-        if not chosen_hedge or not hedge_prem:
-            hedge_contract_sym = f"{clean_sym} {format_strike(hedge_strike)} {opt_type}"
-            hedge_prem = round(max(2.0, opt_ltp * 0.42), 1)
+            strike_width = abs(hedge_strike - opt_strike)
+            net_debit = round(max(1.0, opt_ltp - hedge_prem), 2)
+            if strike_width > 0 and net_debit >= (strike_width * 0.85):
+                net_debit = round(strike_width * 0.55, 2)
+                hedge_prem = round(max(1.0, opt_ltp - net_debit), 2)
+                is_est = True
 
-        net_debit = round(max(1.0, opt_ltp - hedge_prem), 2)
-        strike_width = abs(hedge_strike - opt_strike)
-        if strike_width > 0 and net_debit >= (strike_width * 0.85):
-            net_debit = round(strike_width * 0.45, 2)
-            hedge_prem = round(max(1.0, opt_ltp - net_debit), 2)
+            max_loss = round(net_debit * lot_sz, 2)
+            max_profit = round(max(0.0, (strike_width - net_debit) * lot_sz), 2)
+            rr_spread = round(max_profit / max(1.0, max_loss), 2)
 
-        max_loss = round(net_debit * lot_sz, 2)
-        max_profit = round(max(0.0, (strike_width - net_debit) * lot_sz), 2)
-        rr_spread = round(max_profit / max(1.0, max_loss), 2)
-
-        spread_dict = {
-            "strategy_name": strategy_type,
-            "sentiment": "BULLISH" if is_bull else "BEARISH",
-            "net_cashflow": net_debit,
-            "flow_type": "NET_DEBIT",
-            "max_loss": max_loss,
-            "max_profit": max_profit,
-            "risk_reward_ratio": rr_spread,
-            "legs": [
-                {
-                    "option_type": opt_type,
-                    "strike": opt_strike,
-                    "side": "BUY",
-                    "symbol": opt_sym,
-                    "premium": opt_ltp,
-                    "quantity": lot_sz,
-                },
-                {
-                    "option_type": opt_type,
-                    "strike": hedge_strike,
-                    "side": "SELL",
-                    "symbol": hedge_contract_sym,
-                    "premium": hedge_prem,
-                    "quantity": lot_sz,
-                },
-            ],
-            "breakeven_point": round(
-                opt_strike + net_debit if is_bull else opt_strike - net_debit, 1
-            ),
-            "thesis": (
-                f"High India VIX ({vix_val:.1f} >= 19.0) mandates defined-risk spread to eliminate Vega crush and theta decay."
-            ),
-        }
+            spread_dict = {
+                "strategy_name": strategy_type,
+                "sentiment": "BULLISH" if is_bull else "BEARISH",
+                "net_cashflow": net_debit,
+                "flow_type": "NET_DEBIT",
+                "max_loss": max_loss,
+                "max_profit": max_profit,
+                "risk_reward_ratio": rr_spread,
+                "is_research_estimate": is_est,
+                "legs": [
+                    {
+                        "option_type": opt_type,
+                        "strike": opt_strike,
+                        "side": "BUY",
+                        "symbol": opt_sym,
+                        "premium": opt_ltp,
+                        "quantity": lot_sz,
+                    },
+                    {
+                        "option_type": opt_type,
+                        "strike": hedge_strike,
+                        "side": "SELL",
+                        "symbol": hedge_contract_sym,
+                        "premium": hedge_prem,
+                        "quantity": lot_sz,
+                    },
+                ],
+                "breakeven_point": round(
+                    opt_strike + net_debit if is_bull else opt_strike - net_debit, 1
+                ),
+                "thesis": (f"Research Spread Model (VIX={vix_val:.1f})"),
+            }
 
     return ResolvedOptionPlan(
         contract_symbol=opt_sym,

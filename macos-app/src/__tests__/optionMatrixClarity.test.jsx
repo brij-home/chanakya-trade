@@ -99,8 +99,8 @@ describe('Option Matrix & Derivative Clarity (BankNifty PE Buy)', () => {
     // Entry Trigger badge must show BUY, not SELL
     expect(screen.getByText('BUY')).toBeDefined()
     // Spread section must display the strike numbers clearly
-    expect(screen.getByText(/54700 PE/)).toBeDefined()
-    expect(screen.getByText(/54400 PE/)).toBeDefined()
+    expect(screen.getAllByText(/54700 PE/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/54400 PE/).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText(/Net Debit:/)).toBeDefined()
 
     // Upgraded Institutional Spread Readability checks

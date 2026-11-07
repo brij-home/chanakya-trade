@@ -14,7 +14,20 @@ from typing import Literal, Optional
 
 
 DataState = Literal["LIVE", "DELAYED", "EOD", "DEGRADED", "UNAVAILABLE"]
-DataSource = Literal["STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE"]
+DataSource = Literal["STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE", "SYNTHETIC"]
+
+VERIFIED_LIVE_PROVIDERS = {
+    "fyers",
+    "zerodha",
+    "angelone",
+    "upstox",
+    "shoonya",
+    "mstock",
+    "kotak",
+    "dhan",
+    "groww",
+    "stoxkart",
+}
 
 
 def utc_now_iso() -> str:
@@ -79,6 +92,17 @@ def classify_data_state(*, source: DataSource, provider: str, price: float) -> D
         return "UNAVAILABLE"
     if source == "EOD_SNAPSHOT":
         return "EOD"
-    if provider.lower() in {"yfinance", "yahoo", "cache", "unknown"}:
+    prov = provider.lower()
+    if source in ("FALLBACK", "SYNTHETIC"):
+        if prov in {"yfinance", "yahoo"}:
+            return "DELAYED"
+        return "DEGRADED"
+    if source == "CACHE":
+        return "DEGRADED"
+    if prov in {"yfinance", "yahoo", "cache", "unknown"}:
         return "DELAYED" if source != "CACHE" else "DEGRADED"
-    return "LIVE"
+    if source in ("STREAM", "REST"):
+        if prov in VERIFIED_LIVE_PROVIDERS or any(vp in prov for vp in VERIFIED_LIVE_PROVIDERS):
+            return "LIVE"
+        return "DEGRADED"
+    return "DEGRADED"

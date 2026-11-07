@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import numpy as np
@@ -185,7 +185,7 @@ def resolve_recommended_option_contract(
     Resolves recommended options and futures derivative contracts for an underlying index or F&O stock,
     enforcing institutional safeguards:
       1. Single-stock F&O: Automatically routes to the Next-Month series during settlement week (DTE <= 4)
-         to eliminate SEBI physical delivery margin surges (25%->100%) and near-month theta collapse.
+         to reduce listed-contract physical settlement and expiry risk.
       2. Positional Swings: Selects options with runway (DTE >= 10) to mitigate theta burn on multi-day targets.
       3. Futures Contract Specification: Formats canonical futures ticker with cost-of-carry entry and delta 1.0 levels.
     """
@@ -568,6 +568,14 @@ class AsymmetricOpportunity:
     option_target_2: Optional[float] = None
     option_stop_loss: Optional[float] = None
     lot_size: Optional[int] = None
+    short_pe: Optional[float] = None
+    short_ce: Optional[float] = None
+    long_pe: Optional[float] = None
+    long_ce: Optional[float] = None
+    corridor_low: Optional[float] = None
+    corridor_high: Optional[float] = None
+    net_credit: Optional[float] = None
+    max_risk: Optional[float] = None
 
     # Institutional Derivative Safeguards & Futures Mapping
     futures_contract_symbol: Optional[str] = None
@@ -651,6 +659,10 @@ class AsymmetricOpportunity:
         d["entry_rule"] = self.when_to_buy
         d["no_chase_rule"] = self.when_to_wait
         d["reward_t1_pts"] = self.reward_pts
+        if isinstance(self.metrics, dict):
+            for k, v in self.metrics.items():
+                if k not in d or d[k] is None:
+                    d[k] = v
         return d
 
 
@@ -689,7 +701,7 @@ class AsymmetricOpportunityRadar:
             from market.quotes import get_quote
 
             quote = get_quote(f"NSE:{clean_sym}")
-        if isinstance(quote, dict):
+        if isinstance(quote, dict) and "ltp" not in quote and "last_price" not in quote:
             quote = (
                 quote.get(f"NSE:{clean_sym}")
                 or quote.get(clean_sym)
@@ -1092,7 +1104,7 @@ class AsymmetricOpportunityRadar:
             from market.quotes import get_quote
 
             quote = get_quote(f"NSE:{clean_sym}")
-        if isinstance(quote, dict):
+        if isinstance(quote, dict) and "ltp" not in quote and "last_price" not in quote:
             quote = (
                 quote.get(f"NSE:{clean_sym}")
                 or quote.get(clean_sym)
@@ -1101,7 +1113,7 @@ class AsymmetricOpportunityRadar:
         if not quote:
             return None
 
-        ltp = _extract_price(quote, "last_price", "ltp")
+        ltp = _extract_price(quote, "last_price", "ltp") or 0.0
         if ltp <= 0:
             return None
 
@@ -1909,7 +1921,7 @@ class AsymmetricOpportunityRadar:
             from market.quotes import get_quote
 
             quote = get_quote(f"NSE:{clean_sym}")
-        if isinstance(quote, dict):
+        if isinstance(quote, dict) and "ltp" not in quote and "last_price" not in quote:
             quote = (
                 quote.get(f"NSE:{clean_sym}")
                 or quote.get(clean_sym)
@@ -1918,7 +1930,7 @@ class AsymmetricOpportunityRadar:
         if not quote:
             return None
 
-        ltp = _extract_price(quote, "last_price", "ltp")
+        ltp = _extract_price(quote, "last_price", "ltp") or 0.0
         if ltp <= 0:
             return None
 
@@ -1960,6 +1972,39 @@ class AsymmetricOpportunityRadar:
             f"Net Credit ₹{credit_per_unit:,.1f}/share (₹{credit_per_unit * lot_sz:,.0f}/lot)"
         )
 
+        # Resolve real monthly or weekly expiry date for the instrument
+        from market.rule_schedule import monthly_expiry, expiry_weekday
+        from market.calendar import get_adjusted_expiry_date
+
+        today = datetime.now(IST).date()
+        if clean_sym in ("NIFTY", "SENSEX"):
+            target_wd = expiry_weekday("NSE" if clean_sym == "NIFTY" else "BSE", today)
+            days_ahead = (target_wd - today.weekday()) % 7
+            if days_ahead == 0 and datetime.now(IST).hour >= 15:
+                days_ahead = 7
+            exp_d = today + timedelta(days=days_ahead)
+        else:
+            venue = "BSE" if clean_sym in ("SENSEX", "BANKEX") else "NFO"
+            cur_exp = get_adjusted_expiry_date(
+                monthly_expiry(today.year, today.month, venue), venue
+            )
+            if today <= cur_exp:
+                exp_d = cur_exp
+            else:
+                next_m = 1 if today.month == 12 else today.month + 1
+                next_y = today.year + 1 if today.month == 12 else today.year
+                exp_d = get_adjusted_expiry_date(monthly_expiry(next_y, next_m, venue), venue)
+        expiry_str = exp_d.strftime("%Y-%m-%d")
+
+        tot_net_credit = round(credit_per_unit * lot_sz, 2)
+        tot_max_risk = round(risk_per_unit * lot_sz, 2)
+        rr_disp = (
+            f"1:{max(3.0, risk_per_unit / credit_per_unit):.1f}" if credit_per_unit > 0 else "1:3.0"
+        )
+        rr_ratio = (
+            max(3.0, round(risk_per_unit / credit_per_unit, 2)) if credit_per_unit > 0 else 3.0
+        )
+
         return AsymmetricOpportunity(
             opportunity_id=f"asym-condor-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
             symbol=clean_sym,
@@ -1976,26 +2021,406 @@ class AsymmetricOpportunityRadar:
             target_1=round(credit_per_unit * 0.50, 2),
             target_2=round(credit_per_unit * 0.25, 2),
             target_moonshot=round(max(0.05, credit_per_unit * 0.10), 2),
-            risk_reward="1:3.0",
-            risk_reward_ratio=3.0,
+            risk_reward=rr_disp,
+            risk_reward_ratio=rr_ratio,
             risk_pts=round(risk_per_unit, 2),
             reward_pts=round(credit_per_unit, 2),
             confluence_factors=confluences,
             catalyst_summary=f"Non-directional volatility decay on {clean_sym} with positive market maker pinning.",
             when_to_buy=f"Execute multi-leg Iron Condor: Sell {int(short_pe)}PE/{int(short_ce)}CE, Buy {int(long_pe)}PE/{int(long_ce)}CE for net credit.",
             when_to_wait=f"DO NOT ENTER if spot breaches either short strike (₹{short_pe:,.0f} or ₹{short_ce:,.0f}) prior to entry.",
-            profit_rule="Book 60-70% of maximum credit collected or hold into weekly expiry theta burn.",
+            profit_rule=f"Book 60–70% of maximum credit collected (at ~₹{credit_per_unit * 0.35:.1f}/sh); close all legs if spot challenges short strikes.",
             metrics={
                 "short_pe": short_pe,
                 "short_ce": short_ce,
                 "long_pe": long_pe,
                 "long_ce": long_ce,
+                "corridor_low": short_pe,
+                "corridor_high": short_ce,
                 "credit_per_share": credit_per_unit,
+                "net_credit": tot_net_credit,
                 "max_risk_per_share": risk_per_unit,
+                "max_risk": tot_max_risk,
+                "expiry_date": expiry_str,
                 "lot_size": lot_sz,
             },
             strike=float(atm_strike),
+            expiry_date=expiry_str,
+            short_pe=short_pe,
+            short_ce=short_ce,
+            long_pe=long_pe,
+            long_ce=long_ce,
+            corridor_low=short_pe,
+            corridor_high=short_ce,
+            net_credit=tot_net_credit,
+            max_risk=tot_max_risk,
             lot_size=lot_sz,
+            created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
+    def detect_jackpot_momentum_confluence(
+        self,
+        symbol: str,
+        quote: Optional[Any] = None,
+        df: Optional[pd.DataFrame] = None,
+        sector_rs: Optional[float] = None,
+        sector_name: Optional[str] = None,
+        open_interest_summary: Optional[dict] = None,
+        quotes_map: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> Optional[AsymmetricOpportunity]:
+        """
+        Detects 🚀 JACKPOT MOMENTUM IGNITION: The highest-probability institutional inflection setups
+        where Volatility Compression, Structural Liquidity Headroom, Order Book Thrust, and
+        Sector Relative Strength align simultaneously to produce multi-R explosive expansion.
+        """
+        clean_sym = (
+            symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip()
+        )
+
+        # 1. Fetch / Resolve Quote
+        if quote is None:
+            from market.quotes import get_quote
+
+            quote = get_quote(f"NSE:{clean_sym}")
+        if isinstance(quote, dict) and "ltp" not in quote and "last_price" not in quote:
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
+        if not quote:
+            return None
+
+        ltp = float(_extract_price(quote, "last_price", "ltp") or 0.0)
+        if ltp <= 0:
+            return None
+
+        vwap = float(_extract_price(quote, "vwap") or ltp)
+        chg_pct = float(
+            getattr(quote, "change_pct", 0.0)
+            or (quote.get("change_pct", 0.0) if isinstance(quote, dict) else 0.0)
+            or 0.0
+        )
+        day_high = float(_extract_price(quote, "high", "day_high") or (ltp * 1.01))
+        day_low = float(_extract_price(quote, "low", "day_low") or (ltp * 0.99))
+
+        # 2. OHLCV Bars
+        if df is None or len(df) < 15:
+            from market.history import get_ohlcv
+
+            try:
+                df = get_ohlcv(clean_sym, interval="5minute", days=2)
+            except Exception:
+                df = None
+            if df is None or len(df) < 15:
+                try:
+                    df = get_ohlcv(clean_sym, interval="day", days=60)
+                except Exception:
+                    df = None
+
+        if df is None or len(df) < 15:
+            return None
+
+        closes = df["close"].values if "close" in df.columns else df["Close"].values
+        highs = df["high"].values if "high" in df.columns else df["High"].values
+        lows = df["low"].values if "low" in df.columns else df["Low"].values
+        volumes = df["volume"].values if "volume" in df.columns else np.ones(len(df))
+
+        atr = _compute_atr(df, ltp, period=14)
+
+        # ── Pillar 1: Volatility Compression & Energy Coiling (0 - 25 pts) ──
+        close_s = pd.Series(closes)
+        sma20 = close_s.rolling(min(20, len(closes))).mean()
+        std20 = close_s.rolling(min(20, len(closes))).std()
+        bb_upper = sma20 + (2.0 * std20)
+        bb_lower = sma20 - (2.0 * std20)
+        bb_width = (
+            float((bb_upper - bb_lower).iloc[-1])
+            if len(bb_upper) > 0 and not pd.isna((bb_upper - bb_lower).iloc[-1])
+            else 999.0
+        )
+        kc_width = 3.0 * atr
+
+        is_ttm_squeeze = bool(bb_width <= kc_width)
+        recent_ranges = [highs[-i] - lows[-i] for i in range(1, min(4, len(highs)))]
+        avg_recent_rng = float(np.mean(recent_ranges)) if recent_ranges else atr
+        rng_compression_ratio = avg_recent_rng / atr if atr > 0 else 1.0
+
+        if is_ttm_squeeze:
+            coiling_score = 25
+            coiling_label = "TTM Volatility Squeeze (BB inside KC)"
+        elif rng_compression_ratio <= 0.65:
+            coiling_score = 22
+            coiling_label = f"Tight Range Coiling ({rng_compression_ratio:.1%} ATR)"
+        elif rng_compression_ratio <= 0.85:
+            coiling_score = 15
+            coiling_label = "Base Range Contraction"
+        else:
+            coiling_score = 6
+            coiling_label = "Loose Volatility"
+
+        # ── Pillar 2: Direction & Structural Breakout Headroom (0 - 25 pts) ──
+        is_bullish = ltp >= (vwap * 0.998) and (chg_pct >= -0.20 or ltp >= (day_high * 0.985))
+        is_bearish = ltp <= (vwap * 1.002) and (chg_pct <= 0.20 or ltp <= (day_low * 1.015))
+
+        if is_bullish and not is_bearish:
+            direction = "BULLISH"
+            if ltp >= (day_high * 0.995):
+                struct_score = 25
+                struct_label = "Day High Breakout Ceiling Pierced"
+            elif ltp >= (vwap * 1.005):
+                struct_score = 18
+                struct_label = "Holding Above VWAP with Breakout Headroom"
+            else:
+                struct_score = 10
+                struct_label = "Trading Near VWAP Baseline"
+        elif is_bearish and not is_bullish:
+            direction = "BEARISH"
+            if ltp <= (day_low * 1.005):
+                struct_score = 25
+                struct_label = "Day Low Breakdown Floor Pierced"
+            elif ltp <= (vwap * 0.995):
+                struct_score = 18
+                struct_label = "Trading Below VWAP with Breakdown Headroom"
+            else:
+                struct_score = 10
+                struct_label = "Trading Near VWAP Baseline"
+        elif is_bullish and is_bearish:
+            if chg_pct >= 0:
+                direction = "BULLISH"
+                struct_score = 18
+                struct_label = "VWAP Bullish Alignment"
+            else:
+                direction = "BEARISH"
+                struct_score = 18
+                struct_label = "VWAP Bearish Alignment"
+        else:
+            return None
+
+        # ── Pillar 3: Order Book Imbalance & Volume Thrust (0 - 25 pts) ──
+        vol_sma20 = (
+            float(np.mean(volumes[-min(20, len(volumes)) : -1]))
+            if len(volumes) > 1
+            else max(1.0, volumes[-1])
+        )
+        curr_v = float(volumes[-1])
+        rvol = curr_v / max(1.0, vol_sma20) if vol_sma20 > 0 else 1.0
+
+        if rvol >= 2.0:
+            rvol_score = 15
+            vol_label = f"Explosive RVOL ({rvol:.1f}x >= 2.0x)"
+        elif rvol >= 1.5:
+            rvol_score = 12
+            vol_label = f"Elevated RVOL ({rvol:.1f}x)"
+        elif rvol >= 1.1:
+            rvol_score = 8
+            vol_label = f"Normal Volume ({rvol:.1f}x)"
+        else:
+            rvol_score = 4
+            vol_label = f"Subdued Volume ({rvol:.1f}x)"
+
+        obi_score = 6
+        obi_label = "Neutral Order Book"
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+            fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+            depth_50 = (
+                fyers_tbt_manager.get_50_depth(fut_sym)
+                if getattr(fyers_tbt_manager, "is_connected", False)
+                else None
+            )
+            if depth_50 and depth_50.get("status") not in ("UNAVAILABLE", None):
+                obi_50 = float(depth_50.get("obi_50", 0.0) or 0.0)
+                if direction == "BULLISH" and (
+                    obi_50 >= 0.20 or depth_50.get("fortress_bid_wall_confirmed")
+                ):
+                    obi_score = 10
+                    obi_label = f"Fortress Bid Wall (OBI-50: {obi_50:+.2f})"
+                elif direction == "BEARISH" and (
+                    obi_50 <= -0.20 or depth_50.get("fortress_ask_wall_confirmed")
+                ):
+                    obi_score = 10
+                    obi_label = f"Fortress Ask Wall (OBI-50: {obi_50:+.2f})"
+        except Exception as e_depth:
+            logger.debug(f"[AsymmetricRadar] Error computing depth_50 for {clean_sym}: {e_depth}")
+
+        thrust_score = min(25, rvol_score + obi_score)
+
+        # ── Pillar 4: Sector Relative Strength Alignment (0 - 25 pts) ──
+        sec_score = 15
+        sec_label = "Market Aligned"
+        if sector_rs is not None:
+            if direction == "BULLISH" and sector_rs >= 1.0:
+                sec_score = 25
+                sec_label = f"Sector Outperformer ({sector_name or 'Sector'} RS {sector_rs:.2f}x)"
+            elif direction == "BEARISH" and sector_rs <= -1.0:
+                sec_score = 25
+                sec_label = f"Sector Underperformer ({sector_name or 'Sector'} RS {sector_rs:.2f}x)"
+            else:
+                sec_score = 18
+                sec_label = f"Sector Aligned ({sector_name or 'Sector'} RS {sector_rs:.2f}x)"
+        else:
+            try:
+                from analysis.sector_rotation import STOCK_SECTOR_MAP
+                from market.quotes import get_quote
+
+                sec_name = sector_name or STOCK_SECTOR_MAP.get(clean_sym)
+                if sec_name:
+                    sec_q = None
+                    if quotes_map:
+                        sec_q = quotes_map.get(f"NSE:{sec_name}") or quotes_map.get(sec_name)
+                    if not sec_q:
+                        sec_q = get_quote(f"NSE:{sec_name}", ws_only=True) or get_quote(
+                            sec_name, ws_only=True
+                        )
+                    if not sec_q:
+                        sec_q = get_quote(f"NSE:{sec_name}") or get_quote(sec_name)
+                    if isinstance(sec_q, dict) and "change_pct" not in sec_q and "ltp" not in sec_q:
+                        sec_q = (
+                            sec_q.get(f"NSE:{sec_name}")
+                            or sec_q.get(sec_name)
+                            or next(iter(sec_q.values()), None)
+                        )
+                    sec_chg = (
+                        getattr(sec_q, "change_pct", None)
+                        if not isinstance(sec_q, dict)
+                        else sec_q.get("change_pct")
+                    )
+                    if sec_chg is not None:
+                        sec_chg = float(sec_chg)
+                        if direction == "BULLISH" and sec_chg >= 0.25:
+                            sec_score = 25
+                            sec_label = f"Sector Tailwinds ({sec_name} +{sec_chg:.2f}%)"
+                        elif direction == "BEARISH" and sec_chg <= -0.25:
+                            sec_score = 25
+                            sec_label = f"Sector Breakdown ({sec_name} {sec_chg:.2f}%)"
+            except Exception as e_sec:
+                logger.debug(
+                    f"[AsymmetricRadar] Error computing sector RS for {clean_sym}: {e_sec}"
+                )
+
+        # ── Total Confluence Score ──
+        jackpot_score = coiling_score + struct_score + thrust_score + sec_score
+
+        # Institutional quality floor: require >= 78 for opportunistic, >= 85 for apex
+        if jackpot_score < max(78, self.min_conviction):
+            return None
+
+        # ── Trade Levels & Asymmetric R:R ──
+        if direction == "BULLISH":
+            recent_low = min(lows[-3:]) if len(lows) >= 3 else (ltp - atr)
+            raw_sl = min(recent_low - (0.30 * atr), ltp * 0.988)
+            raw_t1 = ltp + (2.0 * abs(ltp - raw_sl))
+            raw_t2 = ltp + (4.0 * abs(ltp - raw_sl))
+            raw_moon = ltp + (6.5 * abs(ltp - raw_sl))
+        else:
+            recent_high = max(highs[-3:]) if len(highs) >= 3 else (ltp + atr)
+            raw_sl = max(recent_high + (0.30 * atr), ltp * 1.012)
+            raw_t1 = ltp - (2.0 * abs(raw_sl - ltp))
+            raw_t2 = ltp - (4.0 * abs(raw_sl - ltp))
+            raw_moon = ltp - (6.5 * abs(raw_sl - ltp))
+
+        sl_price, risk_pts, t1_price, t2_price, moon_price, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction=direction,
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moon,
+                atr=atr,
+            )
+        )
+
+        # ── Derivative Option Mapping ──
+        resolved_opt = resolve_recommended_option_contract(
+            symbol=clean_sym,
+            direction=direction,
+            spot=ltp,
+            stop_loss=sl_price,
+            target_1=t1_price,
+            target_2=t2_price,
+            setup_type="JACKPOT_MOMENTUM_CONFLUENCE",
+        )
+
+        confluences = [
+            coiling_label,
+            struct_label,
+            vol_label,
+            obi_label,
+            sec_label,
+        ]
+
+        when_buy = (
+            f"Enter on 1m/5m close breaking Day High ₹{day_high:,.1f} or inside coiled base {entry_range_str}."
+            if direction == "BULLISH"
+            else f"Enter on 1m/5m close breaking Day Low ₹{day_low:,.1f} or inside coiled base {entry_range_str}."
+        )
+        when_wait = (
+            f"DO NOT CHASE if price exceeds ₹{round(ltp * 1.015, 1):,.1f} (+1.5% max limit buffer)."
+            if direction == "BULLISH"
+            else f"DO NOT CHASE if price drops below ₹{round(ltp * 0.985, 1):,.1f} (-1.5% max limit buffer)."
+        )
+
+        return AsymmetricOpportunity(
+            symbol=clean_sym,
+            setup_type="JACKPOT_MOMENTUM_CONFLUENCE",
+            setup_label="🚀 Jackpot Momentum Ignition",
+            exchange="NSE",
+            direction=direction,
+            conviction_score=jackpot_score,
+            ltp=ltp,
+            entry_price=ltp,
+            entry_range=entry_range_str,
+            stop_loss=sl_price,
+            target_1=t1_price,
+            target_2=t2_price,
+            target_moonshot=moon_price,
+            risk_reward=f"1:{rr_ratio:.1f}",
+            risk_reward_ratio=rr_ratio,
+            risk_pts=risk_pts,
+            reward_pts=round(t1_price - ltp if direction == "BULLISH" else ltp - t1_price, 2),
+            confluence_factors=confluences,
+            catalyst_summary=(
+                f"Multi-pillar confluence ({jackpot_score}/100): {coiling_label} · "
+                f"{struct_label} · {vol_label} · {sec_label}."
+            ),
+            when_to_buy=when_buy,
+            when_to_wait=when_wait,
+            profit_rule="Scale 50% at Target 1 (+2.0R), move SL to Breakeven. Trail 25% to Target 2 (+4.0R), let Runner moonshot.",
+            metrics={
+                "jackpot_score": jackpot_score,
+                "coiling_score": coiling_score,
+                "structure_score": struct_score,
+                "thrust_score": thrust_score,
+                "sector_score": sec_score,
+                "rvol": round(rvol, 2),
+                "is_ttm_squeeze": is_ttm_squeeze,
+                "atr_14": atr,
+                "rr_ratio": rr_ratio,
+                "asymmetric_rr": f"1:{rr_ratio:.1f}",
+                "day_high": day_high,
+                "day_low": day_low,
+                "vwap": vwap,
+            },
+            strike=resolved_opt.get("strike"),
+            option_type=resolved_opt.get("option_type"),
+            contract_symbol=resolved_opt.get("contract_symbol"),
+            expiry_date=resolved_opt.get("expiry_date"),
+            option_premium=resolved_opt.get("option_premium"),
+            option_target_1=resolved_opt.get("option_target_1"),
+            option_target_2=resolved_opt.get("option_target_2"),
+            option_stop_loss=resolved_opt.get("option_stop_loss"),
+            lot_size=resolved_opt.get("lot_size"),
+            futures_contract_symbol=resolved_opt.get("futures_contract_symbol"),
+            futures_entry=resolved_opt.get("futures_entry"),
+            futures_target_1=resolved_opt.get("futures_target_1"),
+            futures_target_2=resolved_opt.get("futures_target_2"),
+            futures_stop_loss=resolved_opt.get("futures_stop_loss"),
+            is_next_month_routed=resolved_opt.get("is_next_month_routed", False),
+            derivative_safeguard=resolved_opt.get("derivative_safeguard"),
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -2006,6 +2431,8 @@ class AsymmetricOpportunityRadar:
         segment: Optional[str] = None,
         top_n: int = 6,
         force_refresh: bool = False,
+        quotes_map: Optional[dict[str, Any]] = None,
+        universe: Optional[list[str]] = None,
     ) -> list[AsymmetricOpportunity]:
         """
         Sweeps the watched universe across F&O, Cash Equities, Indices, and MCX Commodities
@@ -2013,7 +2440,10 @@ class AsymmetricOpportunityRadar:
         """
         import time
 
-        cache_key = segment
+        from config.discovery_policy import get_discovery_policy
+
+        policy = get_discovery_policy()
+        cache_key = (policy.profile, segment) if policy.fno_only else segment
         now = time.monotonic()
         if not force_refresh:
             with self._cache_lock:
@@ -2022,33 +2452,45 @@ class AsymmetricOpportunityRadar:
                 ):
                     return list(self._cache[cache_key][:top_n])
 
-        universe = get_scan_universe(segment=segment)
+        if universe is None:
+            universe = get_scan_universe(segment=segment)
+        else:
+            universe = list(universe)
+        if not universe:
+            return []
         opportunities: list[AsymmetricOpportunity] = []
 
         logger.info(
             f"[AsymmetricRadar] Sweeping {len(universe)} symbols ({segment or 'ALL'}) for low-risk high-reward setups..."
         )
 
-        # Batch pre-fetch quotes across universe in a single network round-trip
-        quotes_map: dict[str, Any] = {}
-        try:
-            from market.quotes import get_quote
+        # Batch pre-fetch quotes across universe if not passed by caller
+        if quotes_map is None:
+            quotes_map = {}
+            try:
+                from market.quotes import get_quote
 
-            formatted_syms = [
-                (
-                    f"CRYPTO:{s}"
-                    if classify_symbol_segment(s) == "CRYPTO"
-                    else (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
-                )
-                if ":" not in s
-                else s
-                for s in universe
-            ]
-            q_res = get_quote(formatted_syms)
-            if isinstance(q_res, dict):
-                quotes_map = q_res
-        except Exception as e:
-            logger.debug(f"[AsymmetricRadar] Batch quote fetch error: {e}")
+                from analysis.sector_rotation import STOCK_SECTOR_MAP
+
+                unique_sectors = [f"NSE:{s}" for s in set(STOCK_SECTOR_MAP.values()) if s]
+                formatted_syms = [
+                    (
+                        f"CRYPTO:{s}"
+                        if classify_symbol_segment(s) == "CRYPTO"
+                        else (
+                            f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}"
+                        )
+                    )
+                    if ":" not in s
+                    else s
+                    for s in universe
+                ]
+                all_to_fetch = list(dict.fromkeys(formatted_syms + unique_sectors))
+                q_res = get_quote(all_to_fetch)
+                if isinstance(q_res, dict):
+                    quotes_map = q_res
+            except Exception as e:
+                logger.debug(f"[AsymmetricRadar] Batch quote fetch error: {e}")
 
         def _evaluate_sym(sym: str) -> list[AsymmetricOpportunity]:
             sym_opps: list[AsymmetricOpportunity] = []
@@ -2065,6 +2507,13 @@ class AsymmetricOpportunityRadar:
                 or quotes_map.get(clean_sym)
                 or quotes_map.get(sym)
             )
+
+            # Stage 0: Instant RAM pre-filter — eliminate inactive / missing quotes before touching OHLCV
+            spot_px = (
+                float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0) if q else 0.0
+            )
+            if spot_px <= 0.0:
+                return []
 
             # Pre-fetch OHLCV once for this symbol
             df = None
@@ -2142,22 +2591,43 @@ class AsymmetricOpportunityRadar:
                 except Exception as e:
                     logger.debug(f"[AsymmetricRadar] Iron condor error on {sym}: {e}")
 
+            # 8. 🚀 Jackpot Momentum Confluence (Multi-Pillar Volatility Compression & Flow Thrust)
+            try:
+                jackpot = self.detect_jackpot_momentum_confluence(
+                    sym, quote=q, df=df, quotes_map=quotes_map
+                )
+                if jackpot:
+                    sym_opps.append(jackpot)
+            except Exception as e:
+                logger.debug(f"[AsymmetricRadar] Jackpot confluence error on {sym}: {e}")
+
             return sym_opps
 
         import concurrent.futures
+        import os
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(6, len(universe) or 1)
-        ) as executor:
+        max_workers = min(16, max(6, (os.cpu_count() or 4) * 2), len(universe) or 1)
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="AsymmetricWorker"
+        )
+        try:
             future_to_sym = {executor.submit(_evaluate_sym, s): s for s in universe}
-            for fut in concurrent.futures.as_completed(future_to_sym):
-                s = future_to_sym[fut]
-                try:
-                    res = fut.result()
-                    if res:
-                        opportunities.extend(res)
-                except Exception as e:
-                    logger.debug(f"[AsymmetricRadar] Evaluation error on {s}: {e}")
+            timeout_sec = 16.0
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=timeout_sec):
+                    s = future_to_sym[fut]
+                    try:
+                        res = fut.result()
+                        if res:
+                            opportunities.extend(res)
+                    except Exception as e:
+                        logger.debug(f"[AsymmetricRadar] Evaluation error on {s}: {e}")
+            except TimeoutError:
+                logger.warning(
+                    f"[AsymmetricRadar] Execution deadline ({timeout_sec}s) reached; proceeding safely with {len(opportunities)} opportunities"
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Sort descending by conviction score, then by R:R ratio
         opportunities.sort(key=lambda o: (o.conviction_score, o.risk_reward_ratio), reverse=True)
@@ -2186,9 +2656,17 @@ def scan_asymmetric_opportunities(
     min_rr: float = 3.0,
     as_dicts: bool = False,
     force_refresh: bool = False,
+    quotes_map: Optional[dict[str, Any]] = None,
+    universe: Optional[list[str]] = None,
 ) -> list[Any]:
     """Module-level convenience accessor."""
-    opps = asymmetric_radar.scan_asymmetric_opportunities(segment=segment, top_n=top_n)
+    opps = asymmetric_radar.scan_asymmetric_opportunities(
+        segment=segment,
+        top_n=top_n,
+        force_refresh=force_refresh,
+        quotes_map=quotes_map,
+        universe=universe,
+    )
     if min_rr > 0:
         opps = [o for o in opps if o.risk_reward_ratio >= min_rr]
     if as_dicts:

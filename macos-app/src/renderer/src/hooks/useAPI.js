@@ -2,6 +2,19 @@ import { useCallback, useMemo } from 'react'
 import { useChatStore } from '../store/chatStore'
 
 let cachedCsrfToken = null
+let lastAuthRedirect = 0
+
+function handleUnauthorizedRedirect() {
+  if (typeof window === 'undefined') return
+  const currentPath = window.location.pathname
+  // Never reload if already on root — that triggers an infinite reload loop!
+  if (currentPath === '/' || currentPath === '') return
+  const now = Date.now()
+  if (now - lastAuthRedirect > 15000) {
+    lastAuthRedirect = now
+    window.location.href = '/'
+  }
+}
 
 export async function fetchCsrfToken(baseUrl) {
   try {

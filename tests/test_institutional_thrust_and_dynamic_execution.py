@@ -275,11 +275,8 @@ def test_edgeless_chop_gate_filters_routine_setups_but_permits_thrust():
             assert emitted.actionable_plan["execution_strategy"]["stop_loss_level"] == 25012.0
 
 
-def test_friday_afternoon_intraday_scalp_passes_tier1_scrutiny():
-    """
-    Verifies that on Friday afternoon (post 13:00 IST), off-cycle MIDCPNIFTY option alerts
-    tagged as INTRADAY_SCALP_ONLY with mandatory 15:15 exit pass Tier-1 sanity scrutiny.
-    """
+def test_non_expiry_weekday_does_not_create_false_expiry_theta_veto():
+    """Friday alone is not expiry evidence and must not activate a theta-expiry veto."""
     alert = AutoAlert(
         alert_id="test-midcp-friday-scalp",
         alert_type="GAMMA_BLAST",
@@ -318,12 +315,9 @@ def test_friday_afternoon_intraday_scalp_passes_tier1_scrutiny():
         },
     )
 
-    with patch.dict(os.environ, {"ENFORCE_TEST_FRIDAY_GATE": "1"}):
-        ok, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
-        assert ok is True, (
-            f"Expected Friday afternoon intraday scalp to pass Tier-1 sanity, but failed: {reason}"
-        )
-        assert flags.get("is_intraday_scalp_only") is True
+    ok, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+    assert ok is True, f"A weekday-only expiry veto must not suppress the signal: {reason}"
+    assert "expiry_cycle_valid" not in flags or flags["expiry_cycle_valid"] is not False
 
 
 def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversal():

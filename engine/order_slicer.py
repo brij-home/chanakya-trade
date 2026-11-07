@@ -112,16 +112,28 @@ def build_twap_schedule(
         lot_size: Contract lot size (quantizes slices to valid exchange lots).
         seed: Optional RNG seed for deterministic backtest replay.
     """
-    if total_quantity <= 0 or num_slices <= 0 or duration_minutes <= 0:
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+        or num_slices <= 0
+        or duration_minutes <= 0
+    ):
         raise ValueError("total_quantity, num_slices, and duration_minutes must be positive.")
+    if isinstance(lot_size, bool) or not isinstance(lot_size, int) or lot_size <= 0:
+        raise ValueError("lot_size must be a positive integer.")
+    if total_quantity % lot_size:
+        raise ValueError("total_quantity must be an exact multiple of lot_size.")
 
     rng = random.Random(seed)
     schedule_id = f"twap-{symbol}-{rng.randint(100000, 999999)}"
 
     # Ensure quantity is quantized by lot size
-    lot = max(1, lot_size)
-    total_lots = max(1, total_quantity // lot)
-    actual_total_qty = total_lots * lot
+    lot = lot_size
+    total_lots = total_quantity // lot
+    # A schedule cannot create more child orders than the parent's lot count.
+    num_slices = min(num_slices, total_lots)
+    actual_total_qty = total_quantity
 
     # Calculate base quantities per slice in lots
     base_lots_per_slice = max(1, total_lots // num_slices)
@@ -198,10 +210,20 @@ def build_pov_schedule(
     """
     if estimated_candle_volume <= 0:
         raise ValueError("estimated_candle_volume must be greater than zero.")
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+    ):
+        raise ValueError("total_quantity must be a positive integer.")
+    if isinstance(lot_size, bool) or not isinstance(lot_size, int) or lot_size <= 0:
+        raise ValueError("lot_size must be a positive integer.")
+    if total_quantity % lot_size:
+        raise ValueError("total_quantity must be an exact multiple of lot_size.")
     if participation_rate <= 0.0 or participation_rate > 0.50:
         raise ValueError("participation_rate must be between 0.01 (1%) and 0.50 (50%).")
 
-    lot = max(1, lot_size)
+    lot = lot_size
     max_slice_qty = max(lot, int(round((estimated_candle_volume * participation_rate) / lot)) * lot)
     num_slices = max(1, math.ceil(total_quantity / max_slice_qty))
     duration_minutes = num_slices * candle_interval_minutes

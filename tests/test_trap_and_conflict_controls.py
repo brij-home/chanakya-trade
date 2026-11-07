@@ -241,6 +241,7 @@ def test_index_macro_confluence_vetoes_secondary_index_put_when_nifty_is_green()
         metrics={
             "nifty_change_pct": 0.08,
             "vwap": 12520.0,
+            "rvol": 3.0,
         },
     )
 
@@ -308,13 +309,18 @@ def test_banknifty_locomotive_tug_of_war_vetoes_naked_options(monkeypatch):
     assert flags.get("heavyweight_confluence_valid") is False
 
 
-def test_in_flight_directional_lockout_blocks_opposing_alert():
+def test_in_flight_directional_lockout_blocks_opposing_alert(monkeypatch):
     """
     Validates that an in-flight trade commitment (stage='IGNITED') on an index (e.g. MIDCPNIFTY CE)
     strictly blocks incoming opposing alerts (e.g. MIDCPNIFTY PE) from entering or superseding the trade.
     """
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
+    monkeypatch.setattr(engine, "_async_enrich_scrutiny", lambda alert: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda alert: (True, "", {}),
+    )
 
     # Active in-flight Call trade
     active_ce = AutoAlert(
@@ -337,7 +343,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
         is_live=True,
         environment="LIVE",
         confidence=85,
-        metrics={"nifty_change_pct": 0.0},
+        metrics={"nifty_change_pct": 0.0, "volume": 5000, "oi": 25000},
     )
     res_ce = engine.record_alert(active_ce)
     assert res_ce is True
@@ -364,7 +370,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
         is_live=True,
         environment="LIVE",
         confidence=85,
-        metrics={"nifty_change_pct": 0.0},
+        metrics={"nifty_change_pct": 0.0, "volume": 5000, "oi": 25000},
     )
     res_pe = engine.record_alert(incoming_pe)
     # MUST BE BLOCKED by In-Flight Directional Lockout
@@ -385,6 +391,11 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
 
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
+    monkeypatch.setattr(engine, "_async_enrich_scrutiny", lambda alert: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda alert: (True, "", {}),
+    )
 
     # Create an alert and invalidate it
     bull_alert = AutoAlert(
@@ -407,7 +418,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
         is_live=True,
         environment="LIVE",
         confidence=85,
-        metrics={"nifty_change_pct": 0.0},
+        metrics={"nifty_change_pct": 0.0, "volume": 5000, "oi": 25000},
     )
     res = engine.record_alert(bull_alert)
     assert res is True
@@ -439,7 +450,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
         is_live=True,
         environment="LIVE",
         confidence=85,
-        metrics={"nifty_change_pct": 0.0},
+        metrics={"nifty_change_pct": 0.0, "volume": 5000, "oi": 25000},
     )
     # Monkeypatch time to simulate 5 minutes later
     monkeypatch.setattr(time, "time", lambda: inval_time + 300.0)
@@ -465,6 +476,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
     """
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
+    engine._async_enrich_scrutiny = lambda alert: None
 
     # Active Call trade on radar
     radar_ce = AutoAlert(
@@ -487,7 +499,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
         is_live=True,
         environment="LIVE",
         confidence=85,
-        metrics={"nifty_change_pct": 0.0},
+        metrics={"nifty_change_pct": 0.0, "volume": 5000, "oi": 25000},
     )
     res = engine.record_alert(radar_ce)
     assert res is True
@@ -517,6 +529,9 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
         metrics={
             "nifty_change_pct": 0.10,
             "vwap": 23900.0,
+            "rvol": 3.0,
+            "volume": 5000,
+            "oi": 25000,
         },
     )
 

@@ -174,7 +174,27 @@ class TestForensicAuditFull:
 
     def test_banking_sector_forensic_audit_routing(self):
         """Commercial banks and financial institutions should be audited without non-applicable working capital."""
-        res = audit_forensics("KOTAKBANK", use_cache=False)
+        # Supply deterministic reported accounting inputs. A unit test must
+        # not depend on yfinance, a network connection or a mutable fundamentals cache.
+        bank_inputs = {
+            "dsri": 1.0,
+            "gmi": 1.0,
+            "aqi": 1.0,
+            "sgi": 1.0,
+            "depi": 1.0,
+            "sgai": 1.0,
+            "lvgi": 1.0,
+            "tata": 0.0,
+            "roe": 15.0,
+            "free_cash_flow": 10.0,
+            "profit_growth": 12.0,
+            "debt_equity": 0.5,
+            "current_ratio": 1.2,
+            "pledged_pct": 0.0,
+            "sales_growth": 10.0,
+            "roce": 15.0,
+        }
+        res = audit_forensics("KOTAKBANK", data=bank_inputs, use_cache=False)
         assert isinstance(res, ForensicAuditResult)
         assert res.available is True
         assert res.overall_forensic_verdict == "CLEAN_PASS"

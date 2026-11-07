@@ -155,6 +155,29 @@ class TestGeneratePlan:
         assert plan is not None
         assert plan.symbol == "RELIANCE"
 
+    def test_option_sizing_does_not_force_a_minimum_lot(self):
+        trader = TraderAgent(capital=1000)
+        strategy = {"instrument": "OPTIONS", "_symbol": "NIFTY", "direction": "LONG"}
+        sizing = trader._calculate_sizing(
+            ltp=25000.0,
+            atr=100.0,
+            strategy=strategy,
+            vix_factor=1.0,
+            confidence=75,
+        )
+
+        orders = trader._build_entry_orders(
+            symbol="NIFTY",
+            exchange="NSE",
+            strategy=strategy,
+            ltp=25000.0,
+            sizing=sizing,
+            support=None,
+        )
+
+        assert sizing["shares"] == 0
+        assert orders == []
+
 
 # ── generate_all_plans ───────────────────────────────────────
 

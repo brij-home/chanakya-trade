@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import math
 import sqlite3
 import threading
@@ -126,6 +127,7 @@ OrderStatus = Literal[
     "SUBMITTED_PAPER",
     "OPEN",
     "PARTIALLY_FILLED",
+    "CANCEL_PENDING",
     "FILLED",
     "FILLED_PAPER",
     "CANCELLED",
@@ -141,7 +143,7 @@ ProductType = Literal["CNC", "MIS", "NRML"]
 def _generate_order_id(is_paper: bool = True) -> str:
     """Generate explicit mode-prefixed order ID. Never use fake broker names."""
     prefix = "PAPER" if is_paper else "LIVE"
-    return f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
+    return f"{prefix}-{uuid.uuid4().hex[:16].upper()}"
 
 
 @dataclass
@@ -168,6 +170,9 @@ class OrderIntent:
     target: Optional[float] = None
     auto_gtt_oco: bool = True
     gtt_order_id: Optional[str] = None
+    filled_quantity: int = 0
+    average_fill_price: Optional[float] = None
+    last_sync_at: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,6 +227,20 @@ def _init_orders_db():
             )
         if "gtt_order_id" not in existing_cols:
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN gtt_order_id TEXT")
+        if "ledger_status" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN ledger_status TEXT")
+        if "ledger_error" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN ledger_error TEXT")
+        if "account_id" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN account_id TEXT")
+        if "filled_quantity" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE orders_ledger ADD COLUMN filled_quantity INTEGER NOT NULL DEFAULT 0"
+            )
+        if "average_fill_price" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN average_fill_price REAL")
+        if "last_sync_at" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN last_sync_at TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
@@ -255,6 +274,44 @@ def _init_orders_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_fills (
+                fill_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                broker_name TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                broker_order_id TEXT NOT NULL,
+                broker_trade_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                segment TEXT NOT NULL,
+                product TEXT NOT NULL DEFAULT 'MIS',
+                side TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                fill_price REAL NOT NULL,
+                fill_time TEXT NOT NULL,
+                charges REAL NOT NULL DEFAULT 0.0,
+                sequence_num INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                UNIQUE(account_id, broker_name, broker_trade_id)
+            )
+            """
+        )
+        existing_fill_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_fills)").fetchall()
+        }
+        if "product" not in existing_fill_cols:
+            conn.execute(
+                "ALTER TABLE execution_fills ADD COLUMN product TEXT NOT NULL DEFAULT 'MIS'"
+            )
+        if "updated_at" not in existing_fill_cols:
+            conn.execute("ALTER TABLE execution_fills ADD COLUMN updated_at TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_account ON execution_fills(account_id)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_account_broker_trade ON execution_fills(account_id, broker_name, broker_trade_id)"
+        )
         conn.commit()
 
 
@@ -273,6 +330,7 @@ def _record_order_event(
         occurred_at = datetime.now(timezone.utc).isoformat()
         body = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
         with _get_orders_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
                 "SELECT event_hash FROM order_events WHERE order_id = ? ORDER BY occurred_at DESC LIMIT 1",
                 (order_id,),
@@ -441,6 +499,14 @@ def preview_order_intent(
     """
     _init_orders_db()
     _validate_preview_inputs(symbol, side, quantity, price, order_type, product)
+    from engine.risk_limits import risk_limits, RiskLimitError
+
+    try:
+        risk_limits.check(
+            symbol=symbol, action=side, quantity=quantity, price=price, allow_override=False
+        )
+    except RiskLimitError as rle:
+        raise ValueError(f"Order intent violates risk limits: {rle}") from rle
     if trigger_price is not None:
         if (
             isinstance(trigger_price, bool)
@@ -509,11 +575,14 @@ def preview_order_intent(
     # For non-live orders without client key, generate random UUID to allow distinct intentional orders
     idemp = idempotency_key or f"IDEMP-{uuid.uuid4().hex}"
 
-    # Canonical request string that cryptographically binds ALL structural parameters and active mode
+    # Canonical request string that cryptographically binds ALL structural parameters, active mode, and protections (EXEC-17)
     canonical_str = (
         f"{resolved_exchange}:{symbol.upper()}:{resolved_segment}:{side}:"
         f"{quantity}:{price:.4f}:{order_type}:{product}:{mode_name}"
         + (f":trig_{trigger_price:.4f}" if trigger_price is not None else "")
+        + (f":sl_{stop_loss:.4f}" if stop_loss is not None else "")
+        + (f":tgt_{target:.4f}" if target is not None else "")
+        + (f":gtt_{int(bool(auto_gtt_oco))}")
     )
     computed_preview_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
 
@@ -604,7 +673,8 @@ def preview_order_intent(
     try:
         from engine.smart_order_router import get_exchange_freeze_limit
 
-        freeze_limit = get_exchange_freeze_limit(symbol)
+        qualified_symbol = symbol if ":" in str(symbol) else f"{resolved_exchange}:{symbol}"
+        freeze_limit = get_exchange_freeze_limit(qualified_symbol, segment=resolved_segment)
         if quantity > freeze_limit:
             num_tranches = math.ceil(quantity / freeze_limit)
             charges_dict["freeze_limit"] = freeze_limit
@@ -647,8 +717,8 @@ def preview_order_intent(
                 order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
                 order_type, product, status, mode, broker_order_id, charges_json,
                 rejection_reason, preview_hash, stop_loss, target, auto_gtt_oco, gtt_order_id,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, account_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(idempotency_key) DO NOTHING
             """,
             (
@@ -674,6 +744,9 @@ def preview_order_intent(
                 intent.gtt_order_id,
                 now_iso,
                 now_iso,
+                "SIMULATED_PAPER_ACCOUNT"
+                if is_paper
+                else (os.environ.get("BROKER_ACCOUNT_ID") or "LIVE_ACCOUNT"),
             ),
         )
         conn.commit()
@@ -768,28 +841,31 @@ def confirm_order_intent(order_id: str, preview_hash: str) -> OrderIntent:
                 f"Order {order_id} cannot be confirmed because current status is '{d['status']}'."
             )
 
-        # 60-Second Preview TTL Staleness Guard
+        # 60-Second Preview TTL Staleness Guard (EXEC-18: Fail-closed on missing/unparseable created_at)
         created_at_val = d.get("created_at")
-        if created_at_val and isinstance(created_at_val, str):
-            try:
-                if created_at_val.endswith("Z"):
-                    created_dt = datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
-                elif "+" in created_at_val or ("-" in created_at_val[10:]):
-                    created_dt = datetime.fromisoformat(created_at_val)
-                else:
-                    created_dt = datetime.fromisoformat(created_at_val).replace(tzinfo=timezone.utc)
-                age_sec = (datetime.now(timezone.utc) - created_dt).total_seconds()
-                if age_sec > 60.0:
-                    raise TimeoutError(
-                        f"Order preview {order_id} has expired (age: {age_sec:.1f}s > 60.0s TTL). "
-                        "Re-generate order preview to prevent stale price slippage."
-                    )
-            except TimeoutError:
-                raise
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}"
+        if not created_at_val or not isinstance(created_at_val, str):
+            raise ValueError(
+                f"Order preview {order_id} has missing or invalid created_at timestamp. Failing closed."
+            )
+        try:
+            if created_at_val.endswith("Z"):
+                created_dt = datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
+            elif "+" in created_at_val or ("-" in created_at_val[10:]):
+                created_dt = datetime.fromisoformat(created_at_val)
+            else:
+                created_dt = datetime.fromisoformat(created_at_val).replace(tzinfo=timezone.utc)
+            age_sec = (datetime.now(timezone.utc) - created_dt).total_seconds()
+            if age_sec > 60.0:
+                raise TimeoutError(
+                    f"Order preview {order_id} has expired (age: {age_sec:.1f}s > 60.0s TTL). "
+                    "Re-generate order preview to prevent stale price slippage."
                 )
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            raise ValueError(
+                f"Order preview {order_id} has unparseable created_at timestamp '{created_at_val}': {exc}. Failing closed."
+            )
 
         cursor = conn.execute(
             """
@@ -809,6 +885,169 @@ def confirm_order_intent(order_id: str, preview_hash: str) -> OrderIntent:
         confirmed = _row_to_intent(dict(updated_row))
     _record_order_event(order_id, "CONFIRMED", payload={"status": confirmed.status})
     return confirmed
+
+
+def submit_simulated_order_intent(
+    *,
+    symbol: str,
+    side: OrderSide,
+    quantity: int,
+    price: float,
+    order_type: OrderType = "LIMIT",
+    product: ProductType = "MIS",
+    trigger_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    target: Optional[float] = None,
+    auto_gtt_oco: bool = False,
+) -> OrderIntent:
+    """Create, confirm, and execute one order only through the simulated OMS.
+
+    Legacy CLI surfaces use this adapter instead of calling a configured broker
+    directly. It deliberately has no live mode path and requires an explicit
+    positive reference price even for MARKET orders so the ledger never records
+    an unpriced intention as an execution decision.
+    """
+    mode_info = get_trading_mode()
+    if mode_info.mode.name != "SIMULATE":
+        raise PermissionError(
+            "This entry point only supports SIMULATE mode. Use the authenticated order ticket "
+            "for any live order; direct CLI broker placement is disabled."
+        )
+    if (
+        not isinstance(price, (int, float))
+        or isinstance(price, bool)
+        or not math.isfinite(price)
+        or price <= 0
+    ):
+        raise ValueError("A finite positive reference price is required for a simulated order.")
+
+    preview = preview_order_intent(
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=float(price),
+        order_type=order_type,
+        product=product,
+        trigger_price=trigger_price,
+        stop_loss=stop_loss,
+        target=target,
+        auto_gtt_oco=auto_gtt_oco,
+    )
+    confirmed = confirm_order_intent(preview.order_id, preview.preview_hash or "")
+    return execute_order_intent(confirmed.order_id)
+
+
+def cancel_order_intent(order_id: str) -> dict[str, Any]:
+    """Request cancellation only for an order owned by the persisted OMS.
+
+    Broker acknowledgement means the request was accepted, not that the order
+    is canceled. The durable state stays CANCEL_PENDING until a subsequent
+    broker snapshot confirms cancellation.
+    """
+    from brokers.session import get_execution_broker
+    from engine.modes import assert_live_execution_allowed
+
+    mode = get_trading_mode().mode.name
+    if mode == "OBSERVE":
+        raise PermissionError("Order cancellation is unavailable in OBSERVE mode.")
+    if mode == "EXECUTE":
+        assert_live_execution_allowed()
+        raise PermissionError(
+            "Live OMS cancellation is disabled until orders are bound to a verified broker account. "
+            "Use the broker's order screen, then reconcile before retrying."
+        )
+
+    _init_orders_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_orders_pool().transaction() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)).fetchone()
+        if not row:
+            raise ValueError("Only orders persisted by the central OMS can be canceled here.")
+        order = dict(row)
+        if order["mode"] != mode:
+            raise PermissionError("Cross-mode cancellation is prohibited.")
+        if order["status"] not in ("OPEN", "PARTIALLY_FILLED", "CANCEL_PENDING"):
+            raise ValueError(f"Order cannot be canceled from state {order['status']}.")
+        if order["status"] == "CANCEL_PENDING":
+            raise ValueError(
+                "Cancellation is already pending; reconcile the broker order before retrying."
+            )
+        broker_order_id = order.get("broker_order_id")
+        if not broker_order_id:
+            raise ValueError("Order has no broker order ID; reconcile its submission state first.")
+        cursor = conn.execute(
+            "UPDATE orders_ledger SET status='CANCEL_PENDING', updated_at=? "
+            "WHERE order_id=? AND status IN ('OPEN','PARTIALLY_FILLED')",
+            (now, order["order_id"]),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(
+                "Concurrent order-state change; reload and reconcile before canceling."
+            )
+
+    if mode == "SIMULATE":
+        from engine.paper import PaperBroker
+
+        broker = PaperBroker()
+        provider = "paper"
+    else:
+        assert_live_execution_allowed()
+        broker = get_execution_broker()
+        provider = broker.__class__.__name__.lower()
+
+    acknowledged = False
+    try:
+        acknowledged = bool(broker.cancel_order(str(broker_order_id)))
+    except Exception as exc:
+        logger.error(
+            "[order_lifecycle] Cancellation outcome ambiguous for OMS order %s / broker order %s: %s",
+            order["order_id"],
+            broker_order_id,
+            exc,
+            exc_info=True,
+        )
+
+    confirmed_cancel = False
+    try:
+        clean_b_id = str(broker_order_id).replace("PAPER-OPEN-", "").replace("PAPER-EXEC-", "")
+        for broker_order in broker.get_orders():
+            b_oid = str(getattr(broker_order, "order_id", ""))
+            if b_oid in (str(broker_order_id), clean_b_id):
+                confirmed_cancel = str(getattr(broker_order, "status", "")).upper() in (
+                    "CANCELLED",
+                    "CANCELED",
+                )
+                break
+    except Exception as exc:
+        logger.warning(
+            "[order_lifecycle] Could not confirm cancellation for %s: %s",
+            order["order_id"],
+            exc,
+            exc_info=True,
+        )
+
+    final_status = "CANCELLED" if confirmed_cancel else "CANCEL_PENDING"
+    with _get_orders_pool().transaction() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status=?, updated_at=? WHERE order_id=? AND status='CANCEL_PENDING'",
+            (final_status, datetime.now(timezone.utc).isoformat(), order["order_id"]),
+        )
+    _record_order_event(
+        order["order_id"],
+        "CANCEL_CONFIRMED" if confirmed_cancel else "CANCEL_REQUESTED",
+        broker_name=provider,
+        broker_order_id=str(broker_order_id),
+        payload={"acknowledged": acknowledged, "status": final_status},
+    )
+    return {
+        "order_id": order["order_id"],
+        "broker_order_id": str(broker_order_id),
+        "mode": mode,
+        "status": final_status,
+        "cancel_acknowledged": acknowledged,
+        "cancel_confirmed": confirmed_cancel,
+    }
 
 
 def _row_to_intent(d: dict) -> OrderIntent:
@@ -900,6 +1139,19 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         symbol=d.get("symbol"),
     )
 
+    from engine.risk_limits import risk_limits, RiskLimitError
+
+    try:
+        risk_limits.check(
+            symbol=d["symbol"],
+            action=d["side"],
+            quantity=int(d["quantity"]),
+            price=float(d["price"]),
+            allow_override=False,
+        )
+    except RiskLimitError as rle:
+        raise PermissionError(f"Order execution violates risk limits: {rle}") from rle
+
     # ── Emergency Circuit Breaker Lockout Check ────────────────────────────
     is_locked, remaining_sec = is_emergency_lockout_active()
     if is_locked:
@@ -937,10 +1189,16 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         else (d.get("charges") or {})
     )
     trig_val = charges_d.get("trigger_price")
+    sl_val = d.get("stop_loss")
+    tgt_val = d.get("target")
+    gtt_val = d.get("auto_gtt_oco")
     canonical_str = (
         f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
         f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
         + (f":trig_{float(trig_val):.4f}" if trig_val is not None else "")
+        + (f":sl_{float(sl_val):.4f}" if sl_val is not None else "")
+        + (f":tgt_{float(tgt_val):.4f}" if tgt_val is not None else "")
+        + (f":gtt_{int(bool(gtt_val))}")
     )
     expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
     if d.get("preview_hash") and d["preview_hash"] != expected_hash:
@@ -954,29 +1212,56 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         raise ValueError(
             f"Order {order_id} instrument metadata does not match the authoritative instrument master."
         )
-    with _get_orders_db() as conn:
-        cursor = conn.execute(
-            """
-            UPDATE orders_ledger
-            SET status = 'SUBMITTING', updated_at = ?
-            WHERE order_id = ? AND status = 'CONFIRMED' AND mode = ?
-            """,
-            (now_iso, order_id, mode_info.mode.name),
+
+    # Check the live qualification gate before claiming SUBMITTING. A blocked
+    # deployment must leave the user-confirmed order recoverable as CONFIRMED.
+    if mode_info.is_execute:
+        from engine.modes import assert_live_execution_allowed
+
+        assert_live_execution_allowed()
+
+        # Freeze-limit tranche submits require durable parent/child order IDs,
+        # per-child fill reconciliation, and crash-safe partial-fill recovery.
+        # The current OMS only has a paper implementation of those semantics.
+        from engine.smart_order_router import slice_quantity_by_freeze_limit
+        from market.instruments import resolve_canonical_instrument
+
+        canonical_instrument = resolve_canonical_instrument(d["symbol"])
+        from market.instrument_master import get_verified_contract
+
+        verified_contract = get_verified_contract(d["symbol"])
+        lot_size = (
+            int(verified_contract["lot_size"])
+            if verified_contract
+            else int(getattr(canonical_instrument, "lot_size", 1) or 1)
         )
-        conn.commit()
-        if cursor.rowcount == 0:
-            raise ValueError(
-                f"Order {order_id} state transition to SUBMITTING failed (order is not CONFIRMED, mode mismatched, or already submitted)."
+        tranche_quantities = slice_quantity_by_freeze_limit(
+            d["symbol"] if ":" in str(d["symbol"]) else f"{d['exchange']}:{d['symbol']}",
+            int(d["quantity"]),
+            lot_size,
+            segment=d.get("segment"),
+        )
+        if len(tranche_quantities or []) > 1:
+            raise PermissionError(
+                "Live freeze-limit sliced orders are disabled until child-order IDs, "
+                "partial fills, and restart recovery are durably tracked. The order "
+                "remains CONFIRMED and was not sent to the broker."
             )
 
-    d["status"] = "SUBMITTING"
+        if d.get("stop_loss") and bool(d.get("auto_gtt_oco", 1)):
+            raise PermissionError(
+                "Live automatic protective GTT orders are disabled until protective "
+                "order activation, rejection, cancellation, and fill events are "
+                "durably monitored. The order remains CONFIRMED and was not sent "
+                "to the broker."
+            )
 
     if mode_info.is_observe:
         d["status"] = "REJECTED"
         d["rejection_reason"] = "Mutation blocked: System is operating in OBSERVE mode."
         with _get_orders_db() as conn:
             conn.execute(
-                "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ? AND status = 'CONFIRMED'",
                 (d["status"], d["rejection_reason"], now_iso, order_id),
             )
             conn.commit()
@@ -984,6 +1269,22 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             "ORDER_REJECTED_OBSERVE_MODE", mode="OBSERVE", details={"order_id": order_id}
         )
     elif mode_info.is_simulate:
+        # Atomic transition CONFIRMED -> SUBMITTING immediately before paper submission
+        with _get_orders_db() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE orders_ledger
+                SET status = 'SUBMITTING', updated_at = ?
+                WHERE order_id = ? AND status = 'CONFIRMED' AND mode = ?
+                """,
+                (now_iso, order_id, mode_info.mode.name),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise ValueError(
+                    f"Order {order_id} state transition to SUBMITTING failed (order is not CONFIRMED, mode mismatched, or already submitted)."
+                )
+        d["status"] = "SUBMITTING"
         # Paper trading execution: apply to PaperBroker for balance & position tracking
         t_order_0 = time.time()
         try:
@@ -998,7 +1299,23 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             from engine.smart_order_router import slice_quantity_by_freeze_limit
 
             inst_lot = getattr(inst, "lot_size", 1) or 1
-            slices = slice_quantity_by_freeze_limit(d["symbol"], d["quantity"], inst_lot)
+            try:
+                slices = slice_quantity_by_freeze_limit(
+                    d["symbol"] if ":" in str(d["symbol"]) else f"{_paper_exchange}:{d['symbol']}",
+                    d["quantity"],
+                    inst_lot,
+                    segment=d.get("segment"),
+                )
+            except (RuntimeError, ValueError, OSError) as freeze_error:
+                # Paper mode has no broker side effect. Keep simulation usable if
+                # today's RMS master is unavailable, and disclose degraded validation.
+                logger.warning(
+                    "[order_lifecycle] Paper order freeze metadata unavailable for %s; "
+                    "simulating unsliced with degraded exchange validation: %s",
+                    d["symbol"],
+                    freeze_error,
+                )
+                slices = [int(d["quantity"])]
             if not slices:
                 slices = [d["quantity"]]
 
@@ -1024,6 +1341,11 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 if paper_res.status == "COMPLETE":
                     d["status"] = "FILLED_PAPER"
                     d["broker_order_id"] = f"PAPER-EXEC-{paper_res.order_id}"
+                    if (
+                        getattr(paper_res, "average_price", None)
+                        and float(paper_res.average_price) > 0
+                    ):
+                        d["fill_price"] = float(paper_res.average_price)
                 elif paper_res.status == "REJECTED":
                     d["status"] = "REJECTED"
                     d["rejection_reason"] = paper_res.message or "Rejected by PaperBroker"
@@ -1058,8 +1380,17 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         all_complete = False
 
                 if any_rejected:
-                    d["status"] = "REJECTED"
-                    d["rejection_reason"] = f"Tranche rejected: {rej_msg}"
+                    if child_ids:
+                        d["status"] = "PARTIALLY_FILLED"
+                        d["rejection_reason"] = (
+                            f"Partial fill: {len(child_ids)} tranches filled before rejection: {rej_msg}"
+                        )
+                        d["broker_order_id"] = (
+                            f"PAPER-EXEC-SLICED-{','.join(str(cid) for cid in child_ids)}"
+                        )
+                    else:
+                        d["status"] = "REJECTED"
+                        d["rejection_reason"] = f"Tranche rejected: {rej_msg}"
                 elif all_complete:
                     d["status"] = "FILLED_PAPER"
                     d["broker_order_id"] = (
@@ -1100,6 +1431,51 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 ),
             )
             conn.commit()
+
+        # Persist execution fill into institutional ledger with simulation provenance
+        if d["status"] == "FILLED_PAPER":
+            try:
+                prod = str(d.get("product") or "MIS").upper()
+                resolved_seg = str(
+                    d.get("segment") or ("EQUITY_DELIVERY" if prod == "CNC" else "EQUITY_INTRADAY")
+                ).upper()
+                f_price = float(d.get("fill_price") or d.get("price") or 0.0)
+                qty = int(d["quantity"])
+                chg_res = calculate_transaction_charges(
+                    price=f_price,
+                    quantity=qty,
+                    segment=resolved_seg,  # type: ignore
+                    side=d["side"],  # type: ignore
+                )
+                chg = float(chg_res.total_charges)
+                paper_account = d.get("account_id") or "SIMULATED_PAPER_ACCOUNT"
+                record_execution_fill(
+                    account_id=paper_account,
+                    broker_name=d.get("broker") or "PAPER",
+                    order_id=order_id,
+                    broker_order_id=str(d.get("broker_order_id") or f"PAPER-{order_id}"),
+                    broker_trade_id=f"SIM-TRADE-{order_id}",
+                    symbol=d["symbol"],
+                    exchange=d.get("exchange", "NSE"),
+                    segment=resolved_seg,
+                    side=d["side"],
+                    quantity=qty,
+                    fill_price=f_price,
+                    fill_time=now_iso,
+                    charges=chg,
+                    product=prod,
+                )
+                d["ledger_status"] = "RECORDED"
+            except Exception as e_fill_record:
+                logger.error(f"[order_lifecycle] Paper fill recording error: {e_fill_record}")
+                d["ledger_status"] = "INGESTION_FAILED"
+                d["ledger_error"] = str(e_fill_record)
+                with _get_orders_db() as conn:
+                    conn.execute(
+                        "UPDATE orders_ledger SET ledger_status = ?, ledger_error = ?, updated_at = ? WHERE order_id = ?",
+                        ("INGESTION_FAILED", str(e_fill_record), now_iso, order_id),
+                    )
+                    conn.commit()
 
         # Server-side native GTT OCO bracket auto-arming on paper fill
         if d["status"] == "FILLED_PAPER" and d.get("auto_gtt_oco") and d.get("stop_loss"):
@@ -1160,10 +1536,6 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         )
     else:
         # ── Live broker execution ───────────────────────────────────────────
-        from engine.modes import assert_live_execution_allowed
-
-        assert_live_execution_allowed()  # raises PermissionError if not EXECUTE + ALLOW_LIVE_TRADING=1
-
         # Safety gate 2: pre-trade validation with live market context
         from engine.pretrade import validate_pretrade
         from engine.observability import new_correlation_id
@@ -1171,6 +1543,11 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         pretrade_correlation_id = new_correlation_id("live_order")
         inst = resolve_canonical_instrument(d["symbol"])
+        from market.instrument_master import get_verified_contract
+
+        verified = get_verified_contract(d["symbol"])
+        execution_lot = int(verified["lot_size"]) if verified else inst.lot_size
+        execution_tick = float(verified["tick_size"]) if verified else inst.tick_size
         _live_exchange = d.get("exchange") or inst.exchange
         _live_segment = d.get("segment") or inst.segment
         from engine.pilot_safety import assert_pilot_execution_allowed
@@ -1227,27 +1604,37 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 if isinstance(_funds, dict)
                 else None
             )
+            _prev_close = getattr(_q, "prev_close", None) or getattr(_q, "close", None)
+            _portfolio_val = (
+                getattr(_funds, "total_balance", None)
+                or getattr(_funds, "equity_balance", None)
+                or _available_cash
+                if _funds is not None
+                else None
+            )
+            try:
+                from engine.risk_limits import get_pnl_tracker
+
+                _daily_pnl = get_pnl_tracker().get_daily_pnl(account_id=_account, mode="EXECUTE")
+            except Exception:
+                _daily_pnl = None
 
         except Exception as _ctx_exc:
-            d["status"] = "UNKNOWN_FREEZE"
-            d["rejection_reason"] = f"Live pretrade context fetch failed: {_ctx_exc}."
-            with _get_orders_db() as conn:
-                conn.execute(
-                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                    (d["status"], d["rejection_reason"], now_iso, order_id),
-                )
-                conn.commit()
+            # Order remains CONFIRMED (no broker call occurred, not UNKNOWN_FREEZE)
+            logger.warning(
+                f"[order_lifecycle] Live pretrade context fetch failed for {order_id}: {_ctx_exc}"
+            )
             raise RuntimeError(
-                f"Live order {order_id} frozen (pretrade context fetch failed): {_ctx_exc}"
+                f"Live order {order_id} blocked: pretrade context fetch failed: {_ctx_exc}"
             ) from _ctx_exc
 
         _no_chase = None
         _depth_sweep_vwap = None
-        if isinstance(d.get("charges"), dict):
-            _raw_nc = d["charges"].get("no_chase_boundary")
+        if isinstance(charges_d, dict):
+            _raw_nc = charges_d.get("no_chase_boundary")
             if isinstance(_raw_nc, (int, float)) and _raw_nc > 0:
                 _no_chase = float(_raw_nc)
-            _raw_vwap = d["charges"].get("depth_sweep_vwap") or d["charges"].get(
+            _raw_vwap = charges_d.get("depth_sweep_vwap") or charges_d.get(
                 "orderbook_expected_vwap"
             )
             if isinstance(_raw_vwap, (int, float)) and _raw_vwap > 0:
@@ -1261,12 +1648,19 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             price=d["price"] if d["price"] else None,
             segment=_live_segment,
             account=_account,
+            broker=get_execution_broker_key(),
+            lot_size=execution_lot,
+            tick_size=execution_tick,
             ltp=_ltp,
+            prev_close=_prev_close,
             quote_age_seconds=_quote_age_seconds,
             available_cash=_available_cash,
+            portfolio_value=_portfolio_val,
+            daily_pnl=_daily_pnl,
             trigger_price=d["price"] if d.get("order_type") == "MARKET" else None,
             no_chase_boundary=_no_chase,
             depth_sweep_vwap=_depth_sweep_vwap,
+            require_context=True,
             correlation_id=pretrade_correlation_id,
         )
         if not pretrade.is_eligible:
@@ -1275,11 +1669,36 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             d["rejection_reason"] = f"Pre-trade validation blocked: {reasons}"
             with _get_orders_db() as conn:
                 conn.execute(
-                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ? AND status = 'CONFIRMED'",
                     (d["status"], d["rejection_reason"], now_iso, order_id),
                 )
                 conn.commit()
             raise ValueError(f"Pre-trade validation blocked: {reasons}")
+
+        from engine.recovery_worker import has_active_unknown_freeze
+
+        if has_active_unknown_freeze(_account):
+            raise PermissionError(
+                f"Live order submission blocked: Account {_account} has active UNKNOWN_FREEZE orders "
+                "requiring reconciliation. Resolve outstanding frozen orders before placing new trades."
+            )
+
+        # All local safety gates passed! Atomic transition CONFIRMED -> SUBMITTING right before broker place_order
+        with _get_orders_db() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE orders_ledger
+                SET status = 'SUBMITTING', updated_at = ?
+                WHERE order_id = ? AND status = 'CONFIRMED' AND mode = ?
+                """,
+                (now_iso, order_id, mode_info.mode.name),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise ValueError(
+                    f"Order {order_id} state transition to SUBMITTING failed (order is not CONFIRMED, mode mismatched, or already submitted)."
+                )
+        d["status"] = "SUBMITTING"
 
         # Safety gate 3: submit to real broker adapter
         try:
@@ -1293,7 +1712,12 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             from engine.smart_order_router import slice_quantity_by_freeze_limit
 
             inst_lot = getattr(inst, "lot_size", 1) or 1
-            slices = slice_quantity_by_freeze_limit(d["symbol"], d["quantity"], inst_lot)
+            slices = slice_quantity_by_freeze_limit(
+                d["symbol"] if ":" in str(d["symbol"]) else f"{d['exchange']}:{d['symbol']}",
+                d["quantity"],
+                inst_lot,
+                segment=d.get("segment"),
+            )
             if not slices:
                 slices = [d["quantity"]]
 
@@ -1318,12 +1742,16 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                     quantity=d["quantity"],
                     price=d["price"],
                     trigger_price=trigger_px,
+                    tag=order_id,
                 )
 
                 broker_res = live_broker.place_order(broker_req)
 
-                if broker_res.status == "COMPLETE" or broker_res.status == "OPEN":
-                    d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
+                from brokers.order_types import normalize_order_status
+
+                norm_status = normalize_order_status(broker_res.status)
+                if norm_status in ("COMPLETE", "OPEN", "SUBMITTED"):
+                    d["status"] = "OPEN" if norm_status in ("OPEN", "SUBMITTED") else "FILLED"
                     d["broker_order_id"] = broker_res.order_id
 
                     with _get_orders_db() as conn:
@@ -1332,6 +1760,45 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                             (d["status"], d["broker_order_id"], now_iso, order_id),
                         )
                         conn.commit()
+
+                    # Ingest authentic fills on OPEN, SUBMITTED, FILLED, or PARTIALLY_FILLED
+                    if d["status"] in ("FILLED", "PARTIALLY_FILLED", "OPEN", "SUBMITTED"):
+                        try:
+                            recorded = ingest_broker_executions(
+                                order_id=order_id,
+                                broker_order_id=str(d["broker_order_id"]),
+                                live_broker=live_broker,
+                                broker_res=broker_res,
+                                order_details=d,
+                            )
+                            if not recorded:
+                                d["ledger_status"] = (
+                                    "RECORDED"
+                                    if d["status"] in ("OPEN", "SUBMITTED")
+                                    else "PENDING_FACTS"
+                                )
+                            else:
+                                d["ledger_status"] = "RECORDED"
+                        except Exception as e_fill_record:
+                            logger.error(
+                                f"[order_lifecycle] Execution fill ingestion failed for {order_id}: {e_fill_record}"
+                            )
+                            d["ledger_status"] = "INGESTION_FAILED"
+                            d["ledger_error"] = str(e_fill_record)
+                            with _get_orders_db() as conn:
+                                conn.execute(
+                                    "UPDATE orders_ledger SET ledger_status = ?, ledger_error = ?, updated_at = ? WHERE order_id = ?",
+                                    ("INGESTION_FAILED", str(e_fill_record), now_iso, order_id),
+                                )
+                                conn.commit()
+                            _record_order_event(
+                                order_id,
+                                "LEDGER_INGESTION_FAILED",
+                                correlation_id=pretrade_correlation_id,
+                                broker_name=execution_provider,
+                                broker_order_id=d["broker_order_id"],
+                                payload={"error": str(e_fill_record)},
+                            )
 
                     if d["status"] == "OPEN":
                         try:
@@ -1444,9 +1911,9 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                     )
 
                 else:
-                    # Ambiguous state -> freeze
+                    # Ambiguous state -> freeze, but preserve authentic broker order ID if present
                     d["status"] = "UNKNOWN_FREEZE"
-                    d["broker_order_id"] = None
+                    d["broker_order_id"] = str(getattr(broker_res, "order_id", None) or "") or None
                     d["rejection_reason"] = (
                         f"Ambiguous broker response status: {broker_res.status}. "
                         "Order frozen for manual reconciliation."
@@ -1615,14 +2082,10 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
     """
     Execute a micro-batch of server-CONFIRMED order intents atomically.
 
-    Optimizations & Safety Invariants:
-      1. Micro-Batching: If the execution broker supports `place_basket_orders`,
-         dispatches all validated orders in a single atomic network roundtrip
-         instead of sequential HTTP requests, minimizing latency and execution slippage.
-      2. Atomicity & Anti-Replay: Pre-validates all orders against P0 invariants
-         (cross-mode protection, CONFIRMED status, preview hash integrity, pilot safety).
-      3. Fail-Closed Fallback: If broker does not support batch placement,
-         executes sequentially via `execute_order_intent` without breaking contracts.
+    SIMULATE mode executes confirmed legs sequentially through PaperBroker.
+    Live baskets remain disabled until every leg has durable child-order/fill
+    tracking and partial-basket recovery. Broker basket APIs do not guarantee
+    portfolio-level atomicity.
     """
     if not order_ids:
         return []
@@ -1649,288 +2112,23 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
         )
 
     mode_info = get_trading_mode()
-    now_iso = datetime.now(timezone.utc).isoformat()
 
     # If in OBSERVE or SIMULATE mode, execute sequentially via execute_order_intent
     # (paper execution maintains accurate sequential fill sequence and balances)
     if not mode_info.is_execute:
         return [execute_order_intent(oid) for oid in sorted_order_ids]
 
-    # Live Execution Mode
+    # A basket can partially fill or reject one leg after another leg has
+    # filled. The current OMS cannot durably map and reconcile those child
+    # outcomes, so fail before claiming SUBMITTING or contacting the broker.
     from engine.modes import assert_live_execution_allowed
 
     assert_live_execution_allowed()
-
-    from brokers.base import OrderRequest
-    from brokers.session import get_execution_broker, get_execution_broker_key
-    from engine.observability import new_correlation_id
-    from engine.pilot_safety import assert_pilot_execution_allowed
-    from engine.pretrade import validate_pretrade
-    from market.instruments import resolve_canonical_instrument
-    from market.quotes import get_quote
-
-    live_broker = get_execution_broker()
-    if live_broker is None:
-        raise RuntimeError("No authenticated broker session available for live execution.")
-
-    # Fall back to sequential execution if adapter does not support basket placement
-    if not hasattr(live_broker, "place_basket_orders"):
-        return [execute_order_intent(oid) for oid in sorted_order_ids]
-
-    # Step 1: Load and pre-validate all orders from ledger in strictly sorted BUY-first sequence
-    loaded_orders: list[dict[str, Any]] = []
-    with _get_orders_db() as conn:
-        conn.row_factory = sqlite3.Row
-        for oid in sorted_order_ids:
-            cursor = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (oid,))
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError(f"Order {oid} not found.")
-            d = dict(row)
-            if d["mode"] != mode_info.mode.name:
-                raise PermissionError(
-                    f"Order {oid} was generated in {d['mode']} mode but execution was attempted in "
-                    f"{mode_info.mode.name} mode."
-                )
-            if d["status"] != "CONFIRMED":
-                raise ValueError(
-                    f"Order {oid} cannot be executed because status is '{d['status']}'."
-                )
-
-            # Preview hash integrity
-            charges_batch = (
-                json.loads(d.get("charges_json") or "{}")
-                if isinstance(d.get("charges_json"), str)
-                else (d.get("charges") or {})
-            )
-            trig_val = charges_batch.get("trigger_price")
-            canonical_str = (
-                f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
-                f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
-                + (f":trig_{float(trig_val):.4f}" if trig_val is not None else "")
-            )
-            expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
-            if d.get("preview_hash") and d["preview_hash"] != expected_hash:
-                raise ValueError(f"Order {oid} preview hash verification failed.")
-
-            # Instrument authority
-            _, canonical_exchange, canonical_segment = _resolve_order_instrument(
-                d["symbol"], d["product"]
-            )
-            if d.get("exchange") != canonical_exchange or d.get("segment") != canonical_segment:
-                raise ValueError(
-                    f"Order {oid} instrument metadata does not match instrument master."
-                )
-
-            loaded_orders.append(d)
-
-    # Step 2: Transition all to SUBMITTING atomically
-    with _get_orders_db() as conn:
-        for d in loaded_orders:
-            cursor = conn.execute(
-                """
-                UPDATE orders_ledger
-                SET status = 'SUBMITTING', updated_at = ?
-                WHERE order_id = ? AND status = 'CONFIRMED' AND mode = ?
-                """,
-                (now_iso, d["order_id"], mode_info.mode.name),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError(f"Order {d['order_id']} transition to SUBMITTING failed.")
-        conn.commit()
-
-    for d in loaded_orders:
-        d["status"] = "SUBMITTING"
-
-    # Step 3: Validate pilot safety & pretrade for each order
-    batch_correlation_id = new_correlation_id("batch_order")
-    _account = getattr(live_broker, "account_id", None) or getattr(live_broker, "client_id", None)
-
-    _funds = live_broker.get_funds()
-    _available_cash = (
-        _funds.available_cash
-        if hasattr(_funds, "available_cash")
-        else float(_funds.get("available_cash", 0.0))
-        if isinstance(_funds, dict)
-        else None
+    raise PermissionError(
+        "Live basket execution is disabled until child-order fill tracking and "
+        "partial-basket recovery are implemented and qualified. Use the reviewed "
+        "single-order flow or SIMULATE mode."
     )
-
-    instruments_to_fetch = [f"{d.get('exchange', 'NSE')}:{d['symbol']}" for d in loaded_orders]
-    quotes_map = get_quote(instruments_to_fetch)
-
-    order_requests: list[OrderRequest] = []
-    validated_orders: list[dict[str, Any]] = []
-
-    for d in loaded_orders:
-        oid = d["order_id"]
-        inst = resolve_canonical_instrument(d["symbol"])
-        _live_exchange = d.get("exchange") or inst.exchange
-        _live_segment = d.get("segment") or inst.segment
-
-        # Pilot safety
-        assert_pilot_execution_allowed(
-            segment=_live_segment,
-            product=d["product"],
-            notional=float(d["price"]) * int(d["quantity"]),
-        )
-
-        inst_key = f"{_live_exchange}:{d['symbol']}"
-        _q = quotes_map.get(inst_key) or quotes_map.get(d["symbol"])
-        if not _q or getattr(_q, "data_state", "UNAVAILABLE") != "LIVE":
-            raise RuntimeError(f"Live execution of {oid} requires fresh LIVE data.")
-        _ltp = getattr(_q, "last_price", None)
-        _quote_age = getattr(_q, "age_seconds", None)
-        if callable(_quote_age):
-            _quote_age = _quote_age()
-
-        _no_chase = None
-        if isinstance(d.get("charges"), dict):
-            _raw_nc = d["charges"].get("no_chase_boundary")
-            if isinstance(_raw_nc, (int, float)) and _raw_nc > 0:
-                _no_chase = float(_raw_nc)
-
-        pretrade = validate_pretrade(
-            symbol=d["symbol"],
-            side=d["side"],
-            quantity=d["quantity"],
-            order_type=d["order_type"],
-            price=d["price"] if d["price"] else None,
-            segment=_live_segment,
-            account=_account,
-            ltp=_ltp,
-            quote_age_seconds=_quote_age,
-            available_cash=_available_cash,
-            trigger_price=d["price"] if d.get("order_type") == "MARKET" else None,
-            no_chase_boundary=_no_chase,
-            correlation_id=batch_correlation_id,
-        )
-        if not pretrade.is_eligible:
-            reasons = "; ".join(pretrade.blocking_reasons)
-            d["status"] = "REJECTED"
-            d["rejection_reason"] = f"Pre-trade validation blocked: {reasons}"
-            with _get_orders_db() as conn:
-                conn.execute(
-                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                    (d["status"], d["rejection_reason"], now_iso, oid),
-                )
-                conn.commit()
-            raise ValueError(f"Pre-trade validation blocked for order {oid}: {reasons}")
-
-        order_requests.append(
-            OrderRequest(
-                symbol=d["symbol"],
-                exchange=_live_exchange,
-                transaction_type=d["side"],
-                order_type=d["order_type"],
-                product=d["product"],
-                quantity=d["quantity"],
-                price=d["price"],
-            )
-        )
-        validated_orders.append(d)
-
-    # Step 4: Dispatch batch to live broker
-    execution_provider = get_execution_broker_key() or live_broker.__class__.__name__.lower()
-    try:
-        batch_responses = live_broker.place_basket_orders(order_requests)
-    except Exception as exc:
-        for d in validated_orders:
-            d["status"] = "UNKNOWN_FREEZE"
-            d["broker_order_id"] = None
-            d["rejection_reason"] = f"Live batch call raised {type(exc).__name__}: {exc}"
-            with _get_orders_db() as conn:
-                conn.execute(
-                    "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                    (
-                        d["status"],
-                        d["broker_order_id"],
-                        d["rejection_reason"],
-                        now_iso,
-                        d["order_id"],
-                    ),
-                )
-                conn.commit()
-            record_audit_event(
-                event_type="ORDER_UNKNOWN_FREEZE",
-                mode=mode_info.mode.name,
-                details={
-                    "order_id": d["order_id"],
-                    "correlation_id": batch_correlation_id,
-                    "exception": str(exc),
-                },
-            )
-        raise RuntimeError(f"Live batch order frozen due to broker exception: {exc}") from exc
-
-    # Step 5: Map batch responses back to each order intent
-    results: list[OrderIntent] = []
-    for idx, d in enumerate(validated_orders):
-        oid = d["order_id"]
-        resp = batch_responses[idx] if idx < len(batch_responses) else None
-        if resp and resp.status in ("COMPLETE", "OPEN", "SUBMITTED"):
-            d["status"] = "OPEN" if resp.status in ("OPEN", "SUBMITTED") else "FILLED"
-            d["broker_order_id"] = resp.order_id
-            d["rejection_reason"] = None
-        elif resp and resp.status == "REJECTED":
-            d["status"] = "REJECTED"
-            d["broker_order_id"] = None
-            d["rejection_reason"] = resp.message or "Rejected by broker basket"
-        else:
-            d["status"] = "UNKNOWN_FREEZE"
-            d["broker_order_id"] = None
-            d["rejection_reason"] = (
-                f"Ambiguous broker basket response: {getattr(resp, 'status', None)}"
-            )
-
-        with _get_orders_db() as conn:
-            conn.execute(
-                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, oid),
-            )
-            conn.commit()
-
-        if d["status"] == "OPEN":
-            try:
-                from market.fyers_tbt_manager import FyersTbtManager
-
-                FyersTbtManager().register_in_flight(d["symbol"])
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}"
-                )
-
-        _record_order_event(
-            oid,
-            "BROKER_RESPONSE" if d["status"] != "UNKNOWN_FREEZE" else "UNKNOWN_FREEZE",
-            correlation_id=batch_correlation_id,
-            broker_name=execution_provider,
-            broker_order_id=d.get("broker_order_id"),
-            payload={"status": d["status"], "reason": d.get("rejection_reason")},
-        )
-
-        results.append(
-            OrderIntent(
-                order_id=d["order_id"],
-                idempotency_key=d["idempotency_key"],
-                symbol=d["symbol"],
-                exchange=d.get("exchange", "NSE"),
-                segment=d.get("segment", "EQUITY_INTRADAY"),
-                side=d["side"],
-                quantity=d["quantity"],
-                price=d["price"],
-                order_type=d["order_type"],
-                product=d["product"],
-                status=d["status"],
-                mode=d["mode"],
-                broker_order_id=d.get("broker_order_id"),
-                charges=json.loads(d.get("charges_json") or "{}"),
-                rejection_reason=d.get("rejection_reason"),
-                preview_hash=d.get("preview_hash"),
-                created_at=d.get("created_at", now_iso),
-                updated_at=now_iso,
-            )
-        )
-
-    return results
 
 
 def modify_order_intent(
@@ -1947,7 +2145,11 @@ def modify_order_intent(
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     with _get_orders_db() as conn:
-        row = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)).fetchone()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE order_id = ? OR broker_order_id = ? LIMIT 1",
+            (order_id, order_id),
+        ).fetchone()
 
     if not row:
         raise ValueError(f"Order intent {order_id} not found in ledger.")
@@ -1958,6 +2160,17 @@ def modify_order_intent(
         raise ValueError(
             f"Cannot modify order {order_id} with non-modifiable status '{current_status}'."
         )
+
+    mod_px = float(new_price if new_price is not None else d.get("price", 0.0))
+    mod_q = int(new_quantity if new_quantity is not None else d.get("quantity", 0))
+    from engine.risk_limits import risk_limits, RiskLimitError
+
+    try:
+        risk_limits.check(
+            symbol=d["symbol"], action=d["side"], quantity=mod_q, price=mod_px, allow_override=False
+        )
+    except RiskLimitError as rle:
+        raise ValueError(f"Order modification violates risk limits: {rle}") from rle
 
     mode_str = d.get("mode", "SIMULATE")
     correlation_id = new_correlation_id("order_modify")
@@ -2195,73 +2408,695 @@ def set_ledger_cash_baseline(account_id: str, opening_cash: float, *, actor: str
         conn.commit()
 
 
-def get_internal_ledger_snapshot(account_id: str) -> Optional[dict[str, Any]]:
-    """Build positions/cash from persisted local fills and an explicit baseline.
+def record_execution_fill(
+    account_id: str,
+    broker_name: str,
+    order_id: str,
+    broker_order_id: str,
+    broker_trade_id: str,
+    symbol: str,
+    exchange: str,
+    segment: str,
+    side: str,
+    quantity: int | float,
+    fill_price: float,
+    fill_time: Optional[str] = None,
+    charges: float = 0.0,
+    product: str = "MIS",
+) -> dict[str, Any]:
+    """Record an immutable execution fill for honest account-scoped reconciliation.
 
-    Returns ``None`` until the user establishes a baseline.  This prevents a
-    brand-new installation from reporting a misleading clean reconciliation.
+    Guarantees:
+    - Rejects invalid/nonfinite prices, negative/fractional quantities, empty identities, or placeholder LIVE_ACCOUNT.
+    - Idempotent retry on identical execution facts.
+    - Authorized fee adjustment when identical facts have updated charges.
+    - Fails visibly on conflicting duplicate retries for the same broker_trade_id.
+    - Serialized atomic sequence allocation per account using explicit BEGIN IMMEDIATE transaction.
     """
+    if not account_id or not account_id.strip():
+        raise ValueError("account_id is required")
+    clean_account = account_id.strip()
+    if clean_account.upper() == "LIVE_ACCOUNT":
+        raise ValueError("account_id cannot be generic placeholder 'LIVE_ACCOUNT'")
+    if not broker_trade_id or not broker_trade_id.strip():
+        raise ValueError("broker_trade_id is required")
+    if not broker_name or not broker_name.strip():
+        raise ValueError("broker_name is required")
+    if not broker_order_id or not broker_order_id.strip():
+        raise ValueError("broker_order_id is required")
+    if not symbol or not symbol.strip():
+        raise ValueError("symbol is required")
+    if not exchange or not exchange.strip():
+        raise ValueError("exchange is required")
+    if not segment or not segment.strip():
+        raise ValueError("segment is required")
+
+    # Strict numeric validation
+    if not isinstance(quantity, (int, float)) or not math.isfinite(quantity) or quantity <= 0:
+        raise ValueError("quantity must be a finite positive number")
+    if not float(quantity).is_integer():
+        raise ValueError("quantity must be an integer, fractional shares are unsupported")
+    int_qty = int(quantity)
+
+    if not isinstance(fill_price, (int, float)) or not math.isfinite(fill_price) or fill_price <= 0:
+        raise ValueError("fill_price must be a finite positive price")
+
+    if not isinstance(charges, (int, float)) or not math.isfinite(charges) or charges < 0:
+        raise ValueError("charges must be a finite non-negative amount")
+
+    clean_broker = broker_name.strip().upper()
+    clean_side = side.upper().strip()
+    if clean_side not in ("BUY", "SELL"):
+        raise ValueError(f"Invalid side: {side}")
+
+    clean_symbol = symbol.upper().strip()
+    clean_exchange = exchange.upper().strip()
+    clean_segment = segment.upper().strip()
+    clean_product = product.upper().strip() if product else "MIS"
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if fill_time:
+        try:
+            # Enforce timezone-aware ISO timestamp
+            dt = datetime.fromisoformat(str(fill_time).replace("Z", "+00:00"))
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                raise ValueError("fill_time must be timezone-aware (ISO8601 with timezone offset)")
+            fill_time_str = dt.isoformat()
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Invalid fill_time format: {fill_time}") from e
+    else:
+        fill_time_str = now_iso
+
+    fill_id = f"fill-{clean_broker}-{clean_account}-{broker_trade_id.strip()}"
+
+    _init_orders_db()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                """
+                SELECT fill_id, account_id, broker_name, exchange, segment, product,
+                       symbol, side, quantity, fill_price, fill_time, broker_order_id,
+                       charges, sequence_num
+                FROM execution_fills
+                WHERE account_id = ? AND broker_name = ? AND broker_trade_id = ?
+                """,
+                (clean_account, clean_broker, broker_trade_id.strip()),
+            ).fetchone()
+
+            if existing:
+                ex_sym = existing["symbol"]
+                ex_broker = existing["broker_name"]
+                ex_exchange = existing["exchange"]
+                ex_segment = existing["segment"]
+                ex_product = existing["product"]
+                ex_side = existing["side"]
+                ex_qty = int(existing["quantity"])
+                ex_price = float(existing["fill_price"])
+                ex_b_order = existing["broker_order_id"]
+                ex_charges = float(existing["charges"] or 0.0)
+                ex_time = existing["fill_time"]
+
+                # Timestamp comparison: parse both as timezone-aware
+                time_matches = False
+                try:
+                    t1 = datetime.fromisoformat(str(ex_time).replace("Z", "+00:00"))
+                    t2 = datetime.fromisoformat(str(fill_time_str).replace("Z", "+00:00"))
+                    time_matches = abs((t1 - t2).total_seconds()) < 1.0
+                except Exception:
+                    time_matches = ex_time == fill_time_str
+
+                immutable_facts_match = (
+                    ex_sym == clean_symbol
+                    and ex_broker == clean_broker
+                    and ex_exchange == clean_exchange
+                    and ex_segment == clean_segment
+                    and ex_product == clean_product
+                    and ex_side == clean_side
+                    and ex_qty == int_qty
+                    and abs(ex_price - float(fill_price)) < 1e-6
+                    and ex_b_order == broker_order_id
+                    and time_matches
+                )
+
+                if immutable_facts_match:
+                    # Fee adjustment check
+                    if abs(ex_charges - float(charges)) > 1e-4:
+                        logger.info(
+                            f"[order_lifecycle] Authorized fee adjustment for {broker_trade_id}: "
+                            f"charges updated from {ex_charges} to {charges}"
+                        )
+                        conn.execute(
+                            "UPDATE execution_fills SET charges = ?, updated_at = ? WHERE fill_id = ?",
+                            (
+                                float(charges),
+                                datetime.now(timezone.utc).isoformat(),
+                                existing["fill_id"],
+                            ),
+                        )
+                        conn.execute("COMMIT")
+                        return {
+                            "fill_id": existing["fill_id"],
+                            "account_id": clean_account,
+                            "broker_trade_id": broker_trade_id.strip(),
+                            "sequence_num": int(existing["sequence_num"]),
+                            "symbol": ex_sym,
+                            "side": ex_side,
+                            "quantity": ex_qty,
+                            "fill_price": ex_price,
+                            "fill_time": fill_time_str,
+                            "charges": float(charges),
+                            "is_idempotent_retry": True,
+                            "is_fee_adjustment": True,
+                        }
+
+                    conn.execute("COMMIT")
+                    return {
+                        "fill_id": existing["fill_id"],
+                        "account_id": clean_account,
+                        "broker_trade_id": broker_trade_id.strip(),
+                        "sequence_num": int(existing["sequence_num"]),
+                        "symbol": ex_sym,
+                        "side": ex_side,
+                        "quantity": ex_qty,
+                        "fill_price": ex_price,
+                        "fill_time": fill_time_str,
+                        "charges": ex_charges,
+                        "is_idempotent_retry": True,
+                        "is_fee_adjustment": False,
+                    }
+                else:
+                    conn.execute("ROLLBACK")
+                    raise ValueError(
+                        f"Conflicting duplicate broker execution retry for {broker_trade_id.strip()}: "
+                        f"existing execution facts ({ex_sym} {ex_side} {ex_qty} @ {ex_price}) "
+                        f"differ from incoming fill ({clean_symbol} {clean_side} {int_qty} @ {fill_price})"
+                    )
+
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_num), 0) + 1 FROM execution_fills WHERE account_id = ?",
+                (clean_account,),
+            ).fetchone()
+            sequence_num = int(seq_row[0]) if seq_row else 1
+
+            conn.execute(
+                """
+                INSERT INTO execution_fills (
+                    fill_id, account_id, broker_name, order_id, broker_order_id,
+                    broker_trade_id, symbol, exchange, segment, product, side, quantity,
+                    fill_price, fill_time, charges, sequence_num, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fill_id,
+                    clean_account,
+                    clean_broker,
+                    order_id,
+                    broker_order_id,
+                    broker_trade_id.strip(),
+                    clean_symbol,
+                    clean_exchange,
+                    clean_segment,
+                    clean_product,
+                    clean_side,
+                    int_qty,
+                    float(fill_price),
+                    fill_time_str,
+                    float(charges),
+                    sequence_num,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception as e_rb:
+                logger.debug(f"[order_lifecycle] Rollback exception suppressed: {e_rb}")
+            raise
+
+    return {
+        "fill_id": fill_id,
+        "account_id": clean_account,
+        "broker_trade_id": broker_trade_id.strip(),
+        "sequence_num": sequence_num,
+        "symbol": clean_symbol,
+        "side": clean_side,
+        "quantity": int_qty,
+        "fill_price": float(fill_price),
+        "fill_time": fill_time_str,
+        "charges": float(charges),
+        "is_idempotent_retry": False,
+        "is_fee_adjustment": False,
+    }
+
+
+def ingest_broker_executions(
+    order_id: str,
+    broker_order_id: str,
+    live_broker: Any,
+    broker_res: Optional[Any] = None,
+    order_details: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Ingest authentic broker execution trade records into execution_fills.
+
+    Sanctity Invariants:
+    1. Rejects fabricated trade IDs (such as TRD-{broker_order_id}).
+    2. Rejects placeholder accounts (such as LIVE_ACCOUNT).
+    3. Rejects preview/requested prices or quantities as fill facts.
+    4. Partial fills are recorded with their distinct authentic trade IDs, quantities, and prices.
+    5. Ingestion failures or charges calculation failures raise visibly to propagate to status.
+    """
+    _init_orders_db()
+    d = dict(order_details) if order_details else {}
+    if not d:
+        with _get_orders_db() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if row:
+                d = dict(row)
+
+    account_id = d.get("account_id")
     if not account_id:
+        account_id = getattr(live_broker, "account_id", None) or getattr(
+            live_broker, "client_id", None
+        )
+        if not account_id and hasattr(live_broker, "get_profile"):
+            try:
+                prof = live_broker.get_profile()
+                account_id = getattr(prof, "client_id", None)
+            except Exception as e_prof:
+                logger.debug(
+                    f"[order_lifecycle] Failed resolving broker profile for account_id: {e_prof}"
+                )
+
+    if (
+        not account_id
+        or not str(account_id).strip()
+        or str(account_id).strip().upper() == "LIVE_ACCOUNT"
+    ):
+        logger.warning(
+            f"[order_lifecycle] Authentic account_id missing or generic placeholder for order {order_id}. "
+            "Execution fill cannot enter institutional ledger."
+        )
+        return []
+
+    clean_account = str(account_id).strip()
+    provider = (
+        str(
+            d.get("broker")
+            or (
+                live_broker.__class__.__name__.replace("Broker", "").upper()
+                if live_broker
+                else "LIVE"
+            )
+        )
+        .upper()
+        .strip()
+    )
+
+    trade_items: list[dict[str, Any]] = []
+
+    # 1. From broker_res object or raw payload
+    if broker_res is not None:
+        if getattr(broker_res, "trades", None) and isinstance(broker_res.trades, list):
+            trade_items.extend(broker_res.trades)
+        elif getattr(broker_res, "executions", None) and isinstance(broker_res.executions, list):
+            trade_items.extend(broker_res.executions)
+        elif getattr(broker_res, "raw", None) and isinstance(broker_res.raw, dict):
+            raw_t = (
+                broker_res.raw.get("trades")
+                or broker_res.raw.get("tradeBook")
+                or broker_res.raw.get("executions")
+            )
+            if isinstance(raw_t, list):
+                trade_items.extend(raw_t)
+
+        # Single trade on broker_res with authentic attributes
+        if not trade_items:
+            t_id = getattr(broker_res, "trade_id", None)
+            avg_p = getattr(broker_res, "average_price", None)
+            fq = getattr(broker_res, "filled_quantity", None)
+            if t_id and avg_p is not None and avg_p > 0 and fq is not None and fq > 0:
+                trade_items.append(
+                    {
+                        "trade_id": str(t_id),
+                        "price": float(avg_p),
+                        "quantity": int(fq),
+                        "fill_time": getattr(broker_res, "fill_time", None)
+                        or datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+
+    # 2. From live broker API methods
+    if not trade_items and live_broker is not None:
+        if hasattr(live_broker, "get_trades"):
+            try:
+                res_trades = live_broker.get_trades(broker_order_id)
+                if isinstance(res_trades, list):
+                    trade_items.extend(res_trades)
+            except Exception as e_gt:
+                logger.debug(f"[order_lifecycle] live_broker.get_trades error: {e_gt}")
+        elif hasattr(live_broker, "get_trade_history"):
+            try:
+                all_trades = live_broker.get_trade_history()
+                if isinstance(all_trades, list):
+                    for tr in all_trades:
+                        b_ord = (
+                            tr.get("orderNumber")
+                            or tr.get("order_id")
+                            or tr.get("ordId")
+                            or tr.get("order_number")
+                        )
+                        if str(b_ord) == str(broker_order_id):
+                            trade_items.append(tr)
+            except Exception as e_th:
+                logger.debug(f"[order_lifecycle] live_broker.get_trade_history error: {e_th}")
+
+    if not trade_items:
+        # Authentic trade facts pending
+        return []
+
+    recorded_fills: list[dict[str, Any]] = []
+    prod = str(d.get("product") or "MIS").upper()
+    resolved_seg = str(
+        d.get("segment") or ("EQUITY_DELIVERY" if prod == "CNC" else "EQUITY_INTRADAY")
+    ).upper()
+
+    try:
+        for item in trade_items:
+            raw_trade_id = (
+                item.get("trade_id")
+                or item.get("tradeNumber")
+                or item.get("id")
+                or item.get("trade_no")
+            )
+            if (
+                not raw_trade_id
+                or str(raw_trade_id).strip() == ""
+                or str(raw_trade_id).startswith("TRD-")
+            ):
+                raise ValueError(
+                    f"Authentic broker trade ID is required; found invalid '{raw_trade_id}'"
+                )
+
+            clean_trade_id = str(raw_trade_id).strip()
+            raw_price = (
+                item.get("price")
+                or item.get("tradedPrice")
+                or item.get("fill_price")
+                or item.get("trade_price")
+            )
+            if raw_price is None or float(raw_price) <= 0:
+                raise ValueError(f"Authentic execution price is required; found '{raw_price}'")
+            f_price = float(raw_price)
+
+            raw_qty = (
+                item.get("quantity")
+                or item.get("tradedQty")
+                or item.get("qty")
+                or item.get("fill_qty")
+            )
+            if raw_qty is None or int(raw_qty) <= 0:
+                raise ValueError(f"Authentic execution quantity is required; found '{raw_qty}'")
+            f_qty = int(raw_qty)
+
+            raw_time = (
+                item.get("fill_time")
+                or item.get("orderDateTime")
+                or item.get("trade_time")
+                or datetime.now(timezone.utc).isoformat()
+            )
+            t_str = str(raw_time)
+            if "Z" not in t_str and "+" not in t_str and "-" not in t_str[10:]:
+                t_str = f"{t_str}+00:00"
+
+            # Calculate charges
+            chg_breakdown = calculate_transaction_charges(
+                price=f_price,
+                quantity=f_qty,
+                segment=resolved_seg,  # type: ignore
+                side=d["side"],  # type: ignore
+            )
+            total_chg = float(chg_breakdown.total_charges)
+
+            res_fill = record_execution_fill(
+                account_id=clean_account,
+                broker_name=provider,
+                order_id=order_id,
+                broker_order_id=broker_order_id,
+                broker_trade_id=clean_trade_id,
+                symbol=d["symbol"],
+                exchange=d.get("exchange", "NSE"),
+                segment=resolved_seg,
+                side=d["side"],
+                quantity=f_qty,
+                fill_price=f_price,
+                fill_time=t_str,
+                charges=total_chg,
+                product=prod,
+            )
+            recorded_fills.append(res_fill)
+
+        with _get_orders_db() as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET ledger_status = 'RECORDED', ledger_error = NULL, updated_at = ? WHERE order_id = ?",
+                (datetime.now(timezone.utc).isoformat(), order_id),
+            )
+            conn.commit()
+    except Exception as e_ingest:
+        logger.error(f"[order_lifecycle] Ingestion failure for order {order_id}: {e_ingest}")
+        with _get_orders_db() as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET ledger_status = 'INGESTION_FAILED', ledger_error = ?, updated_at = ? WHERE order_id = ?",
+                (str(e_ingest), datetime.now(timezone.utc).isoformat(), order_id),
+            )
+            conn.commit()
+        raise
+
+    return recorded_fills
+
+
+def get_internal_ledger_snapshot(account_id: str) -> Optional[dict[str, Any]]:
+    """Return calculated internal ledger snapshot from persisted fills and cash baseline.
+
+    Uses weighted-average inventory accounting across partial closes, increases, full closes,
+    crossing through zero, and reopening. Keyed by (broker, exchange, symbol, product).
+    If cash baseline is missing or unsupported segment detected, fails honestly.
+    """
+    if not account_id or not account_id.strip():
         return None
+
+    clean_account = account_id.strip()
     _init_orders_db()
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         baseline = conn.execute(
-            "SELECT * FROM ledger_cash_baselines WHERE account_id = ?", (account_id,)
+            """
+            SELECT opening_cash, established_at, established_by
+            FROM ledger_cash_baselines
+            WHERE account_id = ?
+            """,
+            (clean_account,),
         ).fetchone()
         if not baseline:
+            logger.warning(
+                "[engine.order_lifecycle] Internal reconciliation unavailable for %s: "
+                "no cash baseline established",
+                clean_account,
+            )
             return None
-        rows = conn.execute(
+
+        opening_cash = float(baseline["opening_cash"])
+        fills = conn.execute(
             """
-            SELECT symbol, side, quantity, price, charges_json
-            FROM orders_ledger
-            WHERE mode = 'EXECUTE' AND status IN ('FILLED', 'PARTIALLY_FILLED')
-            ORDER BY created_at ASC
-            """
+            SELECT fill_id, broker_name, exchange, segment, product, symbol, side,
+                   quantity, fill_price, fill_time, charges, sequence_num
+            FROM execution_fills
+            WHERE account_id = ?
+            ORDER BY sequence_num ASC, fill_time ASC
+            """,
+            (clean_account,),
         ).fetchall()
 
-    positions: dict[str, dict[str, float]] = {}
-    cash = float(baseline["opening_cash"])
-    for row in rows:
-        d = dict(row)
-        symbol = str(d["symbol"]).upper()
-        qty = int(d["quantity"])
-        price = float(d["price"])
-        signed_qty = qty if d["side"] == "BUY" else -qty
-        existing = positions.setdefault(symbol, {"qty": 0.0, "avg_price": 0.0})
-        previous_qty = existing["qty"]
-        if signed_qty > 0:
-            new_qty = previous_qty + signed_qty
-            existing["avg_price"] = (
-                (previous_qty * existing["avg_price"] + signed_qty * price) / new_qty
-                if new_qty > 0
-                else 0.0
-            )
-            existing["qty"] = new_qty
-            cash -= price * qty
-        else:
-            existing["qty"] = previous_qty + signed_qty
-            cash += price * qty
-            if existing["qty"] == 0:
-                existing["avg_price"] = 0.0
-        try:
-            charges = json.loads(d.get("charges_json") or "{}")
-            cash -= float(charges.get("total_charges", charges.get("total", 0.0)) or 0.0)
-        except (TypeError, ValueError, json.JSONDecodeError) as e_suppressed:
-            logger.debug(f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}")
+        if not fills:
+            return {
+                "status": "AVAILABLE",
+                "account_id": clean_account,
+                "opening_cash": opening_cash,
+                "cash_balance": opening_cash,
+                "cash": opening_cash,
+                "total_realized_pnl": 0.0,
+                "total_charges": 0.0,
+                "positions": [],
+                "total_fills_count": 0,
+                "data_quality_status": "AVAILABLE",
+                "is_complete": False,
+                "incompleteness_reason": "Baseline established but zero broker fills have been imported into internal ledger",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+            }
 
-    normalized_positions = [
-        {"symbol": symbol, "qty": int(values["qty"]), "avg_price": round(values["avg_price"], 4)}
-        for symbol, values in positions.items()
-        if values["qty"] != 0
-    ]
-    return {
-        "account_id": account_id,
-        "positions": normalized_positions,
-        "cash": round(cash, 2),
-        "baseline_at": baseline["established_at"],
-        "source": "PERSISTED_ORDER_LEDGER",
-    }
+        # Check unsupported segments (e.g. Futures MTM without daily mark ledger)
+        unsupported_segments = {"FUTURES", "NFO_FUT", "MCX_FUT", "COMMODITY_FUT"}
+        for f in fills:
+            seg = str(f["segment"] or "").upper().strip()
+            if seg in unsupported_segments:
+                logger.error(
+                    f"[engine.order_lifecycle] Unsupported segment {seg} for {f['symbol']}: "
+                    f"Futures MTM/margin accounting cannot be modeled as cash-settled equity/options ledger"
+                )
+                return {
+                    "status": "UNAVAILABLE",
+                    "account_id": clean_account,
+                    "rejection_reason": f"Unsupported segment {seg}: Futures MTM/margin accounting is not supported in cash-settled ledger",
+                    "as_of": datetime.now(timezone.utc).isoformat(),
+                }
+
+        # Position tracking keyed by (broker_name, exchange, symbol, product)
+        positions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        cash_balance = opening_cash
+
+        for f in fills:
+            b_name = str(f["broker_name"] or "UNKNOWN").upper().strip()
+            ex = str(f["exchange"] or "NSE").upper().strip()
+            sym = str(f["symbol"]).upper().strip()
+            prod = str(f["product"] or "MIS").upper().strip()
+            seg = str(f["segment"] or "EQUITY").upper().strip()
+            key = (b_name, ex, sym, prod)
+
+            qty = int(f["quantity"])
+            price = float(f["fill_price"])
+            charges = float(f["charges"] or 0.0)
+            side = str(f["side"]).upper().strip()
+
+            if key not in positions:
+                positions[key] = {
+                    "broker_name": b_name,
+                    "exchange": ex,
+                    "symbol": sym,
+                    "product": prod,
+                    "segment": seg,
+                    "quantity": 0,
+                    "average_cost_basis": 0.0,
+                    "realized_pnl": 0.0,
+                    "total_charges": 0.0,
+                }
+
+            pos = positions[key]
+            pos["total_charges"] += charges
+
+            if side == "BUY":
+                cash_balance -= price * qty + charges
+                cur_qty = pos["quantity"]
+                if cur_qty >= 0:
+                    # Increasing LONG or opening new LONG
+                    new_qty = cur_qty + qty
+                    pos["average_cost_basis"] = (
+                        cur_qty * pos["average_cost_basis"] + qty * price
+                    ) / new_qty
+                    pos["quantity"] = new_qty
+                else:
+                    # Covering existing SHORT
+                    cur_short = abs(cur_qty)
+                    if qty <= cur_short:
+                        # Partial or exact full cover: average cost basis is unchanged
+                        closed_qty = qty
+                        pnl = closed_qty * (pos["average_cost_basis"] - price)
+                        pos["realized_pnl"] += pnl
+                        pos["quantity"] += qty
+                        if pos["quantity"] == 0:
+                            pos["average_cost_basis"] = 0.0
+                    else:
+                        # Crossed through zero from SHORT to LONG
+                        closed_qty = cur_short
+                        pnl = closed_qty * (pos["average_cost_basis"] - price)
+                        pos["realized_pnl"] += pnl
+                        rem_long = qty - cur_short
+                        pos["quantity"] = rem_long
+                        pos["average_cost_basis"] = price
+
+            else:  # SELL
+                cash_balance += price * qty - charges
+                cur_qty = pos["quantity"]
+                if cur_qty <= 0:
+                    # Increasing SHORT or opening new SHORT
+                    cur_short = abs(cur_qty)
+                    new_short = cur_short + qty
+                    pos["average_cost_basis"] = (
+                        cur_short * pos["average_cost_basis"] + qty * price
+                    ) / new_short
+                    pos["quantity"] = -new_short
+                else:
+                    # Closing existing LONG
+                    cur_long = cur_qty
+                    if qty <= cur_long:
+                        # Partial or exact full close: average cost basis is unchanged
+                        closed_qty = qty
+                        pnl = closed_qty * (price - pos["average_cost_basis"])
+                        pos["realized_pnl"] += pnl
+                        pos["quantity"] -= qty
+                        if pos["quantity"] == 0:
+                            pos["average_cost_basis"] = 0.0
+                    else:
+                        # Crossed through zero from LONG to SHORT
+                        closed_qty = cur_long
+                        pnl = closed_qty * (price - pos["average_cost_basis"])
+                        pos["realized_pnl"] += pnl
+                        rem_short = qty - cur_long
+                        pos["quantity"] = -rem_short
+                        pos["average_cost_basis"] = price
+
+        open_positions = []
+        total_realized_pnl = sum(p["realized_pnl"] for p in positions.values())
+        total_charges = sum(p["total_charges"] for p in positions.values())
+
+        for p in positions.values():
+            if p["quantity"] != 0:
+                open_positions.append(
+                    {
+                        "broker_name": p["broker_name"],
+                        "exchange": p["exchange"],
+                        "symbol": p["symbol"],
+                        "product": p["product"],
+                        "segment": p["segment"],
+                        "quantity": p["quantity"],
+                        "side": "LONG" if p["quantity"] > 0 else "SHORT",
+                        "average_cost_basis": round(p["average_cost_basis"], 2),
+                        "average_price": round(p["average_cost_basis"], 2),
+                        "realized_pnl": round(p["realized_pnl"], 2),
+                    }
+                )
+
+        # Data quality status: check if any order for this account suffered ingestion failure
+        data_qual = "AVAILABLE"
+        failed_row = conn.execute(
+            "SELECT 1 FROM orders_ledger WHERE account_id = ? AND ledger_status = 'INGESTION_FAILED' LIMIT 1",
+            (clean_account,),
+        ).fetchone()
+        if failed_row:
+            data_qual = "DEGRADED"
+
+        return {
+            "status": "AVAILABLE",
+            "account_id": clean_account,
+            "opening_cash": opening_cash,
+            "cash_balance": round(cash_balance, 2),
+            "cash": round(cash_balance, 2),
+            "total_realized_pnl": round(total_realized_pnl, 2),
+            "total_charges": round(total_charges, 2),
+            "positions": open_positions,
+            "total_fills_count": len(fills),
+            "data_quality_status": data_qual,
+            "is_complete": True,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 def sync_execution_orders() -> dict[str, Any]:
@@ -2284,18 +3119,28 @@ def sync_execution_orders() -> dict[str, Any]:
     status_map = {
         "COMPLETE": "FILLED",
         "FILLED": "FILLED",
+        "TRADED": "FILLED",
         "OPEN": "OPEN",
+        "PENDING": "OPEN",
+        "TRANSIT": "OPEN",
         "PARTIAL": "PARTIALLY_FILLED",
         "PARTIALLY_FILLED": "PARTIALLY_FILLED",
         "CANCELLED": "CANCELLED",
         "CANCELED": "CANCELLED",
         "REJECTED": "REJECTED",
+        "EXPIRED": "EXPIRED",
+        "1": "CANCELLED",
+        "2": "FILLED",
+        "4": "OPEN",
+        "5": "REJECTED",
+        "6": "OPEN",
+        "7": "EXPIRED",
     }
     events_to_record: list[tuple[str, str, int]] = []
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         known_rows = conn.execute(
-            "SELECT order_id, broker_order_id, status, symbol FROM orders_ledger WHERE broker_order_id IS NOT NULL"
+            "SELECT * FROM orders_ledger WHERE broker_order_id IS NOT NULL"
         ).fetchall()
         known_ids = {str(row["broker_order_id"]) for row in known_rows}
         for row in known_rows:
@@ -2303,10 +3148,40 @@ def sync_execution_orders() -> dict[str, Any]:
             if not broker_order:
                 continue
             new_status = status_map.get(str(getattr(broker_order, "status", "")).upper())
+            b_filled_qty = int(getattr(broker_order, "filled_quantity", 0) or 0)
+            b_avg_price = float(getattr(broker_order, "average_price", 0.0) or 0.0)
+            now_sync_iso = datetime.now(timezone.utc).isoformat()
+
+            # Ingest executions if fills occurred
+            if new_status in ("FILLED", "PARTIALLY_FILLED") or b_filled_qty > 0:
+                try:
+                    ingest_broker_executions(
+                        order_id=str(row["order_id"]),
+                        broker_order_id=str(row["broker_order_id"]),
+                        live_broker=broker,
+                        broker_res=broker_order,
+                        order_details=dict(row),
+                    )
+                except Exception as e_sync_ingest:
+                    logger.error(
+                        f"[order_lifecycle] sync execution ingestion failed for {row['order_id']}: {e_sync_ingest}"
+                    )
+
             if new_status and new_status != row["status"]:
                 conn.execute(
-                    "UPDATE orders_ledger SET status = ?, updated_at = ? WHERE order_id = ?",
-                    (new_status, datetime.now(timezone.utc).isoformat(), row["order_id"]),
+                    """
+                    UPDATE orders_ledger
+                    SET status = ?, filled_quantity = ?, average_fill_price = ?, last_sync_at = ?, updated_at = ?
+                    WHERE order_id = ?
+                    """,
+                    (
+                        new_status,
+                        b_filled_qty,
+                        b_avg_price if b_avg_price > 0 else None,
+                        now_sync_iso,
+                        now_sync_iso,
+                        row["order_id"],
+                    ),
                 )
                 if new_status in ("CANCELLED", "REJECTED", "EXPIRED"):
                     try:
@@ -2407,13 +3282,16 @@ def execute_wing_lock_hedge(
         or getattr(alert, "lot_size", 1)
     )
     side = str(hedge_ticket.get("action", "SELL") if hedge_ticket else "SELL").upper()
-    raw_px = float(
+    cand_px = (
         limit_price
         or (hedge_ticket.get("limit_price") if hedge_ticket else None)
-        or (free_roll.get("estimated_credit_collected") if free_roll else 0.0)
-        or 10.0
+        or (free_roll.get("estimated_credit_collected") if free_roll else None)
     )
-    px = round(max(0.05, raw_px), 2)
+    if cand_px is None or float(cand_px) <= 0.0:
+        raise ValueError(
+            f"Free-roll wing lock requires an authentic limit price or verified ticket credit for '{alert_id}' (cannot invent price)."
+        )
+    px = round(float(cand_px), 2)
     order_type = str(hedge_ticket.get("order_type", "LIMIT") if hedge_ticket else "LIMIT")
 
     # Step 1: Preview Order Intent
@@ -2432,14 +3310,17 @@ def execute_wing_lock_hedge(
     # Step 3: Execute Order Intent
     executed = execute_order_intent(confirmed.order_id)
 
-    # Step 4: Update Alert State & Audit Trail
+    # Step 4: Update Alert State & Audit Trail ONLY if filled
+    is_filled = executed.status in ("FILLED", "FILLED_PAPER")
     if not alert.metrics:
         alert.metrics = {}
-    alert.metrics["free_roll_locked"] = True
+    alert.metrics["free_roll_locked"] = is_filled
 
     if not alert.actionable_plan:
         alert.actionable_plan = {}
-    alert.actionable_plan["free_roll_active"] = True
+    alert.actionable_plan["free_roll_active"] = is_filled
+    if not is_filled:
+        alert.actionable_plan["free_roll_pending_order_id"] = executed.order_id
     alert.actionable_plan["wing_lock_executed"] = True
     alert.actionable_plan["wing_lock_order_id"] = executed.order_id
     alert.actionable_plan["wing_lock_fill_price"] = executed.price or px
@@ -2520,83 +3401,102 @@ def emergency_flatten_all_positions(
     cancelled_orders: list[str] = []
     flattened_positions: list[dict[str, Any]] = []
 
+    if mode == "OBSERVE":
+        raise PermissionError("Emergency financial mutations are unavailable in OBSERVE mode")
+    if mode == "EXECUTE":
+        from engine.modes import assert_live_execution_allowed
+
+        assert_live_execution_allowed()
+    set_emergency_lockout(3600.0)
     broker = None
+    positions_verified = True
     try:
-        broker = get_execution_broker()
+        if mode == "SIMULATE":
+            from engine.paper import PaperBroker
+
+            broker = PaperBroker()
+        else:
+            from brokers.session import get_execution_broker
+
+            broker = get_execution_broker()
     except Exception as e_broker:
         logger.warning(
             f"[EmergencyFlatten] Execution broker unavailable or not logged in: {e_broker}"
         )
+        positions_verified = False
 
-    paper_broker = None
-    try:
-        from engine.paper import PaperBroker
-
-        paper_broker = PaperBroker()
-    except Exception as e_pb:
-        logger.warning(f"[EmergencyFlatten] PaperBroker initialization failed: {e_pb}")
+    if mode == "EXECUTE" and not broker:
+        lockout_until = set_emergency_lockout(3600.0)
+        return {
+            "status": "UNVERIFIED",
+            "mode": mode,
+            "cancelled_orders_count": 0,
+            "cancelled_orders": [],
+            "flattened_positions_count": 0,
+            "flattened_positions": [],
+            "positions_verified": False,
+            "lockout_until": lockout_until,
+            "message": "Emergency flatten failed: No authenticated execution broker session available. Positions unverified.",
+        }
 
     # 1. Annihilate Open Resting Orders
     try:
-        open_orders = broker.get_orders() if hasattr(broker, "get_orders") else []
+        open_orders = broker.get_orders() if (broker and hasattr(broker, "get_orders")) else []
         for o in open_orders:
+            from brokers.order_types import normalize_order_status
+
             status = getattr(o, "status", None) or (
                 o.get("status") if isinstance(o, dict) else None
             )
+            norm_st = normalize_order_status(status)
             oid = (
                 getattr(o, "order_id", None)
                 or (o.get("order_id") if isinstance(o, dict) else None)
                 or getattr(o, "id", None)
             )
-            if oid and status in ("OPEN", "PENDING", "TRIGGER_PENDING", 1, 2, 4, 6):
+            if oid and norm_st in ("OPEN", "SUBMITTED"):
                 try:
-                    broker.cancel_order(str(oid))
-                    cancelled_orders.append(str(oid))
+                    c_res = broker.cancel_order(str(oid))
+                    if c_res is True:
+                        cancelled_orders.append(str(oid))
                 except Exception as e_cancel:
                     logger.warning(
                         f"[EmergencyFlatten] Failed to cancel broker order {oid}: {e_cancel}"
                     )
     except Exception as e_orders:
         logger.warning(f"[EmergencyFlatten] Failed to query broker orders: {e_orders}")
-
-    # Also update any pending orders in internal sqlite ledger
-    try:
-        with _get_orders_db() as conn:
-            conn.execute(
-                "UPDATE orders_ledger SET status = 'CANCELLED' WHERE status IN ('SUBMITTING', 'CONFIRMED', 'OPEN', 'PENDING')"
-            )
-            conn.commit()
-    except Exception as e_ledger:
-        logger.warning(f"[EmergencyFlatten] Failed to update ledger orders: {e_ledger}")
+        positions_verified = False
 
     # 2. Liquidate Positions
-    # Native broker square-off
-    if hasattr(broker, "exit_all_positions"):
+    native_exit_requested = False
+    if broker and hasattr(broker, "exit_all_positions"):
         try:
             res = broker.exit_all_positions(segment=segment)
+            native_exit_requested = True
             flattened_positions.append(
                 {"method": "native_exit_all_positions", "response": str(res)}
             )
         except Exception as e_exit_all:
             logger.warning(f"[EmergencyFlatten] native exit_all_positions failed: {e_exit_all}")
 
-    # PaperBroker square-off
-    p_inst = (
-        broker if (broker and hasattr(broker, "square_off_intraday_positions")) else paper_broker
-    )
-    if p_inst and hasattr(p_inst, "square_off_intraday_positions"):
+    # PaperBroker square-off (SIMULATE mode ONLY)
+    if mode == "SIMULATE" and broker and hasattr(broker, "square_off_intraday_positions"):
         try:
-            closed = p_inst.square_off_intraday_positions()
+            closed = broker.square_off_intraday_positions()
             for sym in closed:
                 flattened_positions.append(
-                    {"symbol": sym, "method": "square_off_intraday_positions"}
+                    {"symbol": sym, "method": "square_off_intraday_positions", "simulated": True}
                 )
         except Exception as e_sq:
             logger.warning(f"[EmergencyFlatten] square_off_intraday_positions failed: {e_sq}")
 
     # Check and close any remaining open net positions via market counter-orders
     try:
-        pos_list = broker.get_positions() if hasattr(broker, "get_positions") else []
+        pos_list = (
+            broker.get_positions()
+            if hasattr(broker, "get_positions") and not native_exit_requested
+            else []
+        )
         for p in pos_list:
             qty = (
                 getattr(p, "net_qty", None)
@@ -2627,7 +3527,14 @@ def emergency_flatten_all_positions(
                         order_type="MARKET",
                         product=prod,
                     )
-                    broker.place_order(req)
+                    response = broker.place_order(req)
+                    if getattr(response, "status", "") not in ("COMPLETE", "FILLED"):
+                        logger.warning(
+                            "[EmergencyFlatten] Close unconfirmed for %s: %s",
+                            sym,
+                            getattr(response, "status", None),
+                        )
+                        continue
                     flattened_positions.append(
                         {
                             "symbol": sym,
@@ -2640,6 +3547,7 @@ def emergency_flatten_all_positions(
                     logger.warning(f"[EmergencyFlatten] Counter-order failed for {sym}: {e_close}")
     except Exception as e_pos:
         logger.warning(f"[EmergencyFlatten] Position liquidation iteration failed: {e_pos}")
+        positions_verified = False
 
     # 3. Activate 60-Minute Circuit Breaker Lockout
     lockout_until = set_emergency_lockout(3600.0)
@@ -2660,16 +3568,17 @@ def emergency_flatten_all_positions(
     )
 
     msg = (
-        f"Emergency Flatten completed: {len(cancelled_orders)} open orders cancelled, "
+        f"Emergency reduction requested; reconcile broker positions: {len(cancelled_orders)} open orders cancelled, "
         f"{len(flattened_positions)} positions liquidated. 60-minute circuit breaker active."
     )
     return {
-        "status": "SUCCESS",
+        "status": "PENDING_RECONCILIATION",
         "mode": mode,
         "cancelled_orders_count": len(cancelled_orders),
         "cancelled_orders": cancelled_orders,
         "flattened_positions_count": len(flattened_positions),
         "flattened_positions": flattened_positions,
+        "positions_verified": positions_verified,
         "lockout_until": lockout_until,
         "message": msg,
     }

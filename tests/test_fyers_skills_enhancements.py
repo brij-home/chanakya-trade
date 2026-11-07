@@ -44,16 +44,14 @@ class TestFyersExpiryParsing:
 
     def test_parse_weekly_q4_full_spectrum(self):
         """Verify October (O), November (N), December (D) weekly options across strikes."""
-        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26O2424000CE") == "2026-10-24"
-        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26N1224000CE") == "2026-11-12"
-        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26D3124000CE") == "2026-12-31"
+        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26O1324000CE") == "2026-10-13"
+        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26N0324000CE") == "2026-11-03"
+        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26D0824000CE") == "2026-12-08"
 
     def test_parse_monthly_options(self):
-        """Monthly options use 3-letter month (e.g. APR, OCT) expiring on the last Thursday."""
-        # April 2026: last Thursday is 2026-04-30
-        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26APR22100CE") == "2026-04-30"
-        # October 2026: last Thursday is 2026-10-29
-        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26OCT24000CE") == "2026-10-29"
+        """Monthly option symbols resolve through the effective-dated expiry calendar."""
+        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26APR22100CE") == "2026-04-28"
+        assert _parse_expiry_from_fyers_symbol("NSE:NIFTY26OCT24000CE") == "2026-10-27"
 
     def test_parse_invalid_symbol(self):
         """Invalid or malformed symbol returns empty string."""
@@ -65,35 +63,33 @@ class TestFyersOptionSymbolBuilder:
     """Test Fyers weekly and monthly option symbol construction."""
 
     def test_build_monthly_options(self):
-        # 30 April 2026 is last Thursday -> APR
-        sym = format_fyers_option_symbol("NIFTY", "2026-04-30", 22100, "CE")
+        # 28 April 2026 is canonical monthly expiry -> APR
+        sym = format_fyers_option_symbol("NIFTY", "2026-04-28", 22100, "CE")
         assert sym == "NSE:NIFTY26APR22100CE"
-        # 29 October 2026 is last Thursday -> OCT
-        sym_oct = format_fyers_option_symbol("NIFTY", "2026-10-29", 24000, "PE")
+        # 27 October 2026 is canonical monthly expiry -> OCT
+        sym_oct = format_fyers_option_symbol("NIFTY", "2026-10-27", 24000, "PE")
         assert sym_oct == "NSE:NIFTY26OCT24000PE"
 
     def test_build_weekly_options(self):
-        # 8 October 2026 is weekly Thursday -> O08
-        sym = format_fyers_option_symbol("NIFTY", "2026-10-08", 24000, "CE")
-        assert sym == "NSE:NIFTY26O0824000CE"
-        # 12 November 2026 is weekly Thursday -> N12
-        sym_nov = format_fyers_option_symbol("NIFTY", "2026-11-12", 24000, "CE")
-        assert sym_nov == "NSE:NIFTY26N1224000CE"
-        # 24 December 2026 is weekly Thursday -> D24
-        sym_dec = format_fyers_option_symbol("NIFTY", "2026-12-24", 24000, "PE")
-        assert sym_dec == "NSE:NIFTY26D2424000PE"
+        # Weekly expiry codes reflect the listed Tuesday series.
+        sym = format_fyers_option_symbol("NIFTY", "2026-10-13", 24000, "CE")
+        assert sym == "NSE:NIFTY26O1324000CE"
+        sym_nov = format_fyers_option_symbol("NIFTY", "2026-11-03", 24000, "CE")
+        assert sym_nov == "NSE:NIFTY26N0324000CE"
+        sym_dec = format_fyers_option_symbol("NIFTY", "2026-12-08", 24000, "PE")
+        assert sym_dec == "NSE:NIFTY26D0824000PE"
         # 7 April 2026 -> 407
         sym_apr = format_fyers_option_symbol("NIFTY", "2026-04-07", 22100, "CE")
         assert sym_apr == "NSE:NIFTY2640722100CE"
 
     def test_build_sensex_options(self):
-        # 9 October 2026 is weekly Friday on BSE -> BSE:SENSEX26O0981500CE
-        sym_bse = format_fyers_option_symbol("SENSEX", "2026-10-09", 81500, "CE")
-        assert sym_bse == "BSE:SENSEX26O0981500CE"
+        # 8 October 2026 is weekly Thursday on BSE.
+        sym_bse = format_fyers_option_symbol("SENSEX", "2026-10-08", 81500, "CE")
+        assert sym_bse == "BSE:SENSEX26O0881500CE"
 
     def test_round_trip_parse_build(self):
         """Builder and parser are mathematically reversible."""
-        original_date = "2026-10-08"
+        original_date = "2026-10-13"
         sym = format_fyers_option_symbol("NIFTY", original_date, 24000, "CE")
         assert _parse_expiry_from_fyers_symbol(sym) == original_date
 

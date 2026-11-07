@@ -60,13 +60,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as e_reconf:
+            logger.debug(f"[MultiAgent] stdout reconfigure failed: {e_reconf}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as e_reconf:
+            logger.debug(f"[MultiAgent] stderr reconfigure failed: {e_reconf}")
 
 from rich.console import Console
 from rich.table import Table
@@ -1085,14 +1085,17 @@ class NewsMacroAnalyst(BaseAnalyst):
                 console.print(
                     f"  [dim cyan]Analyzing news sentiment for {symbol} via LLM...[/dim cyan]"
                 )
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    fut = pool.submit(
-                        self._llm.chat,
+                from engine.llm_deadline import run_with_deadline
+
+                response = run_with_deadline(
+                    lambda: self._llm.chat(
                         messages=[{"role": "user", "content": prompt}],
                         stream=False,
                         enable_tools=False,
-                    )
-                    response = fut.result(timeout=10.0)
+                    ),
+                    timeout=10.0,
+                    label="news-sentiment",
+                )
                 parsed = self._parse_sentiment_response(response)
                 _NEWS_SENTIMENT_CACHE[cache_key] = (now_t, parsed)
                 return parsed
@@ -1625,8 +1628,19 @@ class MultiAgentAnalyzer:
                 if self.progress_callback:
                     self.progress_callback({"type": "synthesis_text", "text": blocked_msg})
                 return blocked_msg
-        except Exception as e_suppressed:
-            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as exc:
+            logger.error(
+                f"[agent.multi_agent] Risk gate evaluation failed for {symbol}: {exc}",
+                exc_info=True,
+            )
+            blocked_msg = (
+                f"[RISK GATE BLOCKED — {symbol}]\n\n"
+                f"Analysis was aborted: Risk gate evaluation failed with error: {exc}.\n"
+                f"No trade recommendation is permitted when risk evaluation cannot complete."
+            )
+            if self.progress_callback:
+                self.progress_callback({"type": "synthesis_text", "text": blocked_msg})
+            return blocked_msg
 
         # ── CLI context prompt (#113) ─────────────────────────
         if getattr(self, "context_prompt_callback", None):
@@ -2022,9 +2036,9 @@ class MultiAgentAnalyzer:
             return target_llm.chat(**kwargs)
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(_do_chat)
-                res = fut.result(timeout=timeout)
+            from engine.llm_deadline import run_with_deadline
+
+            res = run_with_deadline(_do_chat, timeout=timeout, label="multi-agent-chat")
 
             res_str = str(res or "").strip()
             if (

@@ -192,6 +192,10 @@ def detect_pre_inflection_dryup(
             no_chase_boundary=no_chase_limit,
             metrics={
                 "vol_dryup_ratio": round(vol_dryup_ratio, 2),
+                "rvol": round(vol_dryup_ratio, 2),
+                "is_pullback": True,
+                "is_volume_dryup": True,
+                "setup_archetype": "ABSORPTION_DRYUP",
                 "avg_range_pct": round(avg_range_pct, 2),
                 "fair_value": fair_value,
                 "fair_value_source": fv_name,

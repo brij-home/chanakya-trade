@@ -1,3 +1,5 @@
+> **Current safety contract (31 October 2026):** Read `docs/SAFETY_CONTRACTS.md` before any change. It supersedes older weekday, STT, session, synthetic-data and one-lot-floor examples in this document. Live platform order placement also requires owner-controlled `LIVE_EXECUTION_QUALIFIED=1`; do not set it until the documented account-ledger, recovery, protection and broker acceptance criteria are complete. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
+
 # AGENTS.md — ChanakyaTrade Agent Guidelines
 
 > Operational handbook, architectural invariants, and institutional-grade standards for AI agents working in the `chanakya-trade` codebase.
@@ -7,7 +9,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (38 Core Invariants)](#2-safety--trading-guardrails-38-core-invariants)
+- [2. Safety & Trading Guardrails (48 Core Invariants)](#2-safety--trading-guardrails-48-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -16,6 +18,8 @@
 ---
 
 ## 1. Project Overview & Component Map
+
+**Owner focus (updated 1 November 2026):** Prioritize NSE/BSE index options, followed by stock F&O during active derivative sessions. Read `docs/FNO_DESK_ROADMAP.md` for the target policy and implementation checkpoint. `config.discovery_policy` is the discovery-scope authority; the default is `FNO_ONLY`, with explicit `FNO_PRIORITY` and `BALANCED` legacy/research profiles. Strict scope has no test-mode bypass. Preserve lifecycle/exit monitoring for existing exposure, including out-of-scope symbols. Persisted subscriptions with unknown exposure purpose are retained and exposed diagnostically until account-bound subscription purpose/reconciliation is implemented; do not claim complete resource exclusivity or deployment from the profile name. Context cash constituents may inform index/F&O signals without generating a competing cash-trading desk. Do not add providers, LLMs or subscriptions as claimed alpha without held-out evidence.
 
 `ChanakyaTrade` is an institutional-grade **AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence** for Indian Markets (**NSE, BSE, NFO, MCX**).
 
@@ -35,7 +39,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (44 Core Invariants)
+## 2. Safety & Trading Guardrails (48 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -45,10 +49,12 @@
 4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Centralized constants live in [`config/constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py).
 5. **Advisory Risk Friction (Co-Pilot, Not Police)**: When behavioral flags (loss streak ≥3, pyramiding into losers, daily loss cap) trigger, present mindful friction with coaching alternatives and double-confirmation — never hard-block without an escape path.
 6. **Live Execution Pipeline — Fail-Closed Contract** (enforced in [`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
-   - `execute_order_intent()` MUST call `assert_live_execution_allowed()` → pilot safety gate → `validate_pretrade()` → real `get_execution_broker().place_order()` in that order. Any short-circuit is a safety violation.
+   - `execute_order_intent()` MUST pass `assert_live_execution_allowed()` before claiming `SUBMITTING`, then pass the supported-order-shape guard, pilot safety gate, `validate_pretrade()`, and only then call real `get_execution_broker().place_order()`. Denied deployments and unsupported shapes remain `CONFIRMED`; never label an order `SUBMITTING` if no broker request was made.
    - A paper broker exception MUST yield `status=REJECTED` with the real error as `rejection_reason`. It MUST NOT fabricate a `FILLED_PAPER` result.
    - An ambiguous or timed-out live broker response MUST yield `status=UNKNOWN_FREEZE` with `broker_order_id=None`. It MUST NOT fabricate a `LIVE-XXXXXX` ID or set `status=OPEN`.
-   - `TRADING_MODE=EXECUTE` is gated by `ALLOW_LIVE_TRADING=1`. Absent that env var, `execute_order_intent()` raises `PermissionError`.
+   - `TRADING_MODE=EXECUTE` requires `ALLOW_LIVE_TRADING=1` and owner qualification via `LIVE_EXECUTION_QUALIFIED=1`. Do not set qualification until the account-scoped execution ledger, unknown-attempt recovery, fill-driven protection and broker acceptance criteria are complete.
+   - Live basket placement, freeze-limit slicing, and automatic protective GTT entries remain blocked pending durable child-order/fill/protection tracking and restart recovery. Never remove these blocks by weakening tests. Paper-mode sequential behavior remains supported.
+   - Provider-specific Fyers order/GTT/smart/multileg routes and untracked position mutations MUST NOT call broker mutation methods directly. Route supported modifications through an OMS-owned `order_id`; block unsupported shapes. Panic-exit must use the central audited coordinator and report `PENDING_RECONCILIATION` until broker state confirms flatness.
    - **Confirmation Boundary**: A `PREVIEW` is not executable. The client must submit the exact server-generated `preview_hash` to transition it to `CONFIRMED`; only `CONFIRMED → SUBMITTING` is permitted, atomically.
    - **Idempotency Semantics**: Each user order intent has a cryptographically random idempotency key. Reuse a key only to retry the same request; never derive it from order fields or use `INSERT OR REPLACE` on the order ledger.
    - **Instrument Authority**: Exchange and segment are resolved from the canonical instrument master at the server boundary. Client-provided venue/segment overrides must be rejected, not trusted.
@@ -166,11 +172,13 @@
    - Ad-hoc, direct broker calls that place orders without writing to the persisted SQLite ledger (shadow executions) are strictly prohibited. The reconciliation engine must maintain 100% parity across all execution origins.
 
 27. **Detector Degradation Governance, Kelly Circuit Breakers & Scrutiny Conviction Integrity**:
-   - Signal detectors are continuously governed by empirical forward outcomes via `engine.detector_circuit_breaker.py`.
+   - `engine.detector_circuit_breaker.py` may use terminal alert-price paths to detect adverse behavior, but these are not account trades. Alert-price paths MUST NOT establish positive executable edge, a Kelly allocation, or a `HEALTHY` bonus; those require source-qualified, independently reconciled broker fills.
    - When a detector trips `HALTED` (expectancy < -0.60 or $\ge 5$ consecutive losses), it MUST be suppressed from generating new alerts.
    - When a detector is in `PROBATION` (expectancy < 0.0 or Kelly $\le 0$), a mandatory 25% confidence discount (`0.75x`) is applied.
    - **Scrutiny Conviction Integrity Rule**: Downstream AI Scrutiny (Tier-2 LLM or quantitative fallback in `engine/alert_scrutiny.py`) and async enrichment (`_async_enrich_scrutiny`) MUST NEVER erase or bypass this degradation discount. The final confidence MUST incorporate the probation penalty: `target.confidence = max(target.confidence, int(round(scrutiny.score * cb_multiplier)))`.
-   - Forward trade outcomes (target milestones T1/T2, runner exits, and thesis invalidations) MUST immediately feed realized R outcomes into `detector_circuit_breaker.record_outcome(...)`.
+   - Only a terminal observation with an explicit current exit quote and immutable entry/initial-stop anchors may enter the forward-path ledger. Skip untriggered alerts, stale-quote fallbacks, partial-scale outcomes, runners, and missing anchors until their weighted fills are durable. Legacy records with no provenance remain audit-only and MUST NOT calibrate the detector.
+   - Pattern-learning target hits are milestone events, not completed trades. They MUST NOT recalibrate trade-performance weights or be shown as win rate/realized R. Do not seed historical cases or default performance claims; unavailable inputs remain `None` and unverified cases are excluded from matching.
+   - A `VERIFIED_BROKER_FILL` string is not reconciliation evidence: the current writer rejects it until an account-scoped fill-ledger integration exists. Test outcomes cannot calibrate normal application runs. Historical pattern features must never use current option chains, sector rankings or fundamental caches; require as-of evidence. Neutral/unknown and multi-leg payoffs require leg-level evidence and must not default to a long price path.
 
 28. **Hermetic Test Isolation & State Cleanliness for Persistent Singletons**:
    - Any service, singleton, or engine that persists state to disk (such as `detector_circuit_breaker`, `quotes_cache`, `learning_engine`, `trade_memory`) MUST implement a clean `reset_all()` / `clear()` method.
@@ -227,12 +235,12 @@
    - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
 
 37. **SEBI Single-Weekly Index Expiry Mandate (Strictly 2 Weekly Expiries: NIFTY & SENSEX)**:
-   - Under SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
-     - **NSE**: ONLY `NIFTY 50` offers weekly options (Thursday expiry).
-     - **BSE**: ONLY `SENSEX` offers weekly options (Friday expiry).
-     - `BANKNIFTY`, `MIDCPNIFTY`, `FINNIFTY`, `BANKEX`, and single-stock equities offer **strictly MONTHLY** options (last Thursday/Wednesday of the month).
-   - NEVER refer to, simulate, or apply 0DTE logic (afternoon theta cliff, breakeven lock, midday theta trap) on Monday, Tuesday, or Wednesday (unless it is the final monthly settlement day).
-   - Mon–Wed trading sessions have ZERO weekly 0DTE index expiries; options traded on those days are monthly contracts with standard monthly Greeks and wider strike spacing.
+   - Under SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136 and exchange effective-dated schedules (NSE FAOP/68685 / BSE 20250617-11):
+     - **NSE**: ONLY `NIFTY 50` offers weekly options (Tuesday expiry).
+     - **BSE**: ONLY `SENSEX` offers weekly options (Thursday expiry).
+     - `BANKNIFTY`, `MIDCPNIFTY`, `FINNIFTY`, `BANKEX`, and single-stock equities offer **strictly MONTHLY** options (NSE monthly Tuesday / BSE monthly Thursday).
+   - NEVER refer to, simulate, or apply 0DTE logic (afternoon theta cliff, breakeven lock, midday theta trap) on Monday, Wednesday, or Friday (unless it is an effective holiday settlement day).
+   - Trading sessions without active index expiries have ZERO weekly 0DTE index expiries; options traded on those days are monthly contracts with standard monthly Greeks and wider strike spacing.
 
 38. **Universal Dynamic Volatility & Invalidation Calibration (Zero Hardcoded Index Dictionaries & Zero Arbitrary Option Stops)**:
     - **Structural Anchor Priority**: The primary invalidation stop-loss (SL) MUST be anchored to deterministic market structure on the underlying asset chart (SMC Order Block boundary, Fractal Swing Low/High, CPR boundary, or Institutional Writing Wall).
@@ -278,6 +286,33 @@
     - Call Skew Inversion ($\le -1.5$ vol pts) signals panic short covering / call-wing squeeze.
     - $\text{VRP} \ge +4.0$ vol pts dictates theta harvesting / credit spread regimes, while $\text{VRP} \le -2.5$ dictates directional gamma breakout regimes.
 
+45. **Mandatory Temporal Data Freshness & Anti-Stale Bar Mandate**:
+    - All market feeds, caches, warehouse stores, and calculated metrics (VWAP, daily levels, ATR, OHLCV) MUST strictly enforce active-market session freshness.
+    - Active Market Warehouse Freshness: In-market historical warehouse bars (`kite_interval != "day"`) must never lag by more than 1.5 bar intervals (`max(intv_sec * 1.5, 90.0s)`) before evicting and re-fetching live broker bars from Fyers.
+    - Granular In-Memory Caching: High-frequency intraday bars in Tier 1 (`_df_memory_cache`) enforce strict sub-minute TTLs (15s for 1m, 30s for 3m, 45s for 5m, 90s for 15m).
+    - Session VWAP Dynamism: During active trading hours (09:15–15:30 IST), `VwapSessionCache` enforces a reactive TTL of $\le 60\text{s}$, with day-rollover purging. VWAP calculations must synthesize the latest price tick via `include_live_candle=True`.
+    - Detector Temporal Gate: All intraday setup detectors (`index_put_setup`, `index_call_setup`, `gamma_blast`, etc.) must assert that the latest bar timestamp in `active_ohlcv` is within 15 minutes of the current live clock during market hours; any scan with lagging bars must fail closed immediately with `DATA_FEED_STALE`.
+
+46. **Spot-to-Option Delta Parity & Hedged Spread Mandate**:
+    - Option stop loss and risk targets MUST be mathematically derived from the underlying Spot Structural Invalidation Stop Loss via option Delta ($\Delta$):
+      $$\text{Option Risk} = |\text{Spot SL} - \text{Spot}| \times |\Delta|$$
+    - If the required structural Spot SL demands $> 55$ points of risk on Nifty ($> 125$ pts on BankNifty) or if delta-derived option risk exceeds $28\%$ of option premium, a naked option trade is PROHIBITED (`preferred_vehicle = "SPREAD_ONLY"`).
+    - In wide structural stop regimes, the engine MUST mandate a Defined-Risk Hedged Spread (Bear Put Spread for puts, Bull Call Spread for calls). The short OTM leg finances time decay, compresses margin by ~70%, and absorbs normal market breathing without triggering freak wick stop-outs.
+
+47. **Mean-Reversion Directional Boundary Invariant**:
+    - A mean-reversion setup targeting session VWAP MUST enter strictly from the overextended side of VWAP:
+      - A Put Setup targeting mean reversion towards VWAP requires $\text{spot} \ge \text{VWAP} \times 1.0002$.
+      - A Call Setup targeting mean reversion towards VWAP requires $\text{spot} \le \text{VWAP} \times 0.9998$.
+    - Once price has penetrated to the opposite side of VWAP, the mean-reversion setup is complete; entering there is chasing an extended move at the worst possible level (buying puts at the bottom or calls at the top).
+    - Reversals must be caught early ($0.08\% \le \text{retreat} \le 0.35\%$ off the extreme). If price has already retreated $> 0.35\%$ (e.g. $> 80$ pts on Nifty), the entry is late and must be rejected to prevent immediate stop-loss whipsaw.
+
+48. **Fyers Prime Level-3 TBT Pinned Channel Partitioning**:
+    - Fyers Level-3 Tick-by-Tick (TBT) WebSocket supports up to 15 concurrent symbols partitioned strictly across 3 physical channels (max 5 symbols per channel).
+    - The TBT worker (`market/fyers_tbt_manager.py`) must enforce deterministic Slot-to-Channel Pinned Partitioning:
+      - Slots 0..4 $\implies$ Channel 1
+      - Slots 5..9 $\implies$ Channel 2
+      - Slots 10..14 $\implies$ Channel 3
+    - Incremental dynamic subscriptions must NEVER chunk by relative slice index (which overflows Channel 1); they must resolve directly from the global slot index.
 
 ---
 

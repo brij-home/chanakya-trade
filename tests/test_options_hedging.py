@@ -423,30 +423,30 @@ def test_render_spread_milestone_alerts():
 
 def test_get_optimal_expiry_recommendation():
     """Verify optimal expiry selector warns against Wednesday/Thursday post-13:00 IST Theta Cliff."""
-    # Thursday afternoon (0DTE Cliff)
-    thu_pm = datetime(2026, 9, 24, 13, 30, tzinfo=IST)
-    rec_thu_pm = get_optimal_expiry_recommendation("NIFTY", thu_pm)
-    assert rec_thu_pm["preferred_expiry"] == "NEXT_WEEKLY"
-    assert rec_thu_pm["reason"] == "EXPIRY_DAY_AFTERNOON_CLIFF"
-    assert "0DTE THETA CLIFF ACTIVE" in rec_thu_pm["warning"]
+    # Tuesday 29 September is the listed NIFTY monthly expiry (0DTE cliff).
+    expiry_pm = datetime(2026, 9, 29, 13, 30, tzinfo=IST)
+    rec_expiry_pm = get_optimal_expiry_recommendation("NIFTY", expiry_pm)
+    assert rec_expiry_pm["preferred_expiry"] == "NEXT_WEEKLY"
+    assert rec_expiry_pm["reason"] == "EXPIRY_DAY_AFTERNOON_CLIFF"
+    assert "0DTE theta and gamma risk" in rec_expiry_pm["warning"]
 
-    # Thursday morning (Fast scalp viable)
-    thu_am = datetime(2026, 9, 24, 10, 15, tzinfo=IST)
-    rec_thu_am = get_optimal_expiry_recommendation("NIFTY", thu_am)
-    assert rec_thu_am["preferred_expiry"] == "CURRENT_WEEKLY_OR_NEXT"
-    assert rec_thu_am["reason"] == "EXPIRY_DAY_MORNING"
+    # Tuesday morning (Fast scalp viable)
+    expiry_am = datetime(2026, 9, 29, 10, 15, tzinfo=IST)
+    rec_expiry_am = get_optimal_expiry_recommendation("NIFTY", expiry_am)
+    assert rec_expiry_am["preferred_expiry"] == "CURRENT_WEEKLY_OR_NEXT"
+    assert rec_expiry_am["reason"] == "EXPIRY_DAY_MORNING"
 
-    # Wednesday afternoon (Pre-expiry decay)
-    wed_pm = datetime(2026, 9, 23, 14, 0, tzinfo=IST)
-    rec_wed_pm = get_optimal_expiry_recommendation("NIFTY", wed_pm)
-    assert rec_wed_pm["preferred_expiry"] == "NEXT_WEEKLY"
-    assert rec_wed_pm["reason"] == "WEDNESDAY_PRE_EXPIRY"
+    # Monday afternoon immediately before the Tuesday expiry.
+    pre_expiry_pm = datetime(2026, 9, 28, 14, 0, tzinfo=IST)
+    rec_pre_expiry_pm = get_optimal_expiry_recommendation("NIFTY", pre_expiry_pm)
+    assert rec_pre_expiry_pm["preferred_expiry"] == "NEXT_WEEKLY"
+    assert rec_pre_expiry_pm["reason"] == "PRE_EXPIRY_AFTERNOON"
 
-    # Friday late afternoon (Weekend theta hold)
+    # Friday is a normal session with the next Tuesday NIFTY expiry still ahead.
     fri_pm = datetime(2026, 9, 25, 14, 30, tzinfo=IST)
     rec_fri_pm = get_optimal_expiry_recommendation("NIFTY", fri_pm)
     assert rec_fri_pm["preferred_expiry"] == "CURRENT_WEEKLY"
-    assert rec_fri_pm["reason"] == "FRIDAY_WEEKEND_THETA"
+    assert rec_fri_pm["reason"] == "NORMAL_SESSION"
 
     # Monday normal session
     mon_am = datetime(2026, 9, 21, 10, 0, tzinfo=IST)

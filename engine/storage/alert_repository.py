@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 from engine.alert_model import AutoAlert
 
@@ -156,6 +156,36 @@ class AlertRepository:
             except Exception as e:
                 logger.warning(f"[AlertRepository] save error: {e}")
 
+    def save_alert_with_outbox(
+        self,
+        alert: AutoAlert,
+        outbox_entries: list[dict[str, Any]],
+    ) -> tuple[str, list[str]]:
+        """
+        Atomically saves alert and stages outbox delivery intents within a single SQLite transaction.
+        """
+        with self._io_lock:
+            from engine.sqlite_store import alert_sqlite_store
+
+            return alert_sqlite_store.save_alert_with_outbox(alert, outbox_entries)
+
+    def get_latest_outbox_version(self, alert_id: str) -> int:
+        """Returns the highest event_version currently recorded in the outbox for an alert_id."""
+        with self._io_lock:
+            from engine.sqlite_store import alert_sqlite_store
+
+            return alert_sqlite_store.get_latest_outbox_version(alert_id)
+
+    def clear(self) -> None:
+        """Clears SQLite alert store records."""
+        with self._io_lock:
+            try:
+                from engine.sqlite_store import alert_sqlite_store
+
+                alert_sqlite_store.clear()
+            except Exception as e_clear:
+                logger.debug(f"[AlertRepository] clear error: {e_clear}")
+
     def save_single_alert(self, alert: AutoAlert) -> None:
         """
         Microsecond row-level ACID upsert directly into SQLite WAL store.
@@ -272,7 +302,7 @@ class AlertRepository:
                         a.contract_symbol
                         or f"{a.symbol} {getattr(a, 'strike', '') or ''} {getattr(a, 'option_type', '') or ''}".strip()
                     )
-                    a.headline = f"🏁 [REAL/LIVE] RUNNER CLOSED (PROFIT SECURED): {inst_label}"
+                    a.headline = f"🏁 [LIVE] RUNNER CLOSED (PROFIT SECURED): {inst_label}"
                     rehab_count += 1
                     try:
                         from engine.learning_engine import pattern_learning_engine
@@ -738,3 +768,171 @@ class AlertRepository:
 
 # Global singleton instance
 alert_repository = AlertRepository()
+
+
+def get_auto_alerts_outbox_file() -> Path:
+    p = get_auto_alerts_file()
+    return p.parent / "auto_alerts_outbox.json"
+
+
+AUTO_ALERTS_OUTBOX_FILE = get_auto_alerts_outbox_file()
+
+
+class AlertOutbox:
+    """
+    Transactional outbox for durable alert dispatch tracking across channels (Telegram, SSE, Webhook).
+    States: PENDING -> CLAIMED/DISPATCHED -> ACKNOWLEDGED (or FAILED_RETRY / FAILED).
+    Backed by institutional SQLite WAL storage with atomic leasing, identity verification,
+    and ambiguous-send recovery.
+    """
+
+    def __init__(self, target_file_fn=None, sqlite_store: Optional[Any] = None) -> None:
+        self._custom_file_fn = target_file_fn
+        self._io_lock = threading.Lock()
+        if sqlite_store is not None:
+            self._store = sqlite_store
+        elif target_file_fn is not None:
+            from engine.sqlite_store import SQLiteAlertStore
+
+            db_p = Path(target_file_fn()).with_suffix(".db")
+            self._store = SQLiteAlertStore(db_path=db_p)
+        else:
+            from engine.sqlite_store import alert_sqlite_store
+
+            self._store = alert_sqlite_store
+
+    def get_target_file(self) -> Path:
+        if self._custom_file_fn is not None:
+            return Path(self._custom_file_fn())
+        return get_auto_alerts_outbox_file()
+
+    def stage_alert(
+        self,
+        alert_id: str,
+        channel: str,
+        payload: dict[str, Any],
+        max_attempts: int = 3,
+        event_version: int = 1,
+    ) -> str:
+        """Stage an alert for dispatch with PENDING status in the transactional SQLite outbox."""
+        with self._io_lock:
+            outbox_id = self._store.stage_outbox_entry(
+                alert_id=alert_id,
+                channel=channel,
+                payload=payload,
+                max_attempts=max_attempts,
+                event_version=event_version,
+            )
+            self._sync_file_unlocked()
+            return outbox_id
+
+    def claim_pending_entries(
+        self,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        limit: int = 50,
+        channel: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Atomically leases pending or retryable outbox entries to a single worker."""
+        with self._io_lock:
+            claimed = self._store.claim_pending_outbox_entries(
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                limit=limit,
+                channel=channel,
+            )
+            self._sync_file_unlocked()
+            return claimed
+
+    def mark_dispatched(
+        self,
+        outbox_id: str,
+        worker_id: Optional[str] = None,
+        lease_seconds: float = 60.0,
+    ) -> None:
+        """Transition entry from PENDING/CLAIMED to DISPATCHED."""
+        with self._io_lock:
+            self._store.mark_outbox_dispatched(
+                outbox_id=outbox_id,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
+            self._sync_file_unlocked()
+
+    def mark_acknowledged(
+        self,
+        outbox_id: str,
+        worker_id: Optional[str] = None,
+    ) -> None:
+        """Transition entry to ACKNOWLEDGED."""
+        with self._io_lock:
+            self._store.mark_outbox_acknowledged(
+                outbox_id=outbox_id,
+                worker_id=worker_id,
+            )
+            self._sync_file_unlocked()
+
+    def mark_failed(
+        self,
+        outbox_id: str,
+        error: str,
+        worker_id: Optional[str] = None,
+    ) -> None:
+        """Record a dispatch failure with FAILED_RETRY or terminal FAILED."""
+        with self._io_lock:
+            self._store.mark_outbox_failed(
+                outbox_id=outbox_id,
+                error=error,
+                worker_id=worker_id,
+            )
+            self._sync_file_unlocked()
+
+    def get_pending_entries(self, channel: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return entries eligible for dispatch (PENDING or FAILED_RETRY)."""
+        with self._io_lock:
+            return self._store.get_pending_outbox_entries(channel=channel)
+
+    def get_ambiguous_entries(self, older_than_seconds: float = 60.0) -> list[dict[str, Any]]:
+        """Return entries in DISPATCHED state whose lease has expired without ACK."""
+        with self._io_lock:
+            return self._store.get_ambiguous_outbox_entries(older_than_seconds=older_than_seconds)
+
+    def reclaim_ambiguous_entry(
+        self,
+        outbox_id: str,
+        retry: bool = True,
+        error: str = "Ambiguous dispatch timeout without broker/channel ack",
+    ) -> bool:
+        """Safely reconciles an ambiguous dispatch entry."""
+        with self._io_lock:
+            res = self._store.reclaim_ambiguous_entry(outbox_id=outbox_id, retry=retry, error=error)
+            self._sync_file_unlocked()
+            return res
+
+    def archive_completed(self, older_than_days: int = 7) -> int:
+        """Archives completed outbox entries older than specified days."""
+        with self._io_lock:
+            res = self._store.archive_completed_outbox(older_than_days=older_than_days)
+            self._sync_file_unlocked()
+            return res
+
+    def get_entry(self, outbox_id: str) -> Optional[dict[str, Any]]:
+        with self._io_lock:
+            return self._store.get_outbox_entry(outbox_id)
+
+    def _sync_file_unlocked(self) -> None:
+        """Optionally mirrors active outbox state to legacy JSON file for transparency."""
+        try:
+            target_path = self.get_target_file()
+            entries = self._store.get_pending_outbox_entries()
+            data = {e["outbox_id"]: e for e in entries}
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = target_path.with_suffix(f".tmp.{os.getpid()}.{time.time_ns()}")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            tmp_path.replace(target_path)
+        except Exception as e:
+            logger.debug(f"[AlertOutbox] Non-fatal JSON mirror sync error: {e}")
+
+
+alert_outbox = AlertOutbox()

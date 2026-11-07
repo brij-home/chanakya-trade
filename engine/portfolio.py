@@ -21,6 +21,7 @@ logger = logging.getLogger("engine.portfolio")
 
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Optional
 import re
 
@@ -56,6 +57,7 @@ class PositionRow:
     delta: Optional[float] = None
     theta: Optional[float] = None
     vega: Optional[float] = None
+    gamma: Optional[float] = None
     broker: str = ""  # e.g. "zerodha" | "groww" | "mock"
 
 
@@ -293,6 +295,7 @@ def _build_position_rows(
                 delta = g.delta * p.quantity
                 theta = g.theta * p.quantity
                 vega = g.vega * p.quantity
+                gamma = (getattr(g, "gamma", 0.0) or 0.0) * p.quantity
             except Exception as e_suppressed:
                 logger.debug(f"[engine.portfolio] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -307,6 +310,7 @@ def _build_position_rows(
                 delta=round(delta, 4) if delta is not None else None,
                 theta=round(theta, 2) if theta is not None else None,
                 vega=round(vega, 2) if vega is not None else None,
+                gamma=round(gamma, 6) if gamma is not None else None,
                 broker=broker_name,
             )
         )
@@ -319,10 +323,29 @@ def _parse_option_symbol(symbol: str) -> dict | None:
     Format: NIFTY25APR23000CE  or  RELIANCE25APR3200PE
     Returns {underlying, expiry, strike, option_type} or None.
     """
-    # Pattern: letters (underlying) + 2-digit year + 3-letter month + strike + CE/PE
+    # Pattern fallback: letters (underlying) + 2-digit year + 3-letter month + strike + CE/PE
+    from market.instruments import parse_derivative_contract
+
+    parsed_contract = parse_derivative_contract(symbol)
+    if parsed_contract and parsed_contract.expiry_date:
+        try:
+            expiry = datetime.strptime(parsed_contract.expiry_date, "%Y-%m-%d").date()
+            return {
+                "underlying": parsed_contract.underlying,
+                "expiry": expiry.isoformat(),
+                "strike": float(parsed_contract.strike),
+                "option_type": parsed_contract.option_type,
+            }
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "[engine.portfolio] Canonical option expiry parse failed for %s: %s", symbol, exc
+            )
+
+    # Pattern fallback: exchange symbol with month but without a day.
+    raw = symbol.upper().split(":")[-1]
     m = re.match(
         r"^([A-Z]+)(\d{2})([A-Z]{3})(\d+)(CE|PE)$",
-        symbol.upper(),
+        raw,
     )
     if not m:
         return None
@@ -344,10 +367,16 @@ def _parse_option_symbol(symbol: str) -> dict | None:
     mon = month_map.get(mon_str)
     if not mon:
         return None
-    # Use last Thursday of that month as approximate expiry
+    from market.rule_schedule import monthly_expiry
+    from market.calendar import get_adjusted_expiry_date
+
+    exchange = "BSE" if symbol.upper().startswith(("BFO:", "BSE:")) else "NSE"
+    expiry_date = get_adjusted_expiry_date(
+        monthly_expiry(int(f"20{yy}"), int(mon), exchange), "BFO" if exchange == "BSE" else "NFO"
+    )
     return {
         "underlying": underlying,
-        "expiry": f"20{yy}-{mon}-28",  # approximate; real expiry from chain
+        "expiry": expiry_date.isoformat(),
         "strike": float(strike_str),
         "option_type": opt_type,
     }
@@ -400,6 +429,7 @@ def _compute_net_greeks(rows: list[PositionRow]) -> PortfolioGreeks:
                 "delta": r.delta,
                 "theta": r.theta,
                 "vega": r.vega,
+                "gamma": getattr(r, "gamma", None),
                 "underlying": underlying,
                 "broker": r.broker,
             }

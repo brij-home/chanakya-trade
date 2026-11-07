@@ -143,25 +143,22 @@ def test_batch_refresh_quotes_failopen_for_active_inflight_trades():
         assert "NSE:RELIANCE" not in quote_map
 
 
-def test_options_grid_expiry_accuracy_near_month_end():
-    """Verify get_active_index_options_grid accurately includes current month contracts on day 29 before expiry."""
-    # Mock datetime to 2026-10-29 13:30 IST
-    mock_now = datetime(2026, 10, 29, 13, 30)
+def test_options_grid_passes_explicit_reference_time_to_contract_selector(monkeypatch):
+    """The wrapper must use the caller's as-of time for historical contract selection."""
+    from config.constants import IST
 
-    with (
-        patch("market.ws_subscription_manager.datetime") as mock_dt,
-        patch("market.quotes.get_ltp", return_value=81500.0),
-    ):
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+    mock_now = datetime(2026, 10, 29, 13, 30, tzinfo=IST)
+    calls = []
 
-        grid = get_active_index_options_grid(num_strikes_per_side=4)
+    def selector(underlying, *, strikes_per_side, as_of):
+        calls.append((underlying, strikes_per_side, as_of))
+        if underlying == "SENSEX":
+            return ["BSE:SENSEX26OCT81500CE", "BSE:SENSEX26OCT81500PE"]
+        return []
 
-        # Grid must contain BSE SENSEX 26OCT contracts (NOT just 26NOV)
-        sensex_oct_contracts = [c for c in grid if "SENSEX26OCT" in c]
-        assert len(sensex_oct_contracts) > 0, (
-            "Current month 26OCT contracts must be included in options grid!"
-        )
+    monkeypatch.setattr("market.contract_selection.get_subscription_option_grid", selector)
+    grid = get_active_index_options_grid(num_strikes_per_side=4, ref_time=mock_now)
 
-        # Must include the ATM strike (81500 CE)
-        assert any("81500CE" in c for c in sensex_oct_contracts)
+    assert set(grid) == {"BSE:SENSEX26OCT81500CE", "BSE:SENSEX26OCT81500PE"}
+    assert calls
+    assert all(as_of == mock_now for _, _, as_of in calls)

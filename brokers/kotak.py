@@ -40,6 +40,7 @@ import httpx
 from market.instruments import format_strike
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     Funds,
     Holding,
@@ -354,7 +355,8 @@ class KotakNeoAPI(BrokerAPI):
 
     def _save_token(self) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "access_token": self._access_token,
@@ -851,6 +853,9 @@ class KotakNeoAPI(BrokerAPI):
         tok, seg, clean = self._resolve_instrument(f"{order.exchange}:{order.symbol}")
 
         url = f"{self._gw_url}/apim/orders/1.0/orders"
+        if not tok:
+            raise ValueError(f"Unresolved instrument token for Kotak Neo: {order.symbol}")
+
         payload = {
             "exchangeSegment": seg,
             "product": order.product,
@@ -860,6 +865,7 @@ class KotakNeoAPI(BrokerAPI):
             "quantity": order.quantity,
             "validity": order.validity or "DAY",
             "tradingSymbol": clean,
+            "token": str(tok),
             "transactionType": order.transaction_type.upper(),
             "tag": order.tag or "CHANAKYA",
         }
@@ -870,6 +876,10 @@ class KotakNeoAPI(BrokerAPI):
                 if resp.status_code in (200, 201):
                     res = resp.json().get("data", {})
                     order_id = str(res.get("orderId") or res.get("nOrderId") or "")
+                    if not order_id:
+                        raise RuntimeError(
+                            f"Kotak Neo order response missing order ID: {resp.text}"
+                        )
                     return OrderResponse(
                         order_id=order_id, status="OPEN", message="Order placed successfully"
                     )

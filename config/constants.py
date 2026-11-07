@@ -10,6 +10,8 @@ across the codebase (historically defined in 8+ separate files).
 
 from __future__ import annotations
 
+import os
+
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -76,10 +78,10 @@ BANKEX_LOT_SIZE: int = 30
 # ── Session Focus & Workload Prioritization ────────────────────────────────────
 
 #: Default operational focus mode during live trading sessions.
-#: 'FNO_PRIORITY': Dedicate 100% of pipeline & broker API bandwidth to Index & Liquid Stock F&O
-#:                 during live equity hours (09:15 - 15:30 IST); suppress cash circuits/incubations/crypto.
+#: 'FNO_ONLY': Strict domestic F&O discovery; preserve existing-exposure monitoring.
+#: 'FNO_PRIORITY': Legacy session-level prioritization (not a strict scope).
 #: 'BALANCED': Standard multi-asset operation across all segments.
-SESSION_FOCUS_MODE: str = "FNO_PRIORITY"
+SESSION_FOCUS_MODE: str = "FNO_ONLY"
 
 # ── Alert & Analysis TTLs ─────────────────────────────────────────────────────
 
@@ -100,37 +102,68 @@ CHAT_SESSION_MAX_SIZE: int = 50
 
 # ── Broker OAuth Redirect URIs & SEBI Network Binding ─────────────────────────
 
-#: Static IPv4 whitelisted with SEBI brokers (Mirae Asset m.Stock)
-DEFAULT_SEBI_WHITELISTED_IP: str = "103.149.127.88"
+#: Static IPv4 whitelisted with SEBI brokers (configurable via SEBI_WHITELISTED_IP)
+DEFAULT_SEBI_WHITELISTED_IP: str = os.environ.get("SEBI_WHITELISTED_IP", "127.0.0.1")
 
 #: Default FastAPI sidecar port
 DEFAULT_SIDECAR_PORT: int = 8765
 
 DEFAULT_BROKER_CALLBACK_URLS: dict[str, str] = {
     "fyers": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/fyers/callback",
-    "groww": f"http://localhost:{DEFAULT_SIDECAR_PORT}/groww/callback",
-    "upstox": f"http://localhost:{DEFAULT_SIDECAR_PORT}/upstox/callback",
+    "groww": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/groww/callback",
+    "upstox": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/upstox/callback",
     "mstock": f"http://{DEFAULT_SEBI_WHITELISTED_IP}:{DEFAULT_SIDECAR_PORT}/mstock/callback",
     "zerodha": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/zerodha/callback",
 }
 
 
+def validate_callback_url(url: str) -> str:
+    """
+    Validates that OAuth callback redirect URIs are safe:
+    - Loopback hosts (127.0.0.1, localhost, ::1, testserver, testclient) may use HTTP.
+    - All non-loopback addresses MUST use HTTPS.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+
+    is_loopback = host in ("localhost", "127.0.0.1", "::1", "testserver", "testclient")
+    if not is_loopback and host:
+        try:
+            import ipaddress
+
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+
+    if not is_loopback and scheme == "http":
+        raise ValueError(
+            f"Insecure OAuth callback: Non-loopback redirect URI '{url}' must use HTTPS."
+        )
+    return url
+
+
 def get_broker_callback_url(broker_key: str) -> str:
     """
     Returns the authoritative OAuth callback redirect URI for the given broker.
-    Resolves environment variable override (e.g. MSTOCK_REDIRECT_URL) first,
+    Resolves environment variable override (e.g. MSTOCK_REDIRECT_URL, OAUTH_CALLBACK_BASE_URL) first,
     falling back to canonical default.
+    Enforces HTTPS on non-loopback endpoints.
     """
-    import os
-
     k = broker_key.lower().strip()
     env_var = f"{k.upper()}_REDIRECT_URL"
     val = os.environ.get(env_var, "").strip()
-    if val:
-        return val
-    return DEFAULT_BROKER_CALLBACK_URLS.get(
-        k, f"http://localhost:{DEFAULT_SIDECAR_PORT}/{k}/callback"
-    )
+    if not val:
+        base_url = os.environ.get("OAUTH_CALLBACK_BASE_URL", "").strip().rstrip("/")
+        if base_url:
+            val = f"{base_url}/{k}/callback"
+    if not val:
+        val = DEFAULT_BROKER_CALLBACK_URLS.get(
+            k, f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/{k}/callback"
+        )
+    return validate_callback_url(val)
 
 
 # ── Microstructure Risk & Volatility Floors ─────────────────────────────────

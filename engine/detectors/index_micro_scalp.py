@@ -376,6 +376,7 @@ def detect_index_micro_scalp(
             )
 
             # Build AutoAlert
+            now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type="INDEX_MICRO_SCALP",
@@ -383,6 +384,7 @@ def detect_index_micro_scalp(
                 symbol=clean_sym,
                 exchange=opt_exchange,
                 direction=direction,
+                derivative_type="OPTION",
                 is_live=not is_test_runner,
                 environment="TEST" if is_test_runner else "LIVE",
                 market_status="LIVE",
@@ -392,7 +394,10 @@ def detect_index_micro_scalp(
                 trigger_level=trigger_level,
                 target_level=tgt1,
                 stop_loss=sl_level,
+                initial_entry_premium=trigger_level,
+                initial_stop_loss=sl_level,
                 confidence=95,
+                created_at=now_iso,
                 actionable_plan=actionable_blueprint.to_dict(),
                 metrics={
                     "strategy": "INDEX_MICRO_SCALP",

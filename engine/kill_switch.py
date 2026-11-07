@@ -104,9 +104,19 @@ class KillSwitchRegistry:
                     rec = KillSwitchRecord(**record_dict)
                     if rec.active:
                         self._active[rec.ks_id] = rec
-        except Exception:
-            # If state is corrupt, start fresh (fail-safe)
-            self._active = {}
+        except Exception as exc:
+            # If state is corrupt, fail closed with emergency SYSTEM halt (RISK-15)
+            logger.critical(
+                f"[engine.kill_switch] Kill switch state file corrupted: {exc}. Failing closed with emergency SYSTEM halt."
+            )
+            rec = KillSwitchRecord(
+                level=KillSwitchLevel.SYSTEM.value,
+                key="ALL",
+                reason=f"Kill switch state file corruption ({exc}). Emergency halt activated fail-closed.",
+                actor="SYSTEM_INTEGRITY",
+                active=True,
+            )
+            self._active = {rec.ks_id: rec}
 
     def _persist_state(self) -> None:
         """Persist active kill switches to disk."""
@@ -215,17 +225,28 @@ class KillSwitchRegistry:
         Checks hierarchy: SYSTEM → BROKER → ACCOUNT → USER → STRATEGY → SYMBOL
         """
         blocking: list[str] = []
-        now = datetime.now(timezone.utc).isoformat()
-
         with self._lock:
             switches = list(self._active.values())
 
         for ks in switches:
             if not ks.active:
                 continue
-            # Check expiry
-            if ks.expires_at and ks.expires_at < now:
-                continue
+            # Check expiry with timezone-aware ISO parsing (RISK-15)
+            if ks.expires_at:
+                try:
+                    exp_clean = (
+                        ks.expires_at.replace("Z", "+00:00")
+                        if ks.expires_at.endswith("Z")
+                        else ks.expires_at
+                    )
+                    exp_dt = datetime.fromisoformat(exp_clean)
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    if exp_dt < datetime.now(timezone.utc):
+                        continue
+                except Exception as exc:
+                    logger.debug(f"[engine.kill_switch] Non-fatal expiry parse error: {exc}")
+                    # Unparseable expiry fails closed (treated as active)
             level = ks.level
             key = ks.key
 
