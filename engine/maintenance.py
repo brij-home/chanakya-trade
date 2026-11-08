@@ -198,6 +198,30 @@ def run_maintenance_purge(
     except Exception as e:
         logger.warning(f"Error pruning market ticks: {e}")
 
+    # 1b. Tier D: Enforce Parquet tick warehouse retention + compact segments.
+    # Without this the 30-day retention is advisory only and segment directories
+    # would grow without bound (previously reachable via API only).
+    try:
+        from engine.tick_warehouse import get_tick_warehouse
+
+        warehouse = get_tick_warehouse()
+        purged_partitions = warehouse.purge_expired_partitions(
+            retention_days=raw_tick_retention_days
+        )
+        if purged_partitions > 0:
+            actions.append(
+                f"Purged {purged_partitions} expired tick warehouse partitions "
+                f"older than {raw_tick_retention_days} days."
+            )
+            items_deleted += purged_partitions
+        absorbed_segments = warehouse.compact_all_symbols()
+        if absorbed_segments > 0:
+            actions.append(
+                f"Compacted {absorbed_segments} tick warehouse segments into merged generations."
+            )
+    except Exception as e:
+        logger.warning(f"Error maintaining tick warehouse: {e}")
+
     # 2. Tier D: Prune JSON disk cache files
     try:
         from market.disk_cache import prune_disk_cache

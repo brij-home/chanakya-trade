@@ -105,3 +105,25 @@ def test_warehouse_stats(tmp_path):
     assert stats["total_files"] == 2
     assert "5m" in stats["intervals"] or "5minute" in stats["intervals"]
     assert stats["total_size_mb"] >= 0.0
+
+
+def test_save_bars_refuses_to_overwrite_when_read_is_locked(tmp_path, monkeypatch):
+    """A transient read lock must fail closed: history is never overwritten."""
+    import pytest
+
+    monkeypatch.setattr("engine.historical_warehouse.time.sleep", lambda *_: None)
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    original = _create_synthetic_bars(10)
+    assert wh.save_bars("RELIANCE", interval="5minute", df=original) == 10
+
+    def _raise_locked(*args, **kwargs):
+        raise PermissionError(32, "simulated WinError 32 sharing violation")
+
+    monkeypatch.setattr(wh, "_read_parquet_with_retry", _raise_locked)
+    new_bars = _create_synthetic_bars(5, start_dt=datetime(2024, 10, 1, 10, 15))
+    with pytest.raises(PermissionError):
+        wh.save_bars("RELIANCE", interval="5minute", df=new_bars)
+
+    monkeypatch.undo()
+    loaded = wh.load_bars("RELIANCE", interval="5minute")
+    assert len(loaded) == 10  # untouched history

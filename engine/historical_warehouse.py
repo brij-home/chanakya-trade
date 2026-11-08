@@ -23,6 +23,7 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any, Optional
 
 import pandas as pd
@@ -71,6 +72,30 @@ class HistoricalWarehouse:
         folder = self.base_dir / norm_inv
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{clean_sym}.parquet"
+
+    def _read_parquet_with_retry(self, file_path: Path, max_retries: int = 3) -> pd.DataFrame:
+        """Reads a parquet file with retry for Windows sharing violations.
+
+        A transient external lock (antivirus, indexer, another reader) raises
+        PermissionError/OSError on Windows. Those are retried with backoff so a
+        momentary lock never causes the caller to rewrite history. Corruption
+        (ArrowInvalid/ValueError) is raised immediately so the caller can
+        preserve the file instead of destroying it.
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                return pd.read_parquet(file_path)
+            except (PermissionError, OSError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    time.sleep(0.08 * (2**attempt))
+                    continue
+                logger.warning(
+                    f"[HistoricalWarehouse] File locked beyond retry budget: {file_path} ({e})"
+                )
+                raise
+        raise last_error if last_error else RuntimeError("unreachable")
 
     def save_bars(
         self,
@@ -127,38 +152,74 @@ class HistoricalWarehouse:
         file_path = self._get_file_path(symbol, interval)
 
         with _warehouse_lock:
+            existing_df: Optional[pd.DataFrame] = None
             if file_path.exists():
                 try:
-                    existing_df = pd.read_parquet(file_path)
-                    if existing_df.index.tz is not None:
-                        existing_df.index = existing_df.index.tz_convert(
-                            "Asia/Kolkata"
-                        ).tz_localize(None)
-                    if (
-                        norm_inv not in ("day", "1d", "d", "week", "1w", "month", "1mo")
-                        and not existing_df.empty
-                    ):
-                        e_mask = existing_df.index.hour < 9
-                        if e_mask.any():
-                            existing_df.index = existing_df.index.where(
-                                ~e_mask, existing_df.index + pd.Timedelta(hours=5, minutes=30)
-                            )
-                    # Combine existing and new bars, deduplicating on timestamp (preferring new data)
-                    combined = pd.concat([existing_df, norm_df])
-                    combined = combined[~combined.index.duplicated(keep="last")]
-                    combined.sort_index(inplace=True)
-                except Exception as e:
-                    logger.warning(
-                        f"[HistoricalWarehouse] Corrupted parquet read for {symbol}, overwriting: {e}"
+                    existing_df = self._read_parquet_with_retry(file_path)
+                except (PermissionError, OSError) as e_lock:
+                    # Fail closed: never overwrite history because a reader holds
+                    # a transient lock. The caller sees the failure; the file and
+                    # all previously stored bars remain intact.
+                    logger.error(
+                        f"[HistoricalWarehouse] Refusing to rewrite locked parquet for "
+                        f"{symbol}: {e_lock}"
                     )
-                    combined = norm_df[~norm_df.index.duplicated(keep="last")].sort_index()
-            else:
+                    raise
+                except Exception as e_corrupt:
+                    # Genuine corruption: preserve the original for recovery
+                    # instead of silently destroying it.
+                    corrupt_path = file_path.with_name(
+                        f"{file_path.name}.corrupt-{int(time.time())}"
+                    )
+                    try:
+                        file_path.replace(corrupt_path)
+                    except OSError as e_move:
+                        logger.error(
+                            f"[HistoricalWarehouse] Unreadable parquet for {symbol} could not be "
+                            f"preserved ({file_path}): {e_move}"
+                        )
+                        raise
+                    logger.warning(
+                        f"[HistoricalWarehouse] Unreadable parquet for {symbol} preserved as "
+                        f"{corrupt_path.name} before rewrite: {e_corrupt}"
+                    )
+                    existing_df = None
+
+            if existing_df is None:
                 combined = norm_df[~norm_df.index.duplicated(keep="last")].sort_index()
+            else:
+                if existing_df.index.tz is not None:
+                    existing_df.index = existing_df.index.tz_convert("Asia/Kolkata").tz_localize(
+                        None
+                    )
+                if (
+                    norm_inv not in ("day", "1d", "d", "week", "1w", "month", "1mo")
+                    and not existing_df.empty
+                ):
+                    e_mask = existing_df.index.hour < 9
+                    if e_mask.any():
+                        existing_df.index = existing_df.index.where(
+                            ~e_mask, existing_df.index + pd.Timedelta(hours=5, minutes=30)
+                        )
+                # Combine existing and new bars, deduplicating on timestamp (preferring new data)
+                combined = pd.concat([existing_df, norm_df])
+                combined = combined[~combined.index.duplicated(keep="last")]
+                combined.sort_index(inplace=True)
 
             # Atomic write via temp file
             temp_path = file_path.with_suffix(".tmp.parquet")
             combined.to_parquet(temp_path, compression="snappy")
-            temp_path.replace(file_path)
+            for attempt in range(5):
+                try:
+                    temp_path.replace(file_path)
+                    break
+                except (PermissionError, OSError) as e_replace:
+                    if attempt == 4:
+                        logger.error(
+                            f"[HistoricalWarehouse] Atomic replace failed for {file_path}: {e_replace}"
+                        )
+                        raise
+                    time.sleep(0.05 * (2**attempt))
             return len(combined)
 
     def load_bars(

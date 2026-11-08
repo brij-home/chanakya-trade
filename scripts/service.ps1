@@ -111,7 +111,14 @@ function Get-ServiceStatus {
     try {
         $fPort = Get-NetTCPConnection -LocalPort $VitePort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         $fTest = $null
-        try { $fTest = Invoke-WebRequest -Uri "http://localhost:$VitePort" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue } catch {}
+        # Vite binds IPv4 only; probe 127.0.0.1 first and allow a warm-up margin so a
+        # cold Invoke-WebRequest does not report a healthy server as STOPPED.
+        foreach ($probeHost in @("127.0.0.1", "localhost")) {
+            try {
+                $fTest = Invoke-WebRequest -Uri "http://$($probeHost):$VitePort" -UseBasicParsing -TimeoutSec 3 -ErrorAction SilentlyContinue
+                if ($fTest) { break }
+            } catch {}
+        }
         if ($fPort -or ($fTest -and $fTest.StatusCode -lt 500)) {
             $frontendLive = $true
             $fPid = if ($fPort) { $fPort.OwningProcess } else { "Active" }
