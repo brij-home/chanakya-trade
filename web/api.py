@@ -157,10 +157,16 @@ async def _background_cache_warmer():
 
 
 async def _background_maintenance_scheduler():
-    """Background task to run periodic storage maintenance and purge every 6 hours."""
+    """Runs storage maintenance shortly after boot, then every 6 hours.
+
+    The first pass must not wait the full period: with frequent restarts a
+    sleep-first loop would never execute retention or compaction at all.
+    """
+    delay_s = 60.0
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 hours
+            await asyncio.sleep(delay_s)
+            delay_s = 21600.0  # 6 hours between subsequent passes
             from engine.maintenance import run_maintenance_purge
 
             await asyncio.to_thread(run_maintenance_purge)
