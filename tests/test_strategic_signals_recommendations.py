@@ -12,9 +12,23 @@ Deterministic test suite for institutional strategic enhancements:
 
 from datetime import date, datetime, timedelta
 
+from zoneinfo import ZoneInfo
+
 from engine.alert_model import AutoAlert
 from engine.auto_alert_engine import AutoAlertEngine
 from market.calendar import get_trading_days_elapsed, is_trading_holiday
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _created_ago(days: int) -> str:
+    """Timestamp string N days before now, so fixtures never age out.
+
+    The digest applies a swing shelf life measured from created_at. Hardcoded
+    calendar dates silently drift past that window as time passes, which made
+    this test start failing on CI long after it was written.
+    """
+    return (datetime.now(_IST) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S IST")
 
 
 def test_trading_calendar_holiday_and_weekend_skip():
@@ -143,11 +157,13 @@ def test_post_market_digest_and_stagnation_sweep(monkeypatch):
         stop_loss=95.0,
         target_level=110.0,
         time_horizon="SWING_MID",
-        created_at="2026-09-25 09:30:00 IST",
+        created_at=_created_ago(1),
         environment="TEST",
     )
 
-    # 2. Alert stagnant for 4 trading days without hitting T1: Trigger=500, SL=480, T1=540, Close=502
+    # 2. Alert stagnant for >= 4 trading sessions without hitting T1 (7 calendar days
+    # guarantees at least four weekday sessions whatever day the suite runs on):
+    # Trigger=500, SL=480, T1=540, Close=502
     stagnant_alert = AutoAlert(
         alert_id="aa-test-stagnant-20260929",
         alert_type="SQUEEZE_BREAKOUT",
@@ -162,7 +178,7 @@ def test_post_market_digest_and_stagnation_sweep(monkeypatch):
         stop_loss=480.0,
         target_level=540.0,
         time_horizon="SWING_MID",
-        created_at="2026-09-22 09:30:00 IST",
+        created_at=_created_ago(7),
         environment="TEST",
     )
 
@@ -177,6 +193,25 @@ def test_post_market_digest_and_stagnation_sweep(monkeypatch):
         "market.quotes.get_quote", lambda syms: {s: mock_quotes.get(s, {}) for s in syms}
     )
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._save", lambda self: None)
+
+    # This test asserts the EOD mark-to-market sweep only. Step 5 of the digest also
+    # runs the fresh-setup scanners and records their alerts; when a fresh RELIANCE
+    # setup happens to be produced, record_alert retires this fixture's prior-session
+    # alert (stage -> EXPIRED) before the ratchet assertion, which made the test
+    # depend on scanner output and data availability. Isolate the sweep.
+    for _scanner in (
+        "scan_swing_inflections",
+        "scan_precursor_radars",
+        "scan_asymmetric_opportunities",
+        "scan_squeeze_breakouts",
+        "scan_pre_inflection_dryup",
+        "scan_incubation_triggers",
+        "scan_multibagger_compounders",
+    ):
+        monkeypatch.setattr(
+            "engine.auto_alert_engine.AutoAlertEngine." + _scanner,
+            lambda *args, **kwargs: [],
+        )
 
     summary = engine.scan_post_market_digest()
     assert summary["alerts_swept"] == 2
