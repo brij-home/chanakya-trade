@@ -15,6 +15,25 @@ from datetime import date, datetime, timedelta
 from engine.alert_model import AutoAlert
 from engine.auto_alert_engine import AutoAlertEngine
 from market.calendar import get_trading_days_elapsed, is_trading_holiday
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _pinned_datetime(fixed_now):
+    """datetime subclass with now() pinned, every other attribute inherited.
+
+    Post-market digest assertions depend on the current date; pinning the clock
+    keeps them deterministic instead of drifting into TIME_STOP as the calendar
+    advances.
+    """
+
+    class _PinnedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    return _PinnedDateTime
 
 
 def test_trading_calendar_holiday_and_weekend_skip():
@@ -173,6 +192,12 @@ def test_post_market_digest_and_stagnation_sweep(monkeypatch):
         "RELIANCE": {"last_price": 112.0, "close": 112.0},
         "SBIN": {"last_price": 502.0, "close": 502.0},
     }
+    # EOD digest runs for a fixed reference date two trading sessions after the
+    # T1 alert was created (2026-09-25 Fri -> 2026-09-29 Tue).
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        _pinned_datetime(datetime(2026, 9, 29, 16, 0, tzinfo=_IST)),
+    )
     monkeypatch.setattr(
         "market.quotes.get_quote", lambda syms: {s: mock_quotes.get(s, {}) for s in syms}
     )
