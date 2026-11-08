@@ -282,6 +282,7 @@ def test_flush_requeues_ticks_on_write_failure(tmp_path: Path, monkeypatch):
     wh.record_tick(symbol=symbol, ltp=200.0, timestamp_ms=2)
     assert wh.flush() == 0
     assert wh.get_storage_stats()["buffered_in_memory_rows"] == 2
+    assert wh.get_storage_stats()["counters"]["batches_requeued"] == 1
 
     monkeypatch.undo()
     assert wh.flush() == 2
@@ -482,3 +483,15 @@ def test_query_time_filter_uses_pushdown(tmp_path: Path, monkeypatch):
 
     assert list(df["timestamp"]) == [200]
     assert any(f for f in seen_filters), "no parquet filter pushdown was used"
+
+
+def test_storage_stats_expose_operational_counters(tmp_path: Path):
+    """Operational counters must be observable through the public stats API."""
+    wh = TickWarehouse(base_dir=tmp_path, auto_flush_threshold=100)
+    wh.record_tick(symbol="NSE_CTR-EQ", ltp=1.0, timestamp_ms=1)
+    wh.flush()
+
+    counters = wh.get_storage_stats()["counters"]
+    assert counters["segments_written"] == 1
+    assert counters["compaction_runs"] == 0
+    assert counters["batches_requeued"] == 0

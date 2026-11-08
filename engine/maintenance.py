@@ -222,6 +222,18 @@ def run_maintenance_purge(
     except Exception as e:
         logger.warning(f"Error maintaining tick warehouse: {e}")
 
+    # 1c. Tier D: Compact the historical bar warehouse (append-only segments).
+    try:
+        from engine.historical_warehouse import historical_warehouse
+
+        absorbed_bars = historical_warehouse.compact_all()
+        if absorbed_bars > 0:
+            actions.append(
+                f"Compacted {absorbed_bars} historical bar segments into merged datasets."
+            )
+    except Exception as e:
+        logger.warning(f"Error compacting historical warehouse: {e}")
+
     # 2. Tier D: Prune JSON disk cache files
     try:
         from market.disk_cache import prune_disk_cache

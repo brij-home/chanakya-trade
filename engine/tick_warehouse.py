@@ -27,6 +27,10 @@ Concurrency:
   - In-process state is guarded by short, narrowly scoped locks; no lock is held
     across segment I/O for the write path, so one symbol cannot stall another.
 
+Tiering: this is the columnar analytics store. market.tick_store (SQLite) is the
+live streaming archive used by the REPL/API for recent ticks; the two are
+complementary, not duplicates.
+
 Institutional invariants:
   1. Low latency: bounded in-memory buffers spill to compressed columnar chunks.
   2. Resource bounded: 30-day retention plus generation-based compaction.
@@ -41,7 +45,6 @@ import os
 import shutil
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -60,81 +63,8 @@ DEFAULT_WAREHOUSE_DIR = Path("data/warehouse")
 # Segment count per symbol/date that triggers opportunistic compaction.
 _SEGMENT_COMPACT_THRESHOLD = 8
 
-# ── Cross-process lock primitives ─────────────────────────────────────────────
-try:  # Windows
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX
-    msvcrt = None  # type: ignore[assignment]
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-
-
-@contextmanager
-def _file_lock(
-    lock_target: Path,
-    timeout_s: float = 2.0,
-    poll_ms: float = 20.0,
-    raise_on_timeout: bool = True,
-):
-    """Exclusive advisory lock on the persistent sidecar <lock_target>.lock.
-
-    The sidecar is intentionally never deleted. Deleting it would allow a waiter
-    to lock a stale inode while a third process locks a freshly created file,
-    defeating mutual exclusion. Files are 0 bytes and are removed with their date
-    partition by retention.
-
-    Yields:
-        True when the lock is held, or False on timeout if raise_on_timeout is
-        False.
-    """
-    lock_path = lock_target.with_name(lock_target.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0))
-
-    def _try_lock() -> bool:
-        try:
-            if msvcrt is not None:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-
-    def _unlock() -> None:
-        try:
-            if msvcrt is not None:
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        except Exception as e_unlock:
-            logger.debug(
-                f"[engine.tick_warehouse] Lock release note for {lock_path.name}: {e_unlock}"
-            )
-
-    deadline = time.monotonic() + timeout_s
-    acquired = msvcrt is None and fcntl is None  # no primitive: in-process only
-    while not acquired:
-        if _try_lock():
-            acquired = True
-            break
-        if time.monotonic() >= deadline:
-            os.close(fd)
-            if raise_on_timeout:
-                raise TimeoutError(
-                    f"Could not acquire lock {lock_path.name} within {timeout_s:.1f}s"
-                )
-            yield False
-            return
-        time.sleep(poll_ms / 1000.0)
-
-    try:
-        yield True
-    finally:
-        _unlock()
-        os.close(fd)
+# ── Cross-process lock (shared primitive) ────────────────────────────────────
+from engine.file_lock import file_lock as _file_lock  # noqa: E402  (after defaults)
 
 
 # Columnar Arrow Schema
@@ -223,7 +153,24 @@ class TickWarehouse:
         self._buffers: dict[str, list[TickRecord]] = {}
         self._last_flush_time = time.monotonic()
 
+        # Lightweight operational counters surfaced by get_storage_stats().
+        self._counter_lock = threading.Lock()
+        self._counters: dict[str, int] = {
+            "segments_written": 0,
+            "batches_requeued": 0,
+            "rows_requeued": 0,
+            "compaction_runs": 0,
+            "segments_compacted": 0,
+            "compaction_skipped_locked": 0,
+            "compaction_skipped_unreadable": 0,
+        }
+
         self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def _bump(self, name: str, amount: int = 1) -> None:
+        """Increments an operational counter."""
+        with self._counter_lock:
+            self._counters[name] = self._counters.get(name, 0) + amount
 
     # ── Paths ────────────────────────────────────────────────────────────────
     def _get_current_date_partition(self) -> str:
@@ -447,6 +394,7 @@ class TickWarehouse:
                 # ordering and the compaction watermark.
                 target = parts_dir / f"part-{self._next_seq():020d}-p{os.getpid()}.parquet"
                 self._write_table_atomic(table, target)
+                self._bump("segments_written")
                 total_flushed += len(records)
             except Exception as e:
                 # Never drop ticks: return them to the buffer for the next flush.
@@ -455,6 +403,8 @@ class TickWarehouse:
                     f"{len(records)} ticks requeued: {e}",
                     exc_info=True,
                 )
+                self._bump("batches_requeued")
+                self._bump("rows_requeued", len(records))
                 with self._buffer_lock:
                     self._buffers.setdefault(sym, []).extend(records)
 
@@ -526,6 +476,7 @@ class TickWarehouse:
             parts_dir / "compact", timeout_s=lock_timeout_s, raise_on_timeout=False
         ) as got:
             if not got:
+                self._bump("compaction_skipped_locked")
                 logger.warning(
                     f"[engine.tick_warehouse] Compaction skipped for {symbol}: lock busy"
                 )
@@ -557,6 +508,7 @@ class TickWarehouse:
             for part in parts:
                 table = self._read_parquet_with_retry(part)
                 if table is None:
+                    self._bump("compaction_skipped_unreadable")
                     logger.warning(
                         f"[engine.tick_warehouse] Compaction stopped before segment "
                         f"{part.name} (unreadable); it stays visible"
@@ -585,6 +537,8 @@ class TickWarehouse:
                         f"[engine.tick_warehouse] Could not delete merged segment "
                         f"{part.name}: {e_unlink}"
                     )
+            self._bump("compaction_runs")
+            self._bump("segments_compacted", removed)
             if merged_path is not None and merged_path != out_path:
                 try:
                     merged_path.unlink(missing_ok=True)
@@ -743,6 +697,7 @@ class TickWarehouse:
             "buffered_in_memory_rows": buffered_rows,
             "retention_days": self.retention_days,
             "storage_model": "append_only_segments",
+            "counters": dict(self._counters),
         }
 
 
