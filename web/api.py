@@ -5112,29 +5112,50 @@ if os.path.isdir(_static_dir):
         "Expires": "0",
     }
 
+    _vite_probe_at = 0.0
+    _vite_probe_up = False
+    _VITE_PROBE_TTL = 2.0
+
     async def _check_vite_running() -> bool:
-        """Probe if Vite dev server is running on port 5173 with low latency."""
+        """Probe whether Vite is running on 5173, IPv4-first, cached and bounded.
+
+        Vite binds IPv4 only in this project. Probing localhost first can stall on
+        ::1 before falling back, and a per-request probe adds that latency to every
+        request. Cache the answer briefly and bound the whole probe so it can never
+        hang a request.
+        """
+        global _vite_probe_at, _vite_probe_up
+        now = _time.monotonic()
+        if now - _vite_probe_at < _VITE_PROBE_TTL:
+            return _vite_probe_up
+        up = False
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=0.35) as client:
-                for target in ("http://localhost:5173/", "http://127.0.0.1:5173/"):
-                    try:
-                        res = await client.get(target)
-                        if res.status_code == 200:
-                            return True
-                    except Exception:
-                        continue
-            return False
+            async def _probe() -> bool:
+                async with httpx.AsyncClient(timeout=0.35) as client:
+                    for target in ("http://127.0.0.1:5173/", "http://localhost:5173/"):
+                        try:
+                            res = await client.get(target)
+                            if res.status_code == 200:
+                                return True
+                        except Exception:
+                            continue
+                return False
+
+            up = await asyncio.wait_for(_probe(), timeout=0.8)
         except Exception:
-            return False
+            up = False
+        _vite_probe_at = now
+        _vite_probe_up = up
+        return up
 
     @app.get("/app")
     @app.get("/app/{rest_of_path:path}")
     async def serve_spa(request: Request, rest_of_path: str = ""):
         """Serve React SPA for all /app/* routes. In dev mode with Vite active, routes to 5173 for live HMR."""
         if request.query_params.get("static") != "true" and await _check_vite_running():
-            return RedirectResponse("http://localhost:5173/")
+            return RedirectResponse("http://127.0.0.1:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
             return FileResponse(index, headers=_NO_CACHE_HEADERS)
@@ -5145,7 +5166,7 @@ if os.path.isdir(_static_dir):
         """Serve React SPA terminal at root URL /.
         If Vite dev server is active on 5173, seamlessly redirects there for instant Hot Module Replacement."""
         if request.query_params.get("static") != "true" and await _check_vite_running():
-            return RedirectResponse("http://localhost:5173/")
+            return RedirectResponse("http://127.0.0.1:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
             return FileResponse(index, headers=_NO_CACHE_HEADERS)
