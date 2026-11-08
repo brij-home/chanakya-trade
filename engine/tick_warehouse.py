@@ -151,6 +151,9 @@ class TickWarehouse:
         self._last_seq = 0
 
         self._buffers: dict[str, list[TickRecord]] = {}
+        # O(1) threshold checks: summing every symbol buffer on each tick would be
+        # O(subscribed symbols) in the hottest path of the feed.
+        self._buffered_rows = 0
         self._last_flush_time = time.monotonic()
 
         # Lightweight operational counters surfaced by get_storage_stats().
@@ -194,10 +197,16 @@ class TickWarehouse:
         return self._legacy_path(symbol, date_str)
 
     # ── Segment sequencing ───────────────────────────────────────────────────
-    def _next_seq(self) -> int:
-        """Strictly increasing allocation sequence (ns + monotonic guard)."""
+    def _next_seq(self, min_exclusive: int = 0) -> int:
+        """Strictly increasing allocation sequence.
+
+        Guards against in-process reuse and wall-clock rollback. A new segment's
+        sequence must always exceed the generation watermark it will be compared
+        against, otherwise _visible_parts() hides it permanently and its rows are
+        silently never read.
+        """
         with self._seq_lock:
-            seq = max(time.time_ns(), self._last_seq + 1)
+            seq = max(time.time_ns(), self._last_seq + 1, min_exclusive + 1)
             self._last_seq = seq
             return seq
 
@@ -336,7 +345,8 @@ class TickWarehouse:
         should_flush = False
         with self._buffer_lock:
             self._buffers.setdefault(clean_sym, []).append(tick)
-            if sum(len(b) for b in self._buffers.values()) >= self.auto_flush_threshold:
+            self._buffered_rows += 1
+            if self._buffered_rows >= self.auto_flush_threshold:
                 should_flush = True
         if should_flush:
             self.flush()
@@ -349,7 +359,8 @@ class TickWarehouse:
         with self._buffer_lock:
             for t in ticks:
                 self._buffers.setdefault(t.symbol.upper().strip(), []).append(t)
-            if sum(len(b) for b in self._buffers.values()) >= self.auto_flush_threshold:
+            self._buffered_rows += len(ticks)
+            if self._buffered_rows >= self.auto_flush_threshold:
                 should_flush = True
         if should_flush:
             self.flush()
@@ -361,10 +372,12 @@ class TickWarehouse:
             if symbol:
                 clean_sym = symbol.upper().strip()
                 records = self._buffers.pop(clean_sym, [])
+                self._buffered_rows = max(0, self._buffered_rows - len(records))
                 to_flush = {clean_sym: records} if records else {}
             else:
                 to_flush = {s: b for s, b in self._buffers.items() if b}
                 self._buffers.clear()
+                self._buffered_rows = 0
             self._last_flush_time = time.monotonic()
 
         if not to_flush:
@@ -388,11 +401,14 @@ class TickWarehouse:
                         preserve_index=False,
                     )
                 parts_dir = self._symbol_parts_dir(sym, date_str)
+                merged_gen, _ = self._latest_merged(parts_dir)
                 # PID suffix: Windows timer granularity (~15.6 ms) lets two
                 # processes mint the same nanosecond sequence, which would make
                 # one segment overwrite the other. The sequence still drives
-                # ordering and the compaction watermark.
-                target = parts_dir / f"part-{self._next_seq():020d}-p{os.getpid()}.parquet"
+                # ordering and must clear the watermark so a clock rollback can
+                # never park rows behind merged-<gen>.
+                seq = self._next_seq(merged_gen)
+                target = parts_dir / f"part-{seq:020d}-p{os.getpid()}.parquet"
                 self._write_table_atomic(table, target)
                 self._bump("segments_written")
                 total_flushed += len(records)
@@ -407,6 +423,7 @@ class TickWarehouse:
                 self._bump("rows_requeued", len(records))
                 with self._buffer_lock:
                     self._buffers.setdefault(sym, []).extend(records)
+                    self._buffered_rows += len(records)
 
         # Bound segment count: merge once a symbol accumulates enough segments.
         for sym in to_flush:
@@ -685,7 +702,7 @@ class TickWarehouse:
                             segments += 1
 
         with self._buffer_lock:
-            buffered_rows = sum(len(b) for b in self._buffers.values())
+            buffered_rows = self._buffered_rows
 
         return {
             "warehouse_path": str(self.base_dir),

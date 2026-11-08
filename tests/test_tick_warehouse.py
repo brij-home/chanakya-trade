@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 import engine.tick_warehouse as tw
 from engine.tick_warehouse import TickWarehouse
@@ -228,7 +229,7 @@ def test_query_ignores_covered_segments_after_crash(tmp_path: Path):
     max_seq = max(wh._parse_seq(p) for p in parts)
 
     # Simulate the crash window: merged generation exists, covered parts not deleted.
-    combined = pa.concat_tables([tw_pq.read_table(p) for p in parts], promote_options="default")
+    combined = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="default")
     wh._write_table_atomic(combined, parts_dir / f"merged-{max_seq:020d}.parquet")
     assert len(list(parts_dir.glob("part-*.parquet"))) == 3
 
@@ -333,9 +334,6 @@ def test_legacy_single_file_is_still_read_as_base(tmp_path: Path):
     df = wh.query_ticks(symbol)
     assert list(df["timestamp"]) == [1, 2]
     assert legacy.exists()  # legacy base is never modified or deleted
-
-
-tw_pq = __import__("pyarrow.parquet", fromlist=["parquet"])
 
 
 def test_cross_process_concurrent_writes_lose_no_rows(tmp_path: Path):
@@ -495,3 +493,33 @@ def test_storage_stats_expose_operational_counters(tmp_path: Path):
     assert counters["segments_written"] == 1
     assert counters["compaction_runs"] == 0
     assert counters["batches_requeued"] == 0
+
+
+def test_segment_sequence_always_clears_the_watermark(tmp_path: Path):
+    """A wall-clock rollback must never park new rows behind merged-<gen>.
+
+    Readers only see segments with seq > merged generation. If the clock steps
+    backwards, a freshly written segment could sort below the watermark and its
+    rows would silently never be read again.
+    """
+    wh = TickWarehouse(base_dir=tmp_path, auto_flush_threshold=100)
+    symbol = "NSE_ROLLBACK-EQ"
+    date = wh._get_current_date_partition()
+    parts_dir = wh._symbol_parts_dir(symbol, date)
+
+    wh.record_tick(symbol=symbol, ltp=1.0, timestamp_ms=1)
+    wh.flush()
+
+    # Stamp a merged generation far in the future (as if the clock had rolled back).
+    future_gen = 9_999_999_999_999_999_999
+    existing = pq.read_table(sorted(parts_dir.glob("part-*.parquet"))[0])
+    wh._write_table_atomic(existing, parts_dir / f"merged-{future_gen:020d}.parquet")
+
+    wh.record_tick(symbol=symbol, ltp=2.0, timestamp_ms=2)
+    wh.flush()
+
+    newest = max(parts_dir.glob("part-*.parquet"), key=wh._parse_seq)
+    assert wh._parse_seq(newest) > future_gen, "segment sequence did not clear the watermark"
+
+    df = wh.query_ticks(symbol)
+    assert list(df["timestamp"]) == [1, 2], "rows were hidden behind the watermark"

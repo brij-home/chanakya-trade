@@ -183,3 +183,27 @@ def test_legacy_single_file_is_read_as_base(tmp_path):
     loaded = wh.load_bars("SBIN", "5minute")
     assert len(loaded) == 5
     assert legacy.exists()  # legacy base is never modified or deleted
+
+
+def test_bar_segment_sequence_clears_watermark(tmp_path):
+    """A wall-clock rollback must never hide newly written bar segments."""
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    base = datetime(2024, 10, 1, 9, 15)
+
+    wh.save_bars("SBIN", interval="5minute", df=_create_synthetic_bars(3, start_dt=base))
+    dataset = wh._dataset_dir("SBIN", "5minute")
+
+    future_gen = 9_999_999_999_999_999_999
+    merged = pd.concat([pd.read_parquet(p) for p in dataset.glob("part-*.parquet")])
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    wh._write_frame_atomic(merged, dataset / f"merged-{future_gen:020d}.parquet")
+
+    wh.save_bars(
+        "SBIN",
+        interval="5minute",
+        df=_create_synthetic_bars(2, start_dt=datetime(2024, 10, 1, 10, 0)),
+    )
+
+    newest = max(dataset.glob("part-*.parquet"), key=wh._parse_seq)
+    assert wh._parse_seq(newest) > future_gen
+    assert len(wh.load_bars("SBIN", "5minute")) == 5

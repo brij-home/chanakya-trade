@@ -84,6 +84,8 @@ class HistoricalWarehouse:
 
     def __init__(self, base_dir: Optional[Path] = None):
         self.base_dir = base_dir or get_warehouse_dir()
+        self._seq_lock = threading.Lock()
+        self._last_seq = 0
 
     # ── Paths ────────────────────────────────────────────────────────────────
     def _interval_key(self, interval: str) -> str:
@@ -104,8 +106,16 @@ class HistoricalWarehouse:
         return self.base_dir / self._interval_key(interval) / _clean_symbol(symbol)
 
     # ── Segment sequencing ───────────────────────────────────────────────────
-    def _next_seq(self) -> int:
-        return time.time_ns()
+    def _next_seq(self, min_exclusive: int = 0) -> int:
+        """Strictly increasing sequence that always clears the given watermark.
+
+        Readers only see segments with seq > merged generation, so a segment
+        stamped below the watermark (clock rollback) would be invisible forever.
+        """
+        with self._seq_lock:
+            seq = max(time.time_ns(), self._last_seq + 1, min_exclusive + 1)
+            self._last_seq = seq
+            return seq
 
     @staticmethod
     def _parse_seq(path: Path) -> int:
@@ -277,7 +287,9 @@ class HistoricalWarehouse:
             return 0
 
         dataset_dir = self._dataset_dir(symbol, interval)
-        target = dataset_dir / f"part-{self._next_seq():020d}-p{os.getpid()}.parquet"
+        merged_gen, _ = self._latest_merged(dataset_dir)
+        seq = self._next_seq(merged_gen)
+        target = dataset_dir / f"part-{seq:020d}-p{os.getpid()}.parquet"
         self._write_frame_atomic(norm_df, target)
 
         if self._count_segments(symbol, interval) >= _SEGMENT_COMPACT_THRESHOLD:
