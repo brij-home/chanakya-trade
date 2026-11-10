@@ -280,3 +280,36 @@ def test_flattrade_websocket_subscription_batching(monkeypatch):
     assert len(sent_payloads[0]["k"].split("#")) == 25
     assert len(sent_payloads[1]["k"].split("#")) == 25
     assert len(sent_payloads[2]["k"].split("#")) == 10
+
+
+def test_ws_quotes_flattrade_stream_resolution(monkeypatch):
+    """Verify market.quotes._ws_quotes resolves quotes directly from the Flattrade stream."""
+    from market.data_events import MarketDataEvent
+    from market.quotes import _ws_quotes
+    from market.streaming import market_streams
+
+    test_event = MarketDataEvent(
+        canonical_instrument_id="NSE:RELIANCE",
+        provider="flattrade",
+        provider_symbol="RELIANCE",
+        source="STREAM",
+        data_state="LIVE",
+        last_price=2520.50,
+        volume=850000,
+        bid=2520.00,
+        ask=2521.00,
+        atp=2515.00,
+    )
+    market_streams.publish(test_event)
+
+    monkeypatch.setattr("market.quotes.get_data_broker_key", lambda: "flattrade")
+
+    quotes = _ws_quotes(["NSE:RELIANCE"], correlation_id="cid-ft-test")
+    assert "NSE:RELIANCE" in quotes
+    q = quotes["NSE:RELIANCE"]
+    assert q.last_price == 2520.50
+    assert q.volume == 850000
+    assert q.bid == 2520.00
+    assert q.ask == 2521.00
+    assert q.vwap == 2515.00
+    assert getattr(q, "provider", "") == "flattrade"

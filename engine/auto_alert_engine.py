@@ -16045,20 +16045,21 @@ class AutoAlertEngine:
 
         from market.quotes import get_ltp
 
-        # Adaptive Market Dynamics: Query India VIX
-
+        # Adaptive Market Dynamics: Query Governor VIX
         vix_val = 14.0
-
         try:
-            from market.indices import get_vix
+            from engine.market_dynamics_governor import get_market_dynamics_governor
 
-            v_val = get_vix()
+            vix_val = get_market_dynamics_governor()._fetch_live_vix()
+        except Exception:
+            try:
+                from market.indices import get_vix
 
-            if v_val and v_val > 0:
-                vix_val = float(v_val)
-
-        except Exception as e_suppressed:
-            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
+                v_val = get_vix()
+                if v_val and v_val > 0:
+                    vix_val = float(v_val)
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # Low VIX Regime Filter (VIX < 12.5):
 
@@ -16159,8 +16160,22 @@ class AutoAlertEngine:
                                 # Low-VIX filter on intraday squeezes
 
                                 rvol_15m = (alert_15m.metrics or {}).get("rvol", 1.0)
+                                req_rvol = 1.8 if is_low_vix else 1.2
+                                try:
+                                    from engine.market_dynamics_governor import (
+                                        get_market_dynamics_governor,
+                                    )
 
-                                if is_low_vix and (rvol_15m < 1.8 or alert_15m.confidence < 85):
+                                    sq_calib = get_market_dynamics_governor().get_calibration(sym)
+                                    req_rvol = max(req_rvol, sq_calib.min_required_rvol)
+                                except Exception as e_calib:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Squeeze governor calibration notice: {e_calib}"
+                                    )
+
+                                if is_low_vix and (
+                                    rvol_15m < req_rvol or alert_15m.confidence < 85
+                                ):
                                     pass
 
                                 else:
@@ -19752,38 +19767,21 @@ class AutoAlertEngine:
                     elif not is_test_env:
                         return None
 
-                # Compute real TOD-RVOL from volume series or quotes_map
-
+                # Compute unified institutional volume profile
                 rvol_val = 1.0
-
                 if df_5m is not None:
                     try:
-                        vols = df_5m["volume"].values if "volume" in df_5m.columns else None
+                        from engine.daily_levels import compute_institutional_volume_profile
 
-                        if vols is not None and len(vols) >= 3:
-                            cur_v = float(vols[-1])
-
-                            avg_v = float(np.mean(vols[:-1]))
-                            session_rvol = round(cur_v / avg_v, 2) if avg_v > 0 else 1.0
-
-                            # Rolling 5-bar volume avoids morning 09:15 open skew
-                            recent_vols = vols[-6:-1] if len(vols) >= 6 else vols[:-1]
-                            recent_avg = (
-                                float(np.mean(recent_vols)) if len(recent_vols) > 0 else 0.0
-                            )
-                            rolling_rvol = round(cur_v / recent_avg, 2) if recent_avg > 0 else 1.0
-
-                            rvol_val = max(session_rvol, rolling_rvol)
-
+                        prof = compute_institutional_volume_profile(df_5m)
+                        rvol_val = prof.hybrid_rvol
                     except Exception as e_suppressed:
                         logger.debug(
                             f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
                         )
-
                 else:
                     try:
                         from engine.detectors.intraday_spark import get_cached_avg_volume_20
-
                         from engine.auto_alert_engine import compute_time_of_day_rvol
 
                         q_sym = (
@@ -19792,14 +19790,10 @@ class AutoAlertEngine:
                             if quotes_map
                             else None
                         )
-
                         vol_now = int(getattr(q_sym, "volume", 0) or 0) if q_sym else 0
-
                         avg_vol_20 = get_cached_avg_volume_20(clean_sym_norm)
-
                         if vol_now > 0 and avg_vol_20 > 0:
                             rvol_val = compute_time_of_day_rvol(vol_now, avg_vol_20, ref_dt=now_ist)
-
                     except Exception as e_rvol:
                         logger.debug(
                             f"[AutoAlertEngine] ORB TOD-RVOL compute error for {sym}: {e_rvol}"

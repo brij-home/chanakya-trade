@@ -282,7 +282,15 @@ class MarketDynamicsGovernor:
         # ── 4. Parameter Formulations ─────────────────────────────────────────
 
         # Base RVOL Hurdle
-        if phase == "OPENING_AUCTION_DISCOVERY":
+        strat_upper = strategy.upper()
+        if strat_upper == "ORB":
+            if phase in ("OPENING_AUCTION_DISCOVERY", "MORNING_INSTITUTIONAL_EXPANSION"):
+                base_rvol = 1.30 if tier == "INDEX" else 1.45
+            elif phase == "MIDDAY_MEAN_REVERSION_CHOP":
+                base_rvol = 2.0  # Midday chop requires higher institutional confirmation
+            else:
+                base_rvol = 1.5
+        elif phase == "OPENING_AUCTION_DISCOVERY":
             base_rvol = 2.5
         elif phase == "MORNING_INSTITUTIONAL_EXPANSION":
             base_rvol = 1.8
@@ -296,7 +304,9 @@ class MarketDynamicsGovernor:
             base_rvol = 2.0
 
         # Adjust RVOL for Tier and CPR
-        if tier == "INDEX":
+        if strat_upper == "ORB":
+            min_rvol = base_rvol
+        elif tier == "INDEX":
             min_rvol = base_rvol
         elif tier == "LIQUID_STOCK_LEADER":
             min_rvol = base_rvol * 1.05
@@ -340,7 +350,35 @@ class MarketDynamicsGovernor:
 
         # ── 5. Vehicle & Mandate Selection ────────────────────────────────────
 
-        if phase == "SESSION_MOC_HARDBOARD_CUTOFF" or phase.startswith("OFF_MARKET"):
+        if delivery_quarantine:
+            mandate = "POUNCE_MOMENTUM"
+            is_breakout_allowed = True
+            is_mean_rev_favored = False
+            preferred_vehicle = "FUTURES_OR_FAR_MONTH"  # Physical delivery quarantine
+            rationale = "SEBI Expiry Week Quarantine: single-stock options frozen to eliminate physical settlement delivery risk."
+        elif vol_regime == "LOW_VIX":
+            mandate = (
+                "POUNCE_MOMENTUM"
+                if phase in ("MORNING_INSTITUTIONAL_EXPANSION", "AFTERNOON_TREND_IGNITION")
+                else "STALK_PRESERVE_CAPITAL"
+            )
+            is_breakout_allowed = True
+            is_mean_rev_favored = False
+            preferred_vehicle = (
+                "DEBIT_SPREAD"  # Low VIX mandatory debit spreads to combat theta drag
+            )
+            rationale = (
+                "Low VIX (<12.0): defined-risk debit spreads mandatory to neutralize theta burden."
+            )
+        elif vol_regime == "CRISIS_VIX":
+            mandate = "POUNCE_MOMENTUM"
+            is_breakout_allowed = True
+            is_mean_rev_favored = False
+            preferred_vehicle = "DEEP_ITM_OR_FUTURES"
+            rationale = (
+                "Crisis VIX (>22.0): deep ITM or futures recommended to limit Vega collapse."
+            )
+        elif phase == "SESSION_MOC_HARDBOARD_CUTOFF" or phase.startswith("OFF_MARKET"):
             mandate = "SUPPRESS_NEW_ENTRIES"
             is_breakout_allowed = False
             is_mean_rev_favored = False
@@ -360,32 +398,6 @@ class MarketDynamicsGovernor:
             is_mean_rev_favored = True
             preferred_vehicle = "DEBIT_SPREAD"
             rationale = "Midday lull + Wide CPR: breakout trap probability >80%; capital preservation active."
-        elif vol_regime == "LOW_VIX":
-            mandate = (
-                "POUNCE_MOMENTUM"
-                if phase in ("MORNING_INSTITUTIONAL_EXPANSION", "AFTERNOON_TREND_IGNITION")
-                else "STALK_PRESERVE_CAPITAL"
-            )
-            is_breakout_allowed = True
-            is_mean_rev_favored = False
-            preferred_vehicle = (
-                "DEBIT_SPREAD"  # Low VIX mandatory debit spreads to combat theta drag
-            )
-            rationale = (
-                "Low VIX (<12.0): defined-risk debit spreads mandatory to neutralize theta burden."
-            )
-        elif delivery_quarantine:
-            mandate = "POUNCE_MOMENTUM"
-            is_breakout_allowed = True
-            is_mean_rev_favored = False
-            preferred_vehicle = "FUTURES_ONLY"  # Physical delivery quarantine
-            rationale = "SEBI Expiry Week Quarantine: single-stock options frozen to eliminate physical settlement delivery risk."
-        elif vol_regime == "CRISIS_VIX":
-            mandate = "POUNCE_MOMENTUM"
-            is_breakout_allowed = True
-            is_mean_rev_favored = False
-            preferred_vehicle = "DEBIT_SPREAD"
-            rationale = "Crisis VIX (>22.0): violent swings; defined-risk spreads mandatory with 50% lot size."
         else:
             mandate = "POUNCE_MOMENTUM"
             is_breakout_allowed = True

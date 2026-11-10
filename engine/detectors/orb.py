@@ -187,24 +187,56 @@ def detect_opening_range_breakout(
         "BANKEX",
     )
 
-    # 4. Evaluate Breakout Direction
+    # 4. Evaluate Breakout Direction with Context-Adaptive Market Dynamics Governor
     is_bullish = False
     is_bearish = False
 
+    # Dynamic Calibration from Governor
+    min_rvol = 1.30 if is_index else 1.45
     no_chase_buffer = round(0.35 * orb_range, 2)
+    is_breakout_allowed = True
+    try:
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        calib = get_market_dynamics_governor().get_calibration(
+            symbol, strategy="ORB", as_of_time=now_dt
+        )
+        min_rvol = calib.min_required_rvol
+        is_breakout_allowed = calib.is_breakout_allowed if not ignore_time_gate else True
+    except Exception as e_calib:
+        logger.debug(f"[ORB] Market Dynamics Governor calibration fallback for {symbol}: {e_calib}")
+
     max_bull_chase = round(orb_high + no_chase_buffer, 2)
     max_bear_chase = round(orb_low - no_chase_buffer, 2)
 
-    min_rvol = 1.30 if is_index else 1.45
+    vol_confirmed = None
     if rvol is not None:
         rvol_val = float(rvol)
+        vol_confirmed = rvol_val >= min_rvol
     elif df is not None and len(df) >= 3:
-        from engine.daily_levels import calculate_intraday_rvol
+        try:
+            from engine.daily_levels import compute_institutional_volume_profile
 
-        rvol_val = calculate_intraday_rvol(df)
+            dir_hint = (
+                "BULLISH" if ltp >= orb_high else ("BEARISH" if ltp <= orb_low else "NEUTRAL")
+            )
+            prof = compute_institutional_volume_profile(
+                df, required_rvol=min_rvol, direction=dir_hint
+            )
+            rvol_val = prof.hybrid_rvol
+            vol_confirmed = prof.volume_surge_confirmed
+        except Exception:
+            from engine.daily_levels import calculate_intraday_rvol
+
+            rvol_val = calculate_intraday_rvol(df)
+            vol_confirmed = rvol_val >= min_rvol
     else:
         # Zero hallucination invariant: Missing volume must NOT assume 1.5x expansion (Rule 10 & 11)
         rvol_val = 1.0
+        vol_confirmed = False
+
+    if vol_confirmed is None:
+        vol_confirmed = rvol_val >= min_rvol
 
     # Institutional Rolling 5-bar volume check: Prevent opening 09:15 spike from suppressing midday breakouts
     if df is not None and len(df) >= 3:
@@ -233,7 +265,10 @@ def detect_opening_range_breakout(
         elif ltp > max_bull_chase:
             # Extended past no-chase boundary
             is_bullish = False
-        elif rvol_val < min_rvol:
+        elif not is_breakout_allowed and not vol_confirmed:
+            # Midday chop or MOC freeze suppresses unconfirmed breakouts
+            is_bullish = False
+        elif rvol_val < min_rvol and not vol_confirmed:
             # Insufficient volume expansion
             is_bullish = False
         else:
@@ -246,7 +281,9 @@ def detect_opening_range_breakout(
         elif ltp < max_bear_chase:
             # Extended past short no-chase boundary
             is_bearish = False
-        elif rvol_val < min_rvol:
+        elif not is_breakout_allowed and not vol_confirmed:
+            is_bearish = False
+        elif rvol_val < min_rvol and not vol_confirmed:
             is_bearish = False
         else:
             is_bearish = True

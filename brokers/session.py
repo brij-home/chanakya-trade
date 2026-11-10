@@ -1227,9 +1227,33 @@ def _start_websocket(broker: BrokerAPI) -> None:
                     event = normalize_flattrade_tick(raw)
                     if event and event.last_price > 0:
                         from market.streaming import market_streams
+                        from market.websocket import Tick, ws_manager
 
                         market_streams.publish(event)
                         get_market_matrix().on_tick(event)
+
+                        clean_sym = (
+                            event.canonical_instrument_id.split(":")[-1].split("-")[0].strip()
+                        )
+                        c_tick = Tick(
+                            symbol=event.canonical_instrument_id,
+                            ltp=event.last_price,
+                            open=getattr(event, "open", None) or event.last_price,
+                            high=getattr(event, "high", None) or event.last_price,
+                            low=getattr(event, "low", None) or event.last_price,
+                            close=getattr(event, "close", None) or event.last_price,
+                            volume=int(event.volume or 0),
+                            change=0.0,
+                            change_pct=0.0,
+                            timestamp=time.time(),
+                            bid=event.bid or 0.0,
+                            ask=event.ask or 0.0,
+                        )
+                        with ws_manager._lock:
+                            ws_manager._ticks[event.canonical_instrument_id] = c_tick
+                            ws_manager._ticks[clean_sym] = c_tick
+                            if event.provider_symbol:
+                                ws_manager._ticks[event.provider_symbol] = c_tick
                 except Exception as e_tick:
                     logger.debug(f"[flattrade_ws] Tick handling error: {e_tick}")
 
