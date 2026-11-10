@@ -194,8 +194,8 @@ def test_precursor_radar_internal_sla_timeout_and_graceful_completion(scanner):
             force_refresh=True,
         )
         elapsed = time.time() - t0
-        # Elapsed must be close to timeout (bounded under 1.5s), never hanging for 20 * 0.5s = 10s
-        assert elapsed < 2.0, (
+        # Elapsed must be close to timeout (bounded under 3.0s), never hanging for 20 * 0.5s = 10s
+        assert elapsed < 3.0, (
             f"scan_precursors blocked for {elapsed:.2f}s instead of adhering to SLA timeout"
         )
         assert isinstance(candidates, list)

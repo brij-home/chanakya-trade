@@ -1192,14 +1192,12 @@ class AlertScrutinyAuditor:
         # Eliminates setups destined to stall before trade entry
         if is_breakout_type:
             adr_consumed = float((metrics_d or {}).get("adr_consumed_pct", 0.0) or 0.0)
-            is_pm = atype == "AFTERNOON_THRUST" or (
-                alert_time is not None and alert_time >= dtime(13, 0)
+            is_opening_type = atype.startswith("ORB") or atype.startswith("OPENING_DRIVE")
+            is_pm = atype in ("AFTERNOON_THRUST", "AFTERNOON_IGNITION", "POWER_HOUR_THRUST") or (
+                not is_opening_type and alert_time is not None and alert_time >= dtime(13, 0)
             )
-            is_high_volume = rvol_m >= 1.3
             is_tight_coil = bool((metrics_d or {}).get("is_tight_midday_coil"))
-            max_adr_allowed = (
-                120.0 if (is_pm or is_tight_coil) else (90.0 if is_high_volume else 65.0)
-            )
+            max_adr_allowed = 120.0 if (is_pm or is_tight_coil) else 65.0
 
             if adr_consumed > max_adr_allowed:
                 flags["stagnation_immunity_valid"] = False
@@ -3718,8 +3716,8 @@ class AlertScrutinyAuditor:
                 )
         flags["opening_auction_safe"] = True
 
-        # 14e. Late-Session Exhaustion & MIS Square-Off Gate (Post-15:12 IST):
-        # Prevent new intraday momentum alerts right before MIS auto-square-off (15:20 IST).
+        # 14e. Late-Session Exhaustion & MIS Square-Off Gate (Post-15:05 IST):
+        # Prevent new intraday momentum alerts right before MIS auto-square-off (15:15 IST).
         is_intraday_momentum = time_horizon in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY") and (
             atype
             in (
@@ -3731,11 +3729,11 @@ class AlertScrutinyAuditor:
             or "ORB" in atype
         )
         if is_intraday_momentum and not is_non_equity_desk:
-            if dtime(15, 12) <= alert_time <= dtime(15, 30):
+            if dtime(15, 5) <= alert_time <= dtime(15, 30):
                 flags["velocity_sustainable"] = False
                 return (
                     False,
-                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:12 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:20 IST) prevents disciplined risk management.",
+                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:05 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:15 IST) prevents disciplined risk management.",
                     flags,
                 )
 

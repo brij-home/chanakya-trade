@@ -2017,7 +2017,21 @@ class AutoAlertEngine:
         from engine.option_resolver import is_index_symbol
         from engine.position_sizer import is_fno_symbol
 
-        is_fno_eligible = is_index_symbol(clean_target) or is_fno_symbol(clean_target)
+        atype = str(getattr(alert, "alert_type", "") or "")
+        stage = str(getattr(alert, "stage", "") or "")
+        is_cash_desk_setup = stage == "EARLY_WARNING" or atype in (
+            "PRECURSOR_RADAR",
+            "ASYMMETRIC_RADAR",
+            "MULTIBAGGER",
+            "STAGE_1_TO_2_EXPANSION",
+            "RRG_SECTOR_ROTATION",
+            "DCF_UNDERVALUED",
+            "FORENSIC_GEM",
+        )
+
+        is_fno_eligible = not is_cash_desk_setup and (
+            is_index_symbol(clean_target) or is_fno_symbol(clean_target)
+        )
         if is_fno_eligible and not getattr(alert, "contract_symbol", None):
             self._enrich_fno_contract_if_applicable(alert)
 
@@ -16448,7 +16462,9 @@ class AutoAlertEngine:
                     return chg * (1.5 if is_liquid else 1.0)
 
                 eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates[:50]:
+            for eq_s in eq_candidates:
+                if len(targets) >= 15:
+                    break
                 if eq_s not in targets:
                     targets.append(eq_s)
 
@@ -16645,7 +16661,9 @@ class AutoAlertEngine:
                     return chg * (1.5 if is_liquid else 1.0)
 
                 eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates[:50]:
+            for eq_s in eq_candidates:
+                if len(targets) >= 15:
+                    break
                 if eq_s not in targets:
                     targets.append(eq_s)
 
@@ -16747,7 +16765,9 @@ class AutoAlertEngine:
                     return chg * (1.5 if is_liquid else 1.0)
 
                 eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates[:50]:
+            for eq_s in eq_candidates:
+                if len(targets) >= 15:
+                    break
                 if eq_s not in targets:
                     targets.append(eq_s)
 

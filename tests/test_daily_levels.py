@@ -414,31 +414,37 @@ def test_daily_levels_rejects_divergent_stale_historical_bars(temp_store, monkey
 
 def test_daily_levels_purge_stale_sessions(tmp_path):
     """Verifies that purge_stale_sessions removes entries older than max_age_days from memory and disk."""
+    from datetime import datetime, timedelta
+    from engine.daily_levels import IST, DailyLevels
+
+    today_date = datetime.now(IST).date()
+    old_date = (today_date - timedelta(days=30)).strftime("%Y-%m-%d")
+    recent_date = (today_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
     store = DailyLevelsStore(persist_dir=tmp_path)
-    from engine.daily_levels import DailyLevels
 
     dummy_dl = DailyLevels(
         symbol="NIFTY",
         canonical_symbol="NIFTY",
         exchange="NSE",
-        session_date="2026-09-01",
+        session_date=old_date,
         pdh=25000.0,
         pdl=24800.0,
         pdc=24900.0,
     )
 
-    store._memory_cache["2026-09-01:NIFTY"] = dummy_dl
-    store._memory_cache["2026-11-04:NIFTY"] = dummy_dl
+    store._memory_cache[f"{old_date}:NIFTY"] = dummy_dl
+    store._memory_cache[f"{recent_date}:NIFTY"] = dummy_dl
 
     # Create dummy disk files
-    old_file = tmp_path / "daily_levels_2026-09-01.json"
+    old_file = tmp_path / f"daily_levels_{old_date}.json"
     old_file.write_text("{}", encoding="utf-8")
-    new_file = tmp_path / "daily_levels_2026-11-04.json"
+    new_file = tmp_path / f"daily_levels_{recent_date}.json"
     new_file.write_text("{}", encoding="utf-8")
 
     purged = store.purge_stale_sessions(max_age_days=5)
     assert purged >= 1
-    assert "2026-09-01:NIFTY" not in store._memory_cache
-    assert "2026-11-04:NIFTY" in store._memory_cache
+    assert f"{old_date}:NIFTY" not in store._memory_cache
+    assert f"{recent_date}:NIFTY" in store._memory_cache
     assert not old_file.exists()
     assert new_file.exists()

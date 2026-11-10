@@ -6,9 +6,20 @@ import numpy as np
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def test_orb_extended_window_and_rolling_rvol():
+def test_orb_extended_window_and_rolling_rvol(monkeypatch):
     """Verify that ORB detector accepts trades up to 12:00 IST and uses rolling 5-bar RVOL."""
+    from types import SimpleNamespace
     from engine.detectors.orb import detect_opening_range_breakout
+
+    # Hermetically isolate from ambient disk daily levels and network yfinance/Flattrade lookups
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym: None)
+    monkeypatch.setattr(
+        "engine.index_adaptive_regime.evaluate_index_adaptive_regime",
+        lambda *args, **kwargs: SimpleNamespace(
+            tiger=SimpleNamespace(mandate="TIGER_HUNT", reason="Trend active"),
+            eagle=SimpleNamespace(mandate="EAGLE_HUNT", reason="Trend active"),
+        ),
+    )
 
     # Construct synthetic 5m candles mimicking BankNifty 11:35 IST breakout
     times = pd.date_range("2026-11-09 09:15", "2026-11-09 11:35", freq="5min", tz=IST)
