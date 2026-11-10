@@ -341,6 +341,8 @@ def _try_auto_restore_sessions() -> None:
         except Exception as e_suppressed:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
+    apply_env_broker_roles()
+
 
 def get_broker() -> BrokerAPI:
     """Return the primary broker. Raises if login() has not been called."""
@@ -376,6 +378,37 @@ def is_multi_broker() -> bool:
 # ── Role-based routing ───────────────────────────────────────────
 # Two independent pointers — can point to the same broker ("both").
 # Moving one never affects the other.
+
+
+def apply_env_broker_roles() -> None:
+    """
+    Apply DATA_BROKER and EXEC_BROKER environment overrides if configured.
+    Enables zero-touch institutional dual-broker division of labor:
+      - DATA_BROKER=fyers (5,000 WebSocket streams + L3 50-Depth TBT)
+      - EXEC_BROKER=flattrade (Zero-brokerage execution order routing)
+    """
+    global _data_key, _exec_key
+    preferred_exec = os.environ.get("EXEC_BROKER") or os.environ.get("EXECUTION_BROKER")
+    if preferred_exec:
+        canon_exec = _BROKER_NAMES.get(
+            preferred_exec.strip().lower(), preferred_exec.strip().lower()
+        )
+        if canon_exec in _brokers:
+            _exec_key = canon_exec
+            logger.info(
+                f"[brokers.session] Execution broker bound to '{canon_exec}' via environment override."
+            )
+
+    preferred_data = os.environ.get("DATA_BROKER") or os.environ.get("MARKET_DATA_BROKER")
+    if preferred_data:
+        canon_data = _BROKER_NAMES.get(
+            preferred_data.strip().lower(), preferred_data.strip().lower()
+        )
+        if canon_data in _brokers:
+            _data_key = canon_data
+            logger.info(
+                f"[brokers.session] Data broker bound to '{canon_data}' via environment override."
+            )
 
 
 def get_broker_role(key: str) -> str:
@@ -418,6 +451,7 @@ def get_data_broker() -> BrokerAPI:
     """Return the current data broker. Falls back to primary if unset."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
         return _brokers[_data_key]
     return get_broker()
@@ -427,6 +461,7 @@ def get_data_broker_key() -> str:
     """Return the selected data-provider key without exposing mutable state."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
         return _data_key
     return _primary_key
@@ -436,6 +471,7 @@ def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Rejects data-only primary fallback (BRK-17)."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _exec_key and _exec_key in _brokers:
         return _brokers[_exec_key]
     # Explicit role validation: if primary was registered as data-only, refuse execution fallback

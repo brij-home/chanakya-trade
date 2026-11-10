@@ -2224,9 +2224,33 @@ class AlertScrutinyAuditor:
                             depth = d
                             break
 
+                # If candidate is not yet streaming in 15 TBT slots, promote JIT so depth streams immediately
+                if not depth and tbt_mgr:
+                    prom_sym = tradable_sym or contract_sym or getattr(alert, "symbol", None)
+                    if prom_sym:
+                        try:
+                            tbt_mgr.promote_jit_scout(
+                                prom_sym,
+                                duration_sec=120.0,
+                                reason=str(getattr(alert, "alert_type", "SCRUTINY_FINALIST")),
+                            )
+                        except Exception as _prom_err:
+                            logger.debug(
+                                f"[AlertScrutiny] JIT TBT promotion exception: {_prom_err}"
+                            )
+
             if depth and depth.get("status") != "UNAVAILABLE":
                 obi_50 = float(depth.get("obi_50", 0.0) or 0.0)
                 ltp_d = float(depth.get("ltp", 0.0) or 0.0)
+                if hasattr(alert, "metrics") and isinstance(alert.metrics, dict):
+                    alert.metrics["tbt_depth_audit"] = {
+                        "obi_50": obi_50,
+                        "density_score": float(depth.get("density_score", 0.0) or 0.0),
+                        "fortress_ask": bool(depth.get("fortress_ask_wall_confirmed")),
+                        "fortress_bid": bool(depth.get("fortress_bid_wall_confirmed")),
+                        "spoof_warning": depth.get("spoof_trap_warning"),
+                        "tbt_status": depth.get("status", "ACTIVE"),
+                    }
                 if is_bull_setup and not is_bear_setup:
                     # Spoof / Rugpull Warning Veto
                     spoof_msg = depth.get("spoof_trap_warning")

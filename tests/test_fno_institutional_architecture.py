@@ -193,3 +193,67 @@ class TestFnoInstitutionalArchitecture(unittest.TestCase):
                 crypto_alerts = detect_crypto_signals()
                 self.assertEqual(crypto_alerts, [])
                 mock_quotes.assert_not_called()
+
+    def test_env_broker_role_auto_binding(self):
+        """DATA_BROKER=fyers and EXEC_BROKER=flattrade must automatically route roles without manual CLI commands."""
+        import os
+        from brokers import session as session_mod
+        from brokers.mock import MockBrokerAPI
+
+        saved_brokers = session_mod._brokers
+        saved_primary = session_mod._primary_key
+        saved_data = session_mod._data_key
+        saved_exec = session_mod._exec_key
+
+        try:
+            fyers_mock = MockBrokerAPI()
+            flattrade_mock = MockBrokerAPI()
+            session_mod._brokers = {"fyers": fyers_mock, "flattrade": flattrade_mock}
+            session_mod._primary_key = "fyers"
+            session_mod._data_key = "fyers"
+            session_mod._exec_key = "fyers"
+
+            with patch.dict(os.environ, {"DATA_BROKER": "fyers", "EXEC_BROKER": "flattrade"}):
+                session_mod.apply_env_broker_roles()
+                self.assertIs(session_mod.get_data_broker(), fyers_mock)
+                self.assertIs(session_mod.get_execution_broker(), flattrade_mock)
+                self.assertEqual(session_mod.get_broker_role("fyers"), "data")
+                self.assertEqual(session_mod.get_broker_role("flattrade"), "execution")
+        finally:
+            session_mod._brokers = saved_brokers
+            session_mod._primary_key = saved_primary
+            session_mod._data_key = saved_data
+            session_mod._exec_key = saved_exec
+
+    def test_dynamic_tbt_scout_promotion_for_fno_candidates(self):
+        """F&O setup arriving at record_alert must promote symbol to Fyers 15-slot TBT scout pool."""
+        from engine.alert_model import AutoAlert
+
+        alert = AutoAlert(
+            alert_id="aa-orb-reliance-20261110",
+            alert_type="ORB_BREAKOUT",
+            stage="PRIMED",
+            symbol="RELIANCE",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="ORB Breakout",
+            summary="Test summary",
+            ltp=2500.0,
+            trigger_level=2500.0,
+            target_level=2540.0,
+            stop_loss=2480.0,
+            segment="FNO_STOCK",
+            confidence=85,
+            metrics={"underlying": "RELIANCE"},
+        )
+
+        with patch("market.fyers_tbt_manager.fyers_tbt_manager") as mock_tbt:
+            mock_tbt.is_connected = True
+            mock_tbt.promote_jit_scout = patch.object(mock_tbt, "promote_jit_scout").start()
+
+            with patch.object(self.engine, "_record_alert_impl", return_value=True):
+                self.engine.record_alert(alert)
+                mock_tbt.promote_jit_scout.assert_called_once()
+                args, kwargs = mock_tbt.promote_jit_scout.call_args
+                self.assertIn("RELIANCE", args[0])
+                self.assertEqual(kwargs.get("duration_sec"), 120.0)

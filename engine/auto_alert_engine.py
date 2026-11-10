@@ -2040,6 +2040,30 @@ class AutoAlertEngine:
         if is_fno_eligible and not getattr(alert, "contract_symbol", None):
             self._enrich_fno_contract_if_applicable(alert)
 
+        # Dynamic Level-3 TBT Promotion (15-Slot 50-Depth Matrix):
+        # Promote high-conviction F&O candidate to Fyers 15-slot TBT stream for sub-second microstructure validation
+        if is_fno_eligible:
+            try:
+                from market.fyers_tbt_manager import (
+                    fyers_tbt_manager,
+                    resolve_tradable_tbt_symbol,
+                )
+
+                if getattr(fyers_tbt_manager, "is_connected", False):
+                    target_tbt_sym = (
+                        getattr(alert, "contract_symbol", None)
+                        or resolve_tradable_tbt_symbol(alert.symbol)
+                        or resolve_tradable_tbt_symbol(clean_target)
+                    )
+                    if target_tbt_sym:
+                        fyers_tbt_manager.promote_jit_scout(
+                            target_tbt_sym,
+                            duration_sec=120.0,
+                            reason=str(getattr(alert, "alert_type", "PRIMED_SETUP")),
+                        )
+            except Exception as _tbt_prom_err:
+                logger.debug(f"[AutoAlertEngine] TBT JIT promotion non-fatal: {_tbt_prom_err}")
+
         policy = get_discovery_policy()
 
         if policy.fno_only:
