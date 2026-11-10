@@ -173,8 +173,19 @@ def detect_index_put_setup(
         try:
             from engine.smt_divergence import evaluate_smt_divergence
 
-            smt_res = evaluate_smt_divergence(clean_sym, spot, quotes_map=quotes_map)
-            if smt_res and smt_res.verdict in ("BEARISH_DIVERGENCE_BULL_TRAP", "CONFIRMED_HARMONY"):
+            smt_res = evaluate_smt_divergence(
+                primary_symbol=clean_sym,
+                direction="BEARISH",
+                primary_spot=spot,
+                primary_day_high=day_high,
+                primary_day_low=day_low,
+                primary_vwap=_eff_vwap,
+                quotes_map=quotes_map,
+            )
+            if smt_res and (
+                smt_res.divergence_type in ("BEARISH_DIVERGENCE_BULL_TRAP", "CONFIRMED_HARMONY")
+                or smt_res.is_trap
+            ):
                 _has_smt_bear_reversal = True
         except Exception as e_smt:
             logger.debug(

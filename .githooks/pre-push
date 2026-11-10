@@ -7,8 +7,10 @@ if [ "$SKIP_PRE_PUSH" = "1" ] || [ "$FAST_PUSH" = "1" ]; then
     exit 0
 fi
 
-if [ -f ".venv/Scripts/python.exe" ]; then
+if [ -f ".venv/Scripts/python.exe" ] && .venv/Scripts/python.exe -m ruff --version >/dev/null 2>&1; then
     PYTHON_BIN=".venv/Scripts/python.exe"
+elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="$(py -3.13 -c 'import sys; print(sys.executable)' 2>/dev/null || py -3.12 -c 'import sys; print(sys.executable)' 2>/dev/null || echo python)"
 elif [ -f ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
 else
@@ -20,5 +22,5 @@ if [ $? -ne 0 ]; then
     echo "❌ Pre-push gate failed! Regression detected before push. Fix before pushing (or git push --no-verify if emergency)."
     exit 1
 fi
-echo "✅ Pre-push verification passed! Remote CI parity guaranteed."
+echo "✅ Pre-push verification passed."
 exit 0

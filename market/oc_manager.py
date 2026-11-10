@@ -123,9 +123,16 @@ class OptionsChainManager:
         """Refresh options chain for a single symbol and populate unified cache."""
         try:
             from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+            from brokers.session import get_all_brokers, get_data_broker_key
 
             if get_fyers_circuit_breaker().is_tripped():
-                return False
+                all_brks = get_all_brokers()
+                pri_key = get_data_broker_key() or "fyers"
+                has_secondary = any(
+                    k != pri_key and not getattr(b, "_is_mock", False) for k, b in all_brks.items()
+                )
+                if not has_secondary:
+                    return False
 
             from market.options import get_options_chain
 
@@ -141,17 +148,34 @@ class OptionsChainManager:
         while self._running:
             try:
                 from market.calendar import is_market_open
-
-                market_open = is_market_open("NFO") or is_market_open("NSE")
-                interval = (
-                    self._refresh_interval_live if market_open else self._refresh_interval_closed
-                )
+                from config.market_universes import MCX_COMMODITY_SYMBOLS
 
                 symbols_to_refresh = list(self.subscribed_symbols)
 
                 for sym in symbols_to_refresh:
                     if not self._running:
                         break
+
+                    clean_sym = (
+                        sym.upper()
+                        .replace("MCX:", "")
+                        .replace("NSE:", "")
+                        .replace("BSE:", "")
+                        .strip()
+                    )
+                    is_commodity = clean_sym in MCX_COMMODITY_SYMBOLS or sym.upper().startswith(
+                        "MCX:"
+                    )
+                    market_open = (
+                        is_market_open("MCX")
+                        if is_commodity
+                        else (is_market_open("NFO") or is_market_open("NSE"))
+                    )
+                    interval = (
+                        self._refresh_interval_live
+                        if market_open
+                        else self._refresh_interval_closed
+                    )
 
                     now = time.time()
                     last_ts = self._last_refresh_ts.get(sym, 0.0)

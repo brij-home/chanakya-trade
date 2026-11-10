@@ -52,7 +52,9 @@ CORE_CURRENCIES = [
     "JPYINR",
 ]
 
-TOP_FNO_STOCKS = [
+from config.market_universes import FNO_EQUITY_SYMBOLS
+
+LIQUID_FNO_LEADERS = [
     "RELIANCE",
     "HDFCBANK",
     "ICICIBANK",
@@ -61,7 +63,6 @@ TOP_FNO_STOCKS = [
     "SBIN",
     "BHARTIARTL",
     "LT",
-    "TMPV",
     "AXISBANK",
     "KOTAKBANK",
     "ITC",
@@ -83,6 +84,10 @@ TOP_FNO_STOCKS = [
     "DLF",
     "PERSISTENT",
     "DIXON",
+]
+
+TOP_FNO_STOCKS: list[str] = LIQUID_FNO_LEADERS + [
+    s for s in sorted(FNO_EQUITY_SYMBOLS) if s not in set(LIQUID_FNO_LEADERS)
 ]
 
 _RADAR_CACHE_LOCK = threading.Lock()

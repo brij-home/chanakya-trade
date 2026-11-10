@@ -31,22 +31,35 @@ def _timestamp_from_epoch(value: Any) -> Optional[str]:
     return None
 
 
-def normalize_shoonya_tick(
-    raw: dict[str, Any], *, correlation_id: Optional[str] = None
+def normalize_noren_tick(
+    raw: dict[str, Any],
+    *,
+    provider: str = "noren",
+    correlation_id: Optional[str] = None,
 ) -> Optional[MarketDataEvent]:
-    """Normalize a Noren tick without assuming an unavailable sequence field."""
+    """Normalize a Noren protocol tick (used by Flattrade, Shoonya) without assuming sequence field."""
     price = raw.get("lp") or raw.get("ltp")
     try:
         last_price = float(price)
     except (TypeError, ValueError):
         return None
     exchange = str(raw.get("e") or raw.get("exch") or "NSE").upper()
-    provider_symbol = str(raw.get("ts") or raw.get("tk") or "")
+    provider_symbol = str(raw.get("ts") or "")
+    if not provider_symbol and raw.get("tk"):
+        try:
+            from market.symbol_facade import get_symbol_facade
+
+            provider_symbol = get_symbol_facade().get_symbol_by_token(
+                str(raw["tk"]), exchange
+            ) or str(raw["tk"])
+        except Exception:
+            provider_symbol = str(raw["tk"])
     if not provider_symbol:
         return None
+    atp = _float_or_none(raw.get("ap") or raw.get("atp") or raw.get("vwap"))
     return MarketDataEvent(
         canonical_instrument_id=f"{exchange}:{provider_symbol}",
-        provider="shoonya",
+        provider=provider,
         provider_symbol=provider_symbol,
         source="STREAM",
         data_state="LIVE" if last_price > 0 else "UNAVAILABLE",
@@ -57,9 +70,24 @@ def normalize_shoonya_tick(
         ask=_float_or_none(raw.get("sp1")),
         volume=_int_or_none(raw.get("v")),
         oi=_int_or_none(raw.get("oi")),
+        atp=atp,
         quality_flags=() if last_price > 0 else ("NON_POSITIVE_PRICE",),
         correlation_id=correlation_id,
     )
+
+
+def normalize_flattrade_tick(
+    raw: dict[str, Any], *, correlation_id: Optional[str] = None
+) -> Optional[MarketDataEvent]:
+    """Normalize a Flattrade (Noren API) WebSocket tick with provider='flattrade'."""
+    return normalize_noren_tick(raw, provider="flattrade", correlation_id=correlation_id)
+
+
+def normalize_shoonya_tick(
+    raw: dict[str, Any], *, correlation_id: Optional[str] = None
+) -> Optional[MarketDataEvent]:
+    """Backwards-compatible normalizer for legacy Shoonya (Noren API) ticks with provider='shoonya'."""
+    return normalize_noren_tick(raw, provider="shoonya", correlation_id=correlation_id)
 
 
 def _float_or_none(value: Any) -> Optional[float]:
@@ -155,6 +183,12 @@ class MarketDataStreamRegistry:
         except Exception as e_suppressed:
             # Recording is best-effort and must not affect the market-data path.
             logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
+        try:
+            from engine.market_matrix import get_market_matrix
+
+            get_market_matrix().on_tick(event)
+        except Exception as e_suppressed:
+            logger.debug(f"[market.streaming] MarketMatrix ingestion error: {e_suppressed}")
         with self._lock:
             self._latest[event.canonical_instrument_id] = event
             callbacks = tuple(self._callbacks)
@@ -198,12 +232,22 @@ class MarketDataStreamRegistry:
 market_streams = MarketDataStreamRegistry()
 
 
-def start_shoonya_stream(broker: Any) -> None:
-    """Start the selected Shoonya data stream, if the optional dependency exists."""
+def start_noren_stream(broker: Any, *, provider: str = "flattrade") -> None:
+    """Start the selected Noren protocol (Flattrade / Shoonya) data stream."""
 
     def on_quote(raw: dict[str, Any]) -> None:
-        event = normalize_shoonya_tick(raw)
+        event = normalize_noren_tick(raw, provider=provider)
         if event:
             market_streams.publish(event)
 
     broker.start_websocket(on_quote=on_quote)
+
+
+def start_flattrade_stream(broker: Any) -> None:
+    """Start Flattrade streaming."""
+    start_noren_stream(broker, provider="flattrade")
+
+
+def start_shoonya_stream(broker: Any) -> None:
+    """Legacy Shoonya stream wrapper."""
+    start_noren_stream(broker, provider="shoonya")

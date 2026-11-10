@@ -642,6 +642,47 @@ def test_eod_session_scorecard_and_review(monkeypatch):
     assert rep2 is None
 
 
+def test_eod_scorecard_persistent_disk_deduplication(tmp_path, monkeypatch):
+    """Verify that broadcast_eod_scorecard enforces durable disk-level deduplication across restarts."""
+    from engine.alert_postmortem_runner import broadcast_eod_scorecard
+
+    sent_msgs = []
+    monkeypatch.setattr("bot.telegram_bot.send_message", lambda msg, **kw: sent_msgs.append(msg))
+    monkeypatch.setattr(
+        "engine.alert_postmortem_runner.app_data_path", lambda *parts: tmp_path / "/".join(parts)
+    )
+
+    scorecard = {
+        "session_date": "2026-11-09",
+        "total_alerts": 5,
+        "wins": 3,
+        "losses": 1,
+        "breakeven": 1,
+        "win_rate_pct": 60.0,
+        "net_realized_r": 3.2,
+        "profit_factor": 4.2,
+        "best_trade": {"symbol": "NIFTY", "realized_r": 2.5},
+        "worst_trade": {"symbol": "INFY", "realized_r": -1.0},
+    }
+
+    # First broadcast: succeeds and creates sentinel
+    res1 = broadcast_eod_scorecard(scorecard, force=False, enforce_disk_latch=True)
+    assert res1 is True
+    assert len(sent_msgs) == 1
+    marker = tmp_path / "postmortem" / "broadcast_20261109.sent"
+    assert marker.exists()
+
+    # Second broadcast (simulating server reboot): suppressed by durable disk latch
+    res2 = broadcast_eod_scorecard(scorecard, force=False, enforce_disk_latch=True)
+    assert res2 is False
+    assert len(sent_msgs) == 1  # No duplicate message sent!
+
+    # Broadcast with force=True: permitted
+    res3 = broadcast_eod_scorecard(scorecard, force=True, enforce_disk_latch=True)
+    assert res3 is True
+    assert len(sent_msgs) == 2
+
+
 def test_options_inverted_target_without_option_plan_vetoed():
     """Option alert with inverted targets (target_2 <= target_1) is vetoed even when option_plan is absent."""
     alert = make_alert(

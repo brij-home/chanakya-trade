@@ -183,6 +183,10 @@ class VwapSessionCache:
             self._memory_cache[clean] = (now, float(vwap_val))
         self._save_to_disk()
 
+    def set(self, symbol: str, vwap_val: float) -> None:
+        """Alias for put() to ensure API compatibility."""
+        self.put(symbol, vwap_val)
+
     def is_cached_fresh(self, symbol: str) -> tuple[bool, Optional[float]]:
         """Check if symbol is cached (including negative cache). Returns (is_fresh, value_or_none)."""
         self._ensure_current_session()

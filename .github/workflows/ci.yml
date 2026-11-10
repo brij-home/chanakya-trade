@@ -13,6 +13,15 @@ on:
   # and had no way to be exercised on demand.
   workflow_dispatch:
 
+# Read-only by default: no workflow here writes to the repository.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref; stale builds must not gate a push.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

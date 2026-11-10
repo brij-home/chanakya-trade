@@ -604,13 +604,24 @@ def preview_order_intent(
     )
     computed_preview_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
 
+    from brokers.session import get_execution_broker_key
+
+    exec_key = get_execution_broker_key() or "fyers"
+    is_zero_brokerage = exec_key.lower() == "flattrade"
+
     charges = calculate_transaction_charges(
         price=price,
         quantity=quantity,
         segment=resolved_segment,  # type: ignore
         side=side,  # type: ignore
+        broker_flat_fee=0.0 if is_zero_brokerage else 20.0,
+        brokerage_rate=0.0 if is_zero_brokerage else None,
     )
     charges_dict = charges.to_dict()
+    charges_dict["execution_broker"] = exec_key
+    charges_dict["is_zero_brokerage"] = is_zero_brokerage
+    if is_zero_brokerage:
+        charges_dict["brokerage_savings"] = 20.0
     if trigger_price is not None:
         charges_dict["trigger_price"] = float(trigger_price)
 

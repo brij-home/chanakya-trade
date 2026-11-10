@@ -56,6 +56,7 @@ MAJOR_INDICES = [
 
 from config.market_universes import (
     CRYPTO_SYMBOLS,
+    FNO_EQUITY_SYMBOLS,
     INDEX_BENCHMARKS,
     MCX_COMMODITY_SYMBOLS,
 )
@@ -214,69 +215,7 @@ class PrecursorRadarScanner:
             "SENSEX",
         ]
 
-        fno_universe = [
-            "RELIANCE",
-            "TCS",
-            "INFY",
-            "HDFCBANK",
-            "ICICIBANK",
-            "SBIN",
-            "BHARTIARTL",
-            "TRENT",
-            "DIXON",
-            "HAL",
-            "BEL",
-            "ADANIENT",
-            "LT",
-            "MARUTI",
-            "BAJFINANCE",
-            "TITAN",
-            "COFORGE",
-            "PERSISTENT",
-            "POLYCAB",
-            "KALYANKJIL",
-            "BSE",
-            "MCX",
-            "CDSL",
-            "MANKIND",
-            "SUNPHARMA",
-            "M&M",
-            "HINDALCO",
-            "TATASTEEL",
-            "JSWSTEEL",
-            "NTPC",
-            "ONGC",
-            "COALINDIA",
-            "POWERGRID",
-            "ASIANPAINT",
-            "HINDUNILVR",
-            "ITC",
-            "NESTLEIND",
-            "ETERNAL",
-            "CHOLAFIN",
-            "FEDERALBNK",
-            "AUBANK",
-            "MAXHEALTH",
-            "LUPIN",
-            "AUROPHARMA",
-            "DLF",
-            "GODREJPROP",
-            "ABB",
-            "SIEMENS",
-            "CUMMINSIND",
-            "VOLTAS",
-            "HAVELLS",
-            "MAZDOCK",
-            "COCHINSHIP",
-            "KAYNES",
-            "PREMIERENE",
-            "WAAREEENER",
-            "INOXWIND",
-            "POLICYBZR",
-            "APLAPOLLO",
-            "RVNL",
-            "IRFC",
-        ]
+        fno_universe = list(sorted(FNO_EQUITY_SYMBOLS))
 
         non_fno_universe = [
             "KPITTECH",
@@ -356,6 +295,7 @@ class PrecursorRadarScanner:
         chain: Optional[list[Any]] = None,
         quote: Optional[Any] = None,
         interval: str = "day",
+        rrg_matrix: Optional[dict[str, Any]] = None,
     ) -> Optional[PrecursorCandidate]:
         """
         Evaluates a single stock for pre-move coiling DNA against dynamic factor weights.
@@ -472,6 +412,20 @@ class PrecursorRadarScanner:
         hist_exchange = (
             "CRYPTO" if sym_seg == "CRYPTO" else ("MCX" if sym_seg == "COMMODITY" else "NSE")
         )
+
+        if df is None or len(df) < 20:
+            try:
+                from engine.market_matrix import get_market_matrix
+
+                mm_df = get_market_matrix().get_candles_df(
+                    clean_sym, timeframe="5m" if interval != "day" else "1m", limit=80
+                )
+                if mm_df is not None and len(mm_df) >= 20:
+                    df = mm_df
+            except Exception as e_mm:
+                logger.debug(
+                    f"[PrecursorRadar] Market matrix fallback failed for {clean_sym}: {e_mm}"
+                )
 
         if df is None or len(df) < 20:
             try:
@@ -647,7 +601,7 @@ class PrecursorRadarScanner:
             try:
                 from analysis.sector_rotation import get_stock_sector_alignment
 
-                align = get_stock_sector_alignment(clean_sym)
+                align = get_stock_sector_alignment(clean_sym, rrg_matrix=rrg_matrix)
                 if hasattr(align, "quadrant"):
                     rrg_quad = getattr(align, "quadrant", rrg_quad)
                     sector_name = getattr(
@@ -894,6 +848,27 @@ class PrecursorRadarScanner:
             except Exception as e:
                 logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
 
+        # Batch pre-fetch daily OHLCV DataFrames from local SQLite EOD Store (<15ms)
+        batch_dfs: dict[str, Any] = {}
+        try:
+            from engine.eod_store import get_cached_ohlcv_batch
+
+            clean_symbols = [canonical_alert_symbol(s) for s in symbols]
+            batch_dfs = get_cached_ohlcv_batch(clean_symbols, days=45)
+        except Exception as e_batch:
+            logger.debug(f"[PrecursorRadar] Batch OHLCV pre-fetch error: {e_batch}")
+
+        # Pre-compute or fetch sector RRG matrix ONCE upfront (avoids redundant work across 220+ workers)
+        rrg_matrix: Optional[dict[str, Any]] = None
+        try:
+            from analysis.sector_rotation import get_sector_rrg_matrix
+
+            pts = get_sector_rrg_matrix()
+            if pts:
+                rrg_matrix = {p.sector: p for p in pts}
+        except Exception as e_rrg:
+            logger.debug(f"[PrecursorRadar] Sector RRG matrix pre-compute error: {e_rrg}")
+
         def _worker(sym: str) -> Optional[PrecursorCandidate]:
             clean = canonical_alert_symbol(sym)
             q = (
@@ -903,7 +878,8 @@ class PrecursorRadarScanner:
                 or active_quotes.get(clean)
                 or active_quotes.get(sym)
             )
-            return self.evaluate_symbol(sym, quote=q)
+            df = batch_dfs.get(clean) or batch_dfs.get(sym)
+            return self.evaluate_symbol(sym, df=df, quote=q, rrg_matrix=rrg_matrix)
 
         import concurrent.futures
 

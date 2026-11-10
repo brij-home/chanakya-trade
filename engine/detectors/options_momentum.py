@@ -267,6 +267,8 @@ def detect_options_momentum_breakouts(
         alert_segment = sym_info["alert_segment"]
         is_bear_drive = sym_info["is_bear_drive"]
         is_bull_drive = sym_info["is_bull_drive"]
+        from engine.position_sizer import get_lot_size
+
         try:
             # Institutional Single-Stock Expiry Protection:
             # Under SEBI regulations, single-stock options are physically settled.
@@ -787,18 +789,26 @@ def detect_options_momentum_breakouts(
                 is_decoupler = False
                 opt_pch = getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0
                 if not is_idx:
+                    stock_lot = getattr(c, "lot_size", None) or 1
+                    if stock_lot <= 1:
+                        try:
+                            stock_lot = get_lot_size(clean_sym) or 1
+                        except Exception:
+                            stock_lot = 1
+                    eff_decouple_vol = max(40, min(350, int(20000 / max(1, stock_lot))))
+                    eff_decouple_vol_mid = int(eff_decouple_vol * 0.75)
                     if opt_type == "CE":
-                        if (vol_oi >= 1.8 and vol >= 2500 and opt_pch >= 15.0) or (
+                        if (vol_oi >= 1.8 and vol >= eff_decouple_vol and opt_pch >= 15.0) or (
                             spot_change_pct
                             and spot_change_pct >= 1.8
-                            and (vol_oi >= 1.2 or vol >= 2000)
+                            and (vol_oi >= 1.2 or vol >= eff_decouple_vol_mid)
                         ):
                             is_decoupler = True
                     elif opt_type == "PE":
-                        if (vol_oi >= 1.8 and vol >= 2500 and opt_pch >= 15.0) or (
+                        if (vol_oi >= 1.8 and vol >= eff_decouple_vol and opt_pch >= 15.0) or (
                             spot_change_pct
                             and spot_change_pct <= -1.8
-                            and (vol_oi >= 1.2 or vol >= 2000)
+                            and (vol_oi >= 1.2 or vol >= eff_decouple_vol_mid)
                         ):
                             is_decoupler = True
 
@@ -834,14 +844,17 @@ def detect_options_momentum_breakouts(
                     is_extreme_catalyst = bool(
                         is_decoupler
                         or is_writer_panic
-                        or (vol_oi >= 2.5 and vol >= 1500)
-                        or (spot_change_pct and abs(spot_change_pct) >= 2.5)
+                        or (vol_oi >= 2.5 and vol >= int(eff_decouple_vol * 1.5))
+                        or (spot_change_pct and abs(spot_change_pct) >= 2.0)
                     )
 
                 is_explosive_momentum = bool(
                     is_extreme_catalyst
-                    or (vol_oi >= 1.8 and vol >= 800)
-                    or (vol >= 500 and (pchange or 0.0) >= 8.0)
+                    or (vol_oi >= 1.8 and vol >= (800 if is_idx else eff_decouple_vol))
+                    or (
+                        vol >= (500 if is_idx else max(30, eff_decouple_vol // 2))
+                        and (pchange or 0.0) >= 8.0
+                    )
                     or (spot_change_pct and abs(spot_change_pct) >= 2.0)
                 )
 
@@ -864,14 +877,17 @@ def detect_options_momentum_breakouts(
                     # 2. Midday Volume Lull (11:15 - 13:15 IST)
                     # Suppress options buying during midday consolidation unless confirmed by volume/momentum/order flow
                     if is_midday_lull and not is_extreme_catalyst:
+                        thrust_vol_floor = 500 if is_idx else 80
                         has_midday_thrust = (
                             is_explosive_momentum
-                            or (vol_oi >= 1.35 and vol >= 600)
+                            or (vol_oi >= 1.35 and vol >= thrust_vol_floor)
                             or (spot_change_pct is not None and abs(spot_change_pct) >= 1.2)
                         )
-                        if not has_midday_thrust and (vol_oi < 2.5 or vol < 2500):
+                        min_midday_vol = 1200 if is_idx else 150
+                        min_vol_oi = 2.0 if is_idx else 1.25
+                        if not has_midday_thrust and (vol_oi < min_vol_oi or vol < min_midday_vol):
                             logger.debug(
-                                f"[OptionsBreakout] Suppressed {clean_sym} during 11:15-13:15 IST midday lull (vol_oi {vol_oi}x < 2.5x or vol {vol} < 2500)"
+                                f"[OptionsBreakout] Suppressed {clean_sym} during 11:15-13:15 IST midday lull (vol_oi {vol_oi}x < {min_vol_oi}x or vol {vol} < {min_midday_vol})"
                             )
                             continue
 
@@ -1081,8 +1097,11 @@ def detect_options_momentum_breakouts(
                             # Explosive trends routinely exhibit minor 5m RSI divergence while continuation surges
                             is_explosive_momentum = bool(
                                 is_extreme_catalyst
-                                or (vol_oi >= 1.8 and vol >= 800)
-                                or (vol >= 500 and (pchange or 0.0) >= 8.0)
+                                or (vol_oi >= 1.8 and vol >= (800 if is_idx else eff_decouple_vol))
+                                or (
+                                    vol >= (500 if is_idx else max(30, eff_decouple_vol // 2))
+                                    and (pchange or 0.0) >= 8.0
+                                )
                                 or (spot_change_pct and abs(spot_change_pct) >= 2.0)
                             )
                             if opt_type == "CE" and div_bias == "BEARISH" and "REGULAR" in div_type:
@@ -1821,9 +1840,15 @@ def detect_options_momentum_breakouts(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(6, len(active_targets))
         ) as executor:
-            for cand_res in executor.map(_eval_sym, active_targets):
-                if cand_res:
-                    candidate_alerts.append(cand_res)
+            try:
+                for cand_res in executor.map(_eval_sym, active_targets, timeout=28.0):
+                    if cand_res:
+                        candidate_alerts.append(cand_res)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[OptionsBreakout] Evaluation timeout (28s) reached. "
+                    f"Proceeding safely with {len(candidate_alerts)} qualified candidates."
+                )
 
     # ── ANTI-STORM PACING & TOP-N QUALITY SELECTION ──
     candidate_alerts.sort(key=lambda x: x[0], reverse=True)

@@ -358,7 +358,7 @@ async def api_risk_behavioral_status():
 
 
 @router.get("/api/reconciliation")
-async def api_reconciliation():
+async def api_reconciliation(broker: Optional[str] = None):
     """
     Ledger vs broker reconciliation.
 
@@ -373,9 +373,16 @@ async def api_reconciliation():
     correlation_id = new_correlation_id("reconciliation")
 
     try:
-        from brokers.session import get_execution_broker
+        from brokers.session import get_execution_broker, get_all_brokers
 
-        live_broker = get_execution_broker()
+        if broker:
+            all_brks = get_all_brokers()
+            live_broker = all_brks.get(broker.lower())
+            if live_broker is None:
+                raise RuntimeError(f"Broker '{broker}' is not connected.")
+        else:
+            live_broker = get_execution_broker()
+
         if live_broker is None:
             raise RuntimeError("No authenticated broker session.")
 
@@ -466,6 +473,7 @@ async def api_reconciliation():
         broker_name=broker_account_id,
     )
     result = report.to_dict()
+    result["broker_name"] = broker or getattr(live_broker, "name", "execution_broker")
     result["broker_account_id"] = broker_account_id
     result["broker_snapshot_at"] = snapshot_at
     result["correlation_id"] = correlation_id

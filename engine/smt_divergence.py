@@ -57,6 +57,11 @@ class SMTDivergenceResult:
     sibling_low: float = 0.0
     sibling_obi: float = 0.0
 
+    @property
+    def verdict(self) -> Optional[str]:
+        """Backward-compatible alias for divergence_type."""
+        return self.divergence_type
+
 
 def _extract_float(val: Any, default: float = 0.0) -> float:
     if val is None:

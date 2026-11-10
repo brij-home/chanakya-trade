@@ -234,11 +234,8 @@ def _try_auto_restore_sessions() -> None:
         except Exception as e_suppressed:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
-    if _brokers:
-        return
-
     # 1. m.Stock (only if explicitly enabled in environment)
-    if os.environ.get("ENABLE_MSTOCK", "0") == "1":
+    if os.environ.get("ENABLE_MSTOCK", "0") == "1" and "mstock" not in _brokers:
         try:
             from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
@@ -247,7 +244,10 @@ def _try_auto_restore_sessions() -> None:
             ):
                 b = MStockAPI()
                 if b.is_authenticated():
-                    register_broker("mstock", b, role="both")
+                    is_first = not _brokers
+                    register_broker(
+                        "mstock", b, primary=is_first, role="both" if is_first else None
+                    )
                     if not is_testing:
                         try:
                             threading.Thread(
@@ -257,47 +257,54 @@ def _try_auto_restore_sessions() -> None:
                             logger.debug(
                                 f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
                             )
-                    return
         except Exception as e_suppressed:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Shoonya
-    try:
-        from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+    if "shoonya" not in _brokers:
+        try:
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
 
-        if os.path.exists(_ST):
-            b = ShoonyaAPI()
-            if b.is_authenticated():
-                register_broker("shoonya", b, role="both")
-                if not is_testing:
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                return
-    except Exception as e_suppressed:
-        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+            if os.path.exists(_ST):
+                b = ShoonyaAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker(
+                        "shoonya", b, primary=is_first, role="both" if is_first else None
+                    )
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Kotak Neo
-    try:
-        from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
+    if "kotak" not in _brokers:
+        try:
+            from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
 
-        if os.path.exists(_KT):
-            b = KotakNeoAPI()
-            if b.is_authenticated():
-                register_broker("kotak", b, role="both")
-                if not is_testing:
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                return
-    except Exception as e_suppressed:
-        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+            if os.path.exists(_KT):
+                b = KotakNeoAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker("kotak", b, primary=is_first, role="both" if is_first else None)
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Flattrade (Secondary Backup Broker)
     if "flattrade" not in _brokers:
@@ -306,10 +313,21 @@ def _try_auto_restore_sessions() -> None:
 
             if os.path.exists(_FT_FLAT) or os.environ.get("FLATTRADE_API_KEY"):
                 b = FlattradeAPI()
+                if (
+                    not b.is_authenticated()
+                    and b._password
+                    and b._totp_secret
+                    and b._api_key
+                    and b._api_secret
+                ):
+                    try:
+                        b.complete_login()
+                    except Exception as e_login:
+                        logger.debug(f"[brokers.session] Flattrade auto-login failed: {e_login}")
                 if b.is_authenticated():
                     is_first = not _brokers
                     register_broker(
-                        "flattrade", b, primary=is_first, role="both" if is_first else "execution"
+                        "flattrade", b, primary=is_first, role="both" if is_first else None
                     )
                     if not is_testing:
                         try:
@@ -1160,6 +1178,32 @@ def _start_websocket(broker: BrokerAPI) -> None:
 
         if broker_name == "shoonya" and hasattr(broker, "start_websocket"):
             broker.start_websocket()
+            return
+
+        if (broker_name == "flattrade" or broker_cls_name == "FlattradeAPI") and hasattr(
+            broker, "start_websocket"
+        ):
+            from engine.market_matrix import get_market_matrix
+            from market.streaming import normalize_flattrade_tick
+
+            def _on_flattrade_tick(raw: dict) -> None:
+                try:
+                    event = normalize_flattrade_tick(raw)
+                    if event and event.last_price > 0:
+                        from market.streaming import market_streams
+
+                        market_streams.publish(event)
+                        get_market_matrix().on_tick(event)
+                except Exception as e_tick:
+                    logger.debug(f"[flattrade_ws] Tick handling error: {e_tick}")
+
+            broker.start_websocket(on_tick=_on_flattrade_tick)
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
+
+                get_ws_subscription_manager().on_ws_connected(broker)
+            except Exception as e_sub:
+                logger.debug(f"[brokers.session] Flattrade ws subscription seed notice: {e_sub}")
             return
 
         if broker_name == "fyers" or broker_cls_name == "FyersAPI":

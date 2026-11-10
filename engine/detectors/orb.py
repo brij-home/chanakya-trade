@@ -141,15 +141,15 @@ def detect_opening_range_breakout(
     else:
         now_dt = now_dt.astimezone(IST)
 
-    # 1. Market Hours & Time Gate (09:30 to 11:30 IST)
+    # 1. Market Hours & Time Gate (09:30 to 12:00 IST)
     # The opening range is strictly forming from 09:15 to 09:30.
-    # Breakout execution runs between 09:30 and 11:30 IST.
+    # Breakout execution runs between 09:30 and 12:00 IST (covering morning session & European open prep).
     curr_t = now_dt.time()
     if not ignore_time_gate:
         if curr_t < dtime(9, 30):
             # Range still discovering, do not fire prematurely
             return None
-        if curr_t > dtime(11, 30):
+        if curr_t > dtime(12, 0):
             # Past active morning ORB window
             return None
 
@@ -205,6 +205,25 @@ def detect_opening_range_breakout(
     else:
         # Zero hallucination invariant: Missing volume must NOT assume 1.5x expansion (Rule 10 & 11)
         rvol_val = 1.0
+
+    # Institutional Rolling 5-bar volume check: Prevent opening 09:15 spike from suppressing midday breakouts
+    if df is not None and len(df) >= 3:
+        try:
+            col_v = (
+                "volume"
+                if "volume" in df.columns
+                else ("Volume" if "Volume" in df.columns else None)
+            )
+            if col_v:
+                v_arr = df[col_v].astype(float).values
+                if len(v_arr) >= 3:
+                    recent_prior = v_arr[-6:-1] if len(v_arr) >= 6 else v_arr[:-1]
+                    rec_mean = float(np.mean(recent_prior)) if len(recent_prior) > 0 else 0.0
+                    if rec_mean > 0:
+                        rolling_rvol = round(float(v_arr[-1]) / rec_mean, 2)
+                        rvol_val = max(rvol_val, rolling_rvol)
+        except Exception as e_rvol:
+            logger.debug(f"[ORB] Rolling RVOL evaluation failed for {symbol}: {e_rvol}")
 
     vwap_tol = 0.0 if is_index else 0.002
     if ltp >= orb_high:
@@ -410,8 +429,6 @@ def detect_opening_range_breakout(
     atr_val = round(ltp * (0.002 if is_idx_sym else 0.015), 2)
     if df is not None and len(df) >= 2:
         try:
-            import numpy as np
-
             highs = df["high"] if "high" in df.columns else df["High"]
             lows = df["low"] if "low" in df.columns else df["Low"]
             closes = df["close"] if "close" in df.columns else df["Close"]
@@ -664,6 +681,7 @@ def detect_opening_range_breakout(
     )
 
     if opt_plan:
+        opt_no_chase = round(opt_plan.entry_premium * 1.045, 2)
         opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
         act_plan = {
             "action": f"BUY {opt_plan.option_type}",
@@ -678,6 +696,9 @@ def detect_opening_range_breakout(
             "target_2": f"₹{opt_plan.t2_premium:,.1f}",
             "target_3": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
             "runner_target": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
+            "no_chase_boundary": f"₹{opt_no_chase:,.2f}",
+            "option_no_chase_boundary": f"₹{opt_no_chase:,.2f}",
+            "spot_no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
             "risk_reward": f"1:{rr_ratio:.1f}",
             "underlying_spot": f"₹{ltp:,.1f}",
             "underlying_sl": f"₹{stop_loss:,.1f}",
@@ -718,7 +739,8 @@ def detect_opening_range_breakout(
             underlying_spot=ltp,
             lot_size=opt_plan.lot_size,
             segment="FNO_INDEX",
-            no_chase_boundary=no_chase_lvl,
+            no_chase_boundary=opt_no_chase,
+            spot_no_chase_boundary=no_chase_lvl,
             confidence=confidence,
             created_at=now_iso,
             is_live=True,
@@ -743,6 +765,8 @@ def detect_opening_range_breakout(
                 "spot": ltp,
                 "underlying_ltp": ltp,
                 "underlying_symbol": clean_sym,
+                "no_chase_boundary": opt_no_chase,
+                "spot_no_chase_boundary": no_chase_lvl,
                 "cpr": cpr_gate.cpr_data,
                 "cpr_type": cpr_gate.cpr_type,
                 "is_narrow_cpr": cpr_gate.is_narrow,

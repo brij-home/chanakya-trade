@@ -158,6 +158,12 @@ def detect_opening_drive(
             (prev_high and (bar_close >= prev_high * 0.998 or ltp >= prev_high))
             or (prev_close and bar_close > prev_close)
             or (ltp >= bar_open * 1.003)
+            or (
+                prev_close
+                and bar_open < prev_close * 0.998
+                and bar_close > bar_open
+                and (bar_close >= (bar_low + 0.65 * bar_range) or ltp >= bar_high * 0.999)
+            )
         ):
             # Wick Trap Filter: reject candles where upper rejection wick > 35%
             upper_wick = bar_high - max(bar_open, bar_close)
@@ -174,6 +180,12 @@ def detect_opening_drive(
             (prev_low and (bar_close <= prev_low * 1.002 or ltp <= prev_low))
             or (prev_close and bar_close < prev_close)
             or (ltp <= bar_open * 0.997)
+            or (
+                prev_close
+                and bar_open > prev_close * 1.002
+                and bar_close < bar_open
+                and (bar_close <= (bar_low + 0.35 * bar_range) or ltp <= bar_low * 1.001)
+            )
         ):
             # Wick Trap Filter: reject candles where lower absorption wick > 35%
             lower_wick = min(bar_open, bar_close) - bar_low

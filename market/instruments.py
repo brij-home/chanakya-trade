@@ -307,6 +307,7 @@ CORPORATE_ALIASES: dict[str, str] = {
     "HERO": "HEROMOTOCO",  # Hero MotoCorp Ltd
     "HEROHONDA": "HEROMOTOCO",
     "ASIANPAINTS": "ASIANPAINT",  # Asian Paints Ltd
+    "BOSCH": "BOSCHLTD",  # Bosch Ltd (official NSE ticker is BOSCHLTD)
     "DRREDDYS": "DRREDDY",  # Dr. Reddy's Laboratories
     "APOLLOHOSPITALS": "APOLLOHOSP",  # Apollo Hospitals Enterprise
     "TATACONSUMER": "TATACONSUM",  # Tata Consumer Products

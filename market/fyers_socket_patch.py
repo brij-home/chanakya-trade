@@ -205,6 +205,26 @@ def patch_fyers_websocket_daemon_threads() -> None:
 
             tbt_ws.FyersTbtSocket.On_error = _patched_tbt_error
 
+        # 7. Patch websocket.WebSocketApp.run_forever to enforce RFC 6455 Ping/Pong Heartbeats (20s)
+        # Prevents Fyers server from terminating idle/heartbeatless connections after 120s.
+        try:
+            import websocket
+
+            _orig_run_forever = websocket.WebSocketApp.run_forever
+
+            def _patched_run_forever(self, *args, **kwargs):
+                if kwargs.get("ping_interval", 0) == 0:
+                    kwargs["ping_interval"] = 20
+                if kwargs.get("ping_timeout") is None:
+                    kwargs["ping_timeout"] = 10
+                return _orig_run_forever(self, *args, **kwargs)
+
+            websocket.WebSocketApp.run_forever = _patched_run_forever
+        except Exception as e_ws_patch:
+            logger.debug(
+                f"[FyersSocketPatch] WebSocketApp heartbeat patch suppressed: {e_ws_patch}"
+            )
+
         _PATCHED = True
         logger.debug(
             "[FyersSocketPatch] Patched fyers_apiv3 WebSocket SDK threads to daemon=True, fixed TbtSocket onopen, and added 403 halt."

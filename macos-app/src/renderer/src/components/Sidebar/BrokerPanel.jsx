@@ -4,7 +4,8 @@ import { useChatStore } from '../../store/chatStore'
 const BROKERS = [
   {
     key:      'fyers',
-    name:     'Fyers',
+    name:     'Fyers Prime',
+    tierBadge: 'PRIMARY',
     color:    'text-[#fed7aa]',
     loginPath: '/fyers/login',
     portalUrl: 'https://myapi.fyers.in',
@@ -13,6 +14,22 @@ const BROKERS = [
     keys: [
       { env: 'FYERS_APP_ID', label: 'App ID', placeholder: 'XXXX-100', secret: false },
       { env: 'FYERS_SECRET_KEY', label: 'Secret Key', placeholder: 'Secret key', secret: true },
+    ],
+  },
+  {
+    key:      'flattrade',
+    name:     'Flattrade (Pi Connect)',
+    tierBadge: 'HOT STANDBY',
+    color:    'text-[#34d399]',
+    loginPath: '/flattrade/login',
+    portalUrl: 'https://auth.flattrade.in',
+    portalLabel: 'auth.flattrade.in',
+    keys: [
+      { env: 'FLATTRADE_USER_ID', label: 'User ID / UCC', placeholder: 'Client ID', secret: false },
+      { env: 'FLATTRADE_PASSWORD', label: 'Password', placeholder: 'Trading Password', secret: true },
+      { env: 'FLATTRADE_TOTP_SECRET', label: 'TOTP Secret', placeholder: 'Base32 seed', secret: true },
+      { env: 'FLATTRADE_API_KEY', label: 'API Key', placeholder: 'API key', secret: false },
+      { env: 'FLATTRADE_API_SECRET', label: 'API Secret', placeholder: 'API secret', secret: true },
     ],
   },
   {
@@ -191,13 +208,24 @@ export default function BrokerPanel({ onClose }) {
                       : status.configured ? 'bg-amber/50' : 'bg-subtle'
                   }`} />
                   <span className={`text-[13px] font-semibold font-ui ${broker.color}`}>{broker.name}</span>
-                  {status.authenticated && status.role && status.role !== 'both' && (
+                  {broker.tierBadge && (
+                    <span className={`text-[9px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      broker.key === 'fyers'
+                        ? 'bg-blue/15 text-blue border border-blue/30'
+                        : 'bg-amber/15 text-amber border border-amber/30'
+                    }`}>
+                      {broker.tierBadge}
+                    </span>
+                  )}
+                  {status.authenticated && (
                     <span className={`text-[11px] font-ui font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
                       status.role === 'data'
                         ? 'bg-blue/15 text-blue'
-                        : 'bg-amber/15 text-amber'
+                        : status.role === 'execution'
+                          ? 'bg-amber/15 text-amber'
+                          : 'bg-green/15 text-green'
                     }`}>
-                      {status.role}
+                      {status.role || (broker.key === 'flattrade' ? 'STANDBY' : 'ACTIVE')}
                     </span>
                   )}
                 </div>

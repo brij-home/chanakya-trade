@@ -213,6 +213,18 @@ class AlertScrutinyAuditor:
         if ltp <= 0 or sl <= 0 or t1 <= 0:
             return False, f"Incomplete price levels (LTP={ltp}, SL={sl}, T1={t1})", flags
 
+        alert_time = None
+        if getattr(alert, "created_at", None):
+            try:
+                clean_ts = str(alert.created_at).replace(" IST", "").strip()
+                alert_time = datetime.fromisoformat(clean_ts).time()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
+        if alert_time is None:
+            alert_time = datetime.now(IST).time()
+
         # Detect whether levels represent an option contract premium (Long CE or Long PE premium)
         sym = str(
             getattr(alert, "symbol", "")
@@ -705,18 +717,54 @@ class AlertScrutinyAuditor:
         # 3c-1. Tom Williams VSA Climax & False Breakout Sanity Gate
         vsa_sig = str(metrics_d.get("vsa_signal") or "").upper()
         if vsa_sig:
+            u_spot = float(
+                alert.underlying_spot
+                or alert.trigger_level
+                or alert.entry_price
+                or alert.ltp
+                or 0.0
+            )
+            u_vwap = float(metrics_d.get("vwap") or getattr(alert, "vwap", 0.0) or 0.0)
+            is_breakout_type = atype in (
+                "DOUBLE_BOTTOM_BREAKOUT",
+                "DOUBLE_TOP_BREAKDOWN",
+                "INSTITUTIONAL_EXPANSION_THRUST",
+                "CAMARILLA_H4_BREAKOUT",
+                "CAMARILLA_L4_BREAKDOWN",
+                "DAY_HIGH_BREAKOUT",
+                "DAY_LOW_BREAKDOWN",
+                "ORB_BREAKOUT",
+                "ORB_BREAKDOWN",
+                "OPENING_DRIVE_IGNITION",
+                "TREND_DAY_CONTINUATION",
+                "STAGE_1_TO_2_EXPANSION",
+            )
             if direction == "BULLISH" and vsa_sig in ("EFFORT_NO_RESULT_BEARISH", "NO_DEMAND"):
-                return (
-                    False,
-                    f"VSA Distribution Trap Veto: Bullish setup printed during {vsa_sig} (Smart money distributing into retail buying)",
-                    flags,
-                )
+                # Institutional Absorption Thrust: During confirmed breakouts holding above VWAP,
+                # an upper wick bar reflects initial limit absorption, not an immediate distribution trap veto.
+                if is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot >= u_vwap:
+                    logger.info(
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: "
+                        f"confirmed breakout {atype} holding above VWAP ({u_spot:.1f} >= {u_vwap:.1f})."
+                    )
+                else:
+                    return (
+                        False,
+                        f"VSA Distribution Trap Veto: Bullish setup printed during {vsa_sig} (Smart money distributing into retail buying)",
+                        flags,
+                    )
             elif direction == "BEARISH" and vsa_sig in ("STOPPING_VOLUME", "NO_SUPPLY"):
-                return (
-                    False,
-                    f"VSA Absorption Spring Veto: Bearish setup printed during {vsa_sig} (Institutional limit orders absorbing selling)",
-                    flags,
-                )
+                if is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot <= u_vwap:
+                    logger.info(
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: "
+                        f"confirmed breakdown {atype} holding below VWAP ({u_spot:.1f} <= {u_vwap:.1f})."
+                    )
+                else:
+                    return (
+                        False,
+                        f"VSA Absorption Spring Veto: Bearish setup printed during {vsa_sig} (Institutional limit orders absorbing selling)",
+                        flags,
+                    )
 
         # 3d. Index Benchmark Intraday VWAP Direction Sanity Gate
         # Prevent taking Bullish setups when spot is trapped below VWAP, or Bearish setups when spot is riding above VWAP
@@ -1144,11 +1192,20 @@ class AlertScrutinyAuditor:
         # Eliminates setups destined to stall before trade entry
         if is_breakout_type:
             adr_consumed = float((metrics_d or {}).get("adr_consumed_pct", 0.0) or 0.0)
-            if adr_consumed > 65.0:
+            is_pm = atype == "AFTERNOON_THRUST" or (
+                alert_time is not None and alert_time >= dtime(13, 0)
+            )
+            is_high_volume = rvol_m >= 1.3
+            is_tight_coil = bool((metrics_d or {}).get("is_tight_midday_coil"))
+            max_adr_allowed = (
+                120.0 if (is_pm or is_tight_coil) else (90.0 if is_high_volume else 65.0)
+            )
+
+            if adr_consumed > max_adr_allowed:
                 flags["stagnation_immunity_valid"] = False
                 return (
                     False,
-                    f"Stagnation Fuel Exhaustion Veto: {clean_sym} daily range is {adr_consumed:.1f}% consumed (> 65% limit). High stagnation risk.",
+                    f"Stagnation Fuel Exhaustion Veto: {clean_sym} daily range is {adr_consumed:.1f}% consumed (> {max_adr_allowed:.0f}% limit). High stagnation risk.",
                     flags,
                 )
 
@@ -1631,19 +1688,34 @@ class AlertScrutinyAuditor:
 
         # 5. Strict "No Chase" Gate (Anti-FOMO Invariant 12)
         # Disqualify if price has already blown past explicit no_chase_boundary or trigger extension
-        no_chase_bound = getattr(alert, "no_chase_boundary", None)
-        if not isinstance(no_chase_bound, (int, float, str)):
-            no_chase_bound = None
-        if no_chase_bound is None:
-            plan_d = getattr(alert, "actionable_plan", {}) or {}
-            if isinstance(plan_d, dict):
-                no_chase_bound = plan_d.get("no_chase_boundary")
-        if no_chase_bound is None:
-            metrics_d = getattr(alert, "metrics", {}) or {}
-            if isinstance(metrics_d, dict):
-                no_chase_bound = metrics_d.get("no_chase_boundary") or metrics_d.get(
-                    "no_chase_limit"
-                )
+        # Scale Isolation Invariant: Ensure boundary coordinate matches ltp coordinate space
+        plan_d = getattr(alert, "actionable_plan", {}) or {}
+        if not isinstance(plan_d, dict):
+            plan_d = {}
+        metrics_d = getattr(alert, "metrics", {}) or {}
+        if not isinstance(metrics_d, dict):
+            metrics_d = {}
+
+        no_chase_bound = None
+        if is_option_premium_levels:
+            no_chase_bound = (
+                getattr(alert, "no_chase_boundary", None)
+                or plan_d.get("option_no_chase_boundary")
+                or plan_d.get("no_chase_boundary")
+                or metrics_d.get("option_no_chase_boundary")
+                or metrics_d.get("no_chase_boundary")
+            )
+        else:
+            no_chase_bound = (
+                metrics_d.get("spot_no_chase_boundary")
+                or plan_d.get("spot_no_chase_boundary")
+                or getattr(alert, "spot_no_chase_boundary", None)
+                or getattr(alert, "no_chase_boundary", None)
+                or plan_d.get("no_chase_boundary")
+                or metrics_d.get("no_chase_boundary")
+                or metrics_d.get("no_chase_limit")
+            )
+
         if isinstance(no_chase_bound, str):
             clean_bound = re.sub(r"[^\d.]", "", no_chase_bound)
             try:
@@ -1652,6 +1724,41 @@ class AlertScrutinyAuditor:
                 no_chase_bound = None
         elif not isinstance(no_chase_bound, (int, float)):
             no_chase_bound = None
+
+        # Cross-Scale Contamination Guard:
+        if no_chase_bound is not None and ltp > 0:
+            if not is_option_premium_levels:
+                # If evaluating underlying equity/spot, but boundary is tiny (< 30% of ltp),
+                # an option premium boundary has leaked into spot space.
+                if no_chase_bound < (ltp * 0.30):
+                    spot_fallback = metrics_d.get("spot_no_chase_boundary") or plan_d.get(
+                        "spot_no_chase_boundary"
+                    )
+                    if isinstance(spot_fallback, str):
+                        clean_fb = re.sub(r"[^\d.]", "", spot_fallback)
+                        spot_fallback = float(clean_fb) if clean_fb else None
+                    if isinstance(spot_fallback, (int, float)) and float(spot_fallback) >= (
+                        ltp * 0.30
+                    ):
+                        no_chase_bound = float(spot_fallback)
+                    else:
+                        no_chase_bound = None
+            else:
+                # If evaluating option premium space, but boundary is massive (> 3x ltp and > 500),
+                # a spot boundary has leaked into option space.
+                if no_chase_bound > (ltp * 3.0) and no_chase_bound > 500.0:
+                    opt_fallback = plan_d.get("option_no_chase_boundary") or metrics_d.get(
+                        "option_no_chase_boundary"
+                    )
+                    if isinstance(opt_fallback, str):
+                        clean_fb = re.sub(r"[^\d.]", "", opt_fallback)
+                        opt_fallback = float(clean_fb) if clean_fb else None
+                    if isinstance(opt_fallback, (int, float)) and float(opt_fallback) <= (
+                        ltp * 3.0
+                    ):
+                        no_chase_bound = float(opt_fallback)
+                    else:
+                        no_chase_bound = None
 
         if no_chase_bound is not None and no_chase_bound > 0:
             if (
@@ -3588,18 +3695,6 @@ class AlertScrutinyAuditor:
         # overnight inventory rebalancing, and unanchored VWAP cause elevated whipsaw risk.
         # Routine breakouts require confirmed institutional volume (RVOL >= 2.0x or is_institutional_thrust)
         # to prevent opening false break stops (RCA: 40 opening chop post-mortems).
-        alert_time = None
-        if getattr(alert, "created_at", None):
-            try:
-                clean_ts = str(alert.created_at).replace(" IST", "").strip()
-                alert_time = datetime.fromisoformat(clean_ts).time()
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
-                )
-        if alert_time is None:
-            alert_time = datetime.now(IST).time()
-
         is_opening_auction_window = (
             dtime(9, 15) <= alert_time < dtime(9, 25)
         ) and not is_non_equity_desk
@@ -3623,8 +3718,8 @@ class AlertScrutinyAuditor:
                 )
         flags["opening_auction_safe"] = True
 
-        # 14e. Late-Session Exhaustion & MIS Square-Off Gate (Post-15:05 IST):
-        # Prevent new intraday momentum alerts right before MIS auto-square-off (15:15 IST).
+        # 14e. Late-Session Exhaustion & MIS Square-Off Gate (Post-15:12 IST):
+        # Prevent new intraday momentum alerts right before MIS auto-square-off (15:20 IST).
         is_intraday_momentum = time_horizon in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY") and (
             atype
             in (
@@ -3636,11 +3731,11 @@ class AlertScrutinyAuditor:
             or "ORB" in atype
         )
         if is_intraday_momentum and not is_non_equity_desk:
-            if dtime(15, 5) <= alert_time <= dtime(15, 30):
+            if dtime(15, 12) <= alert_time <= dtime(15, 30):
                 flags["velocity_sustainable"] = False
                 return (
                     False,
-                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:05 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:15 IST) prevents disciplined risk management.",
+                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:12 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:20 IST) prevents disciplined risk management.",
                     flags,
                 )
 
@@ -5266,20 +5361,20 @@ class AlertScrutinyAuditor:
             timing_eff = 90
             clock_action = "European session open: Trap inversion & trend resumption inflection."
         elif dtime(13, 45) <= now_time <= dtime(15, 15):
-            is_idx_gamma = is_fno and any(
+            is_fno_derivative = is_fno or any(
                 idx in str(getattr(alert, "symbol", "") or "").upper()
                 for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCP", "SENSEX", "BANKEX")
             )
-            if now_time >= dtime(14, 0) and not is_idx_gamma:
+            if now_time >= dtime(14, 45) and not is_fno_derivative:
                 strike_zone = "SESSION_RUNWAY_EXHAUSTION"
                 is_kz = False
                 timing_eff = 40
-                clock_action = "Late afternoon session cutoff risk (<75m remaining). Intraday equities face square-off liquidation."
+                clock_action = "Late afternoon session cutoff risk (<35m remaining). Intraday equities face square-off liquidation."
             else:
                 strike_zone = "AFTERNOON_GAMMA_POWER_HOUR"
                 is_kz = True
                 timing_eff = 96
-                clock_action = "Power Hour: Gamma blasts & institutional index settlement drive."
+                clock_action = "Power Hour: Gamma blasts & institutional settlement drive."
         else:
             strike_zone = "OFF_PEAK_AUCTION"
             is_kz = False

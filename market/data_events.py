@@ -27,6 +27,7 @@ VERIFIED_LIVE_PROVIDERS = {
     "dhan",
     "groww",
     "stoxkart",
+    "flattrade",
 }
 
 
@@ -68,8 +69,20 @@ class MarketDataEvent:
     ask: Optional[float] = None
     volume: Optional[int] = None
     oi: Optional[int] = None
+    atp: Optional[float] = None
     quality_flags: tuple[str, ...] = ()
     correlation_id: Optional[str] = None
+
+    @property
+    def symbol(self) -> str:
+        """Convenience symbol name for downstream consumers."""
+        if self.provider_symbol:
+            return self.provider_symbol
+        return (
+            self.canonical_instrument_id.split(":")[-1]
+            if ":" in self.canonical_instrument_id
+            else self.canonical_instrument_id
+        )
 
     @property
     def age_seconds(self) -> Optional[float]:

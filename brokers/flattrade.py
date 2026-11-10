@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -54,6 +55,8 @@ _PRODUCT_MAP = {"CNC": "C", "MIS": "I", "NRML": "M", "CO": "H", "BO": "B"}
 _REV_PRODUCT_MAP = {v: k for k, v in _PRODUCT_MAP.items()}
 _ORDER_TYPE_MAP = {"MARKET": "MKT", "LIMIT": "LMT", "SL": "SL-LMT", "SL-M": "SL-MKT"}
 _IST = ZoneInfo("Asia/Kolkata")
+_FLATTRADE_RESOLVED_CACHE: dict[str, dict[str, str]] = {}
+_CACHE_LOCK = threading.Lock()
 
 
 def _today_ist() -> str:
@@ -85,29 +88,55 @@ class FlattradeAPI(BrokerAPI):
 
     def __init__(
         self,
-        user_id: str = "",
-        password: str = "",
-        totp_secret: str = "",
-        api_key: str = "",
-        api_secret: str = "",
-        api_url: str = "",
-        ws_url: str = "",
+        user_id: Optional[str] = None,
+        password: Optional[str] = None,
+        totp_secret: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_secret: Optional[str] = None,
+        api_url: Optional[str] = None,
+        ws_url: Optional[str] = None,
+        token_file: Optional[Path] = None,
     ) -> None:
-        self.user_id = (user_id or os.environ.get("FLATTRADE_USER_ID", "")).strip().upper()
-        self._password = (password or os.environ.get("FLATTRADE_PASSWORD", "")).strip()
-        self._totp_secret = (totp_secret or os.environ.get("FLATTRADE_TOTP_SECRET", "")).strip()
-        self._api_key = (api_key or os.environ.get("FLATTRADE_API_KEY", "")).strip()
-        self._api_secret = (api_secret or os.environ.get("FLATTRADE_API_SECRET", "")).strip()
+        self.user_id = (
+            (user_id if user_id is not None else os.environ.get("FLATTRADE_USER_ID", ""))
+            .strip()
+            .upper()
+        )
+        self._password = (
+            password if password is not None else os.environ.get("FLATTRADE_PASSWORD", "")
+        ).strip()
+        self._totp_secret = (
+            totp_secret if totp_secret is not None else os.environ.get("FLATTRADE_TOTP_SECRET", "")
+        ).strip()
+        self._api_key = (
+            api_key if api_key is not None else os.environ.get("FLATTRADE_API_KEY", "")
+        ).strip()
+        self._api_secret = (
+            api_secret if api_secret is not None else os.environ.get("FLATTRADE_API_SECRET", "")
+        ).strip()
 
-        self.api_url = (api_url or os.environ.get("FLATTRADE_API_URL", DEFAULT_API_URL)).rstrip(
-            "/"
-        ) + "/"
-        self.ws_url = ws_url or os.environ.get("FLATTRADE_WS_URL", DEFAULT_WS_URL)
+        self.api_url = (
+            api_url if api_url is not None else os.environ.get("FLATTRADE_API_URL", DEFAULT_API_URL)
+        ).rstrip("/") + "/"
+        self.ws_url = (
+            ws_url if ws_url is not None else os.environ.get("FLATTRADE_WS_URL", DEFAULT_WS_URL)
+        )
+        self.token_file = token_file or TOKEN_FILE
         self._token = ""
         self._token_date = ""
         self._account_id = ""
         self._user_profile: Optional[UserProfile] = None
         self._instrument_cache: dict[str, dict[str, str]] = {}
+        self._token_map: dict[str, str] = {}
+        from market.symbol_facade import _FLATTRADE_INDEX_REGISTRY
+
+        for sym, item in _FLATTRADE_INDEX_REGISTRY.items():
+            tok = item.get("token")
+            exch = item.get("exch", "NSE")
+            tsym = item.get("tsym") or sym
+            if tok:
+                self._token_map[f"{exch}|{tok}"] = tsym
+                self._token_map[str(tok)] = tsym
         self._client = httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0))
         self._ws = None
         self._ws_thread: Optional[threading.Thread] = None
@@ -124,9 +153,9 @@ class FlattradeAPI(BrokerAPI):
 
     def _load_token(self) -> bool:
         try:
-            if not TOKEN_FILE.exists():
+            if not self.token_file.exists():
                 return False
-            data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
+            data = json.loads(self.token_file.read_text(encoding="utf-8"))
             token_date = data.get("token_date", "")
             if data.get("token") and token_date == _today_ist():
                 self._token = data["token"]
@@ -147,7 +176,7 @@ class FlattradeAPI(BrokerAPI):
     def _save_token(
         self, token: str, user_id: str, account_id: str = "", name: str = "", email: str = ""
     ) -> None:
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.token_file.parent.mkdir(parents=True, exist_ok=True)
         self._token = token
         self._token_date = _today_ist()
         self.user_id = user_id
@@ -159,7 +188,7 @@ class FlattradeAPI(BrokerAPI):
             broker="FLATTRADE",
         )
         save_secure_token(
-            TOKEN_FILE,
+            self.token_file,
             json.dumps(
                 {
                     "token": self._token,
@@ -359,11 +388,49 @@ class FlattradeAPI(BrokerAPI):
 
         body = dict(payload)
         body.setdefault("uid", self.user_id)
-        data = {"jData": json.dumps(body, separators=(",", ":"))}
+        raw_body = f"jData={json.dumps(body, separators=(',', ':'))}"
         if authenticated:
-            data["jKey"] = self._token
+            raw_body += f"&jKey={self._token}"
 
-        response = self._client.post(f"{self.api_url}{endpoint}", data=data)
+        # Rate Governor pacing
+        try:
+            from market.flattrade_rate_gate import FlattradeCallCategory, get_flattrade_rate_gate
+
+            category = FlattradeCallCategory.SCANNER_QUOTE
+            if endpoint in ("PlaceOrder", "ModifyOrder", "CancelOrder", "ExitSnoOrder"):
+                category = FlattradeCallCategory.ORDER
+            elif endpoint in (
+                "GetPositions",
+                "PositionBook",
+                "OrderBook",
+                "TradeBook",
+                "Holdings",
+                "Limits",
+            ):
+                category = FlattradeCallCategory.URGENT_QUOTE
+            elif endpoint in ("GetQuotes", "Touchline"):
+                category = FlattradeCallCategory.SCANNER_QUOTE
+            elif endpoint in ("GetTPSeries", "TPSeries"):
+                category = FlattradeCallCategory.HISTORICAL
+            elif endpoint in ("GetSecurityInfo", "SearchScrip"):
+                category = FlattradeCallCategory.DEPTH
+
+            gate = get_flattrade_rate_gate()
+            gate_timeout = 5.0 if category == FlattradeCallCategory.ORDER else 15.0
+            if not gate.acquire(category=category, timeout=gate_timeout):
+                log.warning(
+                    f"[Flattrade] Rate gate wait timed out for {endpoint} ({category.name})"
+                )
+        except Exception as e_gate:
+            log.debug(f"[Flattrade] Rate gate bypass notice: {e_gate}")
+
+        response = self._client.post(
+            f"{self.api_url}{endpoint}",
+            content=raw_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if endpoint == "SearchScrip" and response.status_code == 404:
+            return {"stat": "Ok", "values": []}
         response.raise_for_status()
         try:
             result = response.json()
@@ -500,8 +567,25 @@ class FlattradeAPI(BrokerAPI):
     def _resolve_instrument(self, instrument: str) -> dict[str, str]:
         exchange, symbol = instrument.split(":", 1) if ":" in instrument else ("NSE", instrument)
         key = f"{exchange.upper()}:{symbol.upper()}"
+        with _CACHE_LOCK:
+            if key in _FLATTRADE_RESOLVED_CACHE:
+                return _FLATTRADE_RESOLVED_CACHE[key]
         if key in self._instrument_cache:
+            with _CACHE_LOCK:
+                _FLATTRADE_RESOLVED_CACHE[key] = self._instrument_cache[key]
             return self._instrument_cache[key]
+
+        # 1. Official Index SSOT: Map indices to exact exchange tokens instantly (0ms)
+        from market.symbol_facade import _FLATTRADE_INDEX_REGISTRY, get_symbol_facade
+
+        facade = get_symbol_facade()
+        canonical = facade.to_canonical(symbol)
+        if canonical in _FLATTRADE_INDEX_REGISTRY:
+            resolved = dict(_FLATTRADE_INDEX_REGISTRY[canonical])
+            with _CACHE_LOCK:
+                _FLATTRADE_RESOLVED_CACHE[key] = resolved
+            self._instrument_cache[key] = resolved
+            return resolved
 
         result = self._post(
             "SearchScrip",
@@ -518,10 +602,26 @@ class FlattradeAPI(BrokerAPI):
             (
                 v
                 for v in values
-                if str(v.get("tsym", "")).upper() in {symbol.upper(), f"{symbol.upper()}-EQ"}
+                if str(v.get("tsym", "")).upper()
+                in {
+                    symbol.upper(),
+                    f"{symbol.upper()}-EQ",
+                    canonical.upper(),
+                    f"{canonical.upper()}-EQ",
+                }
             ),
-            values[0],
+            None,
         )
+        if exact is None:
+            exact = next(
+                (
+                    v
+                    for v in values
+                    if str(v.get("cname", "")).upper() == canonical.upper()
+                    or str(v.get("symname", "")).upper() == canonical.upper()
+                ),
+                values[0],
+            )
         resolved = {
             "exch": str(exact.get("exch") or exchange.upper()),
             "token": str(exact.get("token") or ""),
@@ -529,6 +629,11 @@ class FlattradeAPI(BrokerAPI):
         }
         if not resolved["token"]:
             raise RuntimeError(f"Flattrade instrument lookup omitted token for {instrument}")
+
+        with _CACHE_LOCK:
+            _FLATTRADE_RESOLVED_CACHE[key] = resolved
+        self._instrument_cache[key] = resolved
+        return resolved
 
         lot_size = _int(exact.get("ls"), 0)
         tick_size = _num(exact.get("ti"), 0.0)
@@ -550,33 +655,84 @@ class FlattradeAPI(BrokerAPI):
             except Exception:
                 log.warning("Could not persist verified Flattrade contract metadata", exc_info=True)
         self._instrument_cache[key] = resolved
+        tok = str(resolved["token"])
+        self._token_map[f"{resolved['exch']}|{tok}"] = resolved["tsym"]
+        self._token_map[tok] = resolved["tsym"]
+        try:
+            from market.symbol_facade import get_symbol_facade
+
+            get_symbol_facade().register_token_symbol(tok, resolved["tsym"], resolved["exch"])
+        except Exception as e_reg:
+            log.debug(f"[Flattrade] Token registration failed for {tok}: {e_reg}")
         return resolved
+
+    def get_symbol_for_token(self, token: str, exch: Optional[str] = None) -> Optional[str]:
+        """Reverse token resolution: returns trading symbol for a given exchange token."""
+        if not token:
+            return None
+        tok_str = str(token).strip()
+        if exch:
+            k = f"{exch.upper()}|{tok_str}"
+            if k in self._token_map:
+                return self._token_map[k]
+        return self._token_map.get(tok_str)
 
     def get_quote(self, instruments: list[str] | str) -> dict[str, Quote]:
         if isinstance(instruments, str):
             instruments = [instruments]
         quotes: dict[str, Quote] = {}
-        for instrument in instruments:
-            resolved = self._resolve_instrument(instrument)
-            result = self._post("GetQuotes", {"exch": resolved["exch"], "token": resolved["token"]})
-            ltp = _num(result.get("lp"))
-            close = _num(result.get("c"))
-            change_pct = _num(result.get("pc"))
-            change = ltp - close if close else 0.0
-            quotes[instrument] = Quote(
-                symbol=instrument,
-                last_price=ltp,
-                open=_num(result.get("o")),
-                high=_num(result.get("h")),
-                low=_num(result.get("l")),
-                close=close,
-                volume=_int(result.get("v")),
-                oi=_int(result.get("oi")) or None,
-                bid=_num(result.get("bp1")) or None,
-                ask=_num(result.get("sp1")) or None,
-                change=change,
-                change_pct=change_pct,
-            )
+
+        def _fetch_single(instrument: str) -> tuple[str, Optional[Quote]]:
+            try:
+                resolved = self._resolve_instrument(instrument)
+                result = self._post(
+                    "GetQuotes", {"exch": resolved["exch"], "token": resolved["token"]}
+                )
+                ltp = _num(result.get("lp"))
+                close = _num(result.get("c"))
+                change_pct = _num(result.get("pc"))
+                change = ltp - close if close else 0.0
+                q = Quote(
+                    symbol=instrument,
+                    last_price=ltp,
+                    open=_num(result.get("o")),
+                    high=_num(result.get("h")),
+                    low=_num(result.get("l")),
+                    close=close,
+                    volume=_int(result.get("v")),
+                    oi=_int(result.get("oi")) or None,
+                    bid=_num(result.get("bp1")) or None,
+                    ask=_num(result.get("sp1")) or None,
+                    change=change,
+                    change_pct=change_pct,
+                    vwap=_num(result.get("ap")) or None,
+                    upper_circuit=_num(result.get("uc")) or None,
+                    lower_circuit=_num(result.get("lc")) or None,
+                    provider="flattrade",
+                    source="REST",
+                    data_state="LIVE",
+                    provider_symbol=resolved.get("tsym"),
+                )
+                return instrument, q
+            except Exception as e_q:
+                log.debug(f"[Flattrade] Quote fetch failed for {instrument}: {e_q}")
+                return instrument, None
+
+        if len(instruments) == 1:
+            inst, q = _fetch_single(instruments[0])
+            if q:
+                quotes[inst] = q
+            return quotes
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_workers = min(16, len(instruments))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_fetch_single, inst): inst for inst in instruments}
+            for fut in as_completed(futures):
+                inst, q = fut.result()
+                if q:
+                    quotes[inst] = q
         return quotes
 
     def get_market_depth(self, symbol: str) -> dict[str, Any]:
@@ -724,17 +880,76 @@ class FlattradeAPI(BrokerAPI):
 
         exch = "MCX" if is_commodity else ("CDS" if is_currency else ("BFO" if is_bse else "NFO"))
         prefix = f"{exch}:" if is_commodity or is_currency else ("BSE:" if is_bse else "NSE:")
-        resolved = self._resolve_instrument(f"{prefix}{clean_sym}")
+
+        # 1. Resolve front future to anchor Option Chain query in Noren
+        import re
+
+        fut_tsym = clean_sym
+        try:
+            search_res = self._post("SearchScrip", {"exch": exch, "stext": clean_sym})
+            vals = search_res.get("values", [])
+            pat = re.compile(rf"^{re.escape(clean_sym)}\d{{2}}[A-Z]{{3}}(\d{{2}})?F$")
+            matching_futures = [v for v in vals if pat.match(v.get("tsym", ""))]
+            if matching_futures:
+                fut_tsym = matching_futures[0].get("tsym")
+            else:
+                fut_vals = [v for v in vals if str(v.get("tsym", "")).endswith("F")]
+                fut_tsym = fut_vals[0].get("tsym") if fut_vals else clean_sym
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.flattrade] Option future search error: {e_suppressed}")
+
+        # 2. Get spot price to establish center strike (Noren requires valid positive strprc)
+        spot_price = 0.0
+        try:
+            spot_q = self.get_quote([f"{prefix}{clean_sym}"])
+            if (
+                spot_q
+                and spot_q.get(f"{prefix}{clean_sym}")
+                and spot_q[f"{prefix}{clean_sym}"].last_price > 0
+            ):
+                spot_price = spot_q[f"{prefix}{clean_sym}"].last_price
+        except Exception as e_spot:
+            log.debug(f"[Flattrade] Spot quote lookup failed for {clean_sym}: {e_spot}")
+
+        if spot_price <= 0:
+            from market.symbol_master import get_strike_step
+
+            step = get_strike_step(clean_sym, spot=100.0)
+            spot_price = step * 100
+
+        atm_strike = int(round(spot_price))
+
         payload: dict[str, Any] = {
             "exch": exch,
-            "tsym": resolved.get("tsym", clean_sym),
-            "strprc": "0",
-            "cnt": "50",
+            "tsym": fut_tsym,
+            "strprc": str(atm_strike),
+            "cnt": "25",
         }
         if expiry:
             payload["exd"] = expiry
         result = self._post("GetOptionChain", payload)
         rows = self._rows(result, "values")
+        if not rows:
+            return []
+
+        # Batch pre-fetch live quotes for all strikes in parallel
+        tokens_to_fetch = [r.get("token") for r in rows if r.get("token")]
+        strike_quotes: dict[str, dict[str, Any]] = {}
+        if tokens_to_fetch:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _fetch_quote(tk: str) -> tuple[str, dict[str, Any]]:
+                try:
+                    res = self._post("GetQuotes", {"exch": exch, "token": tk})
+                    return tk, res if isinstance(res, dict) else {}
+                except Exception:
+                    return tk, {}
+
+            workers = min(16, len(tokens_to_fetch))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for tk, q_data in executor.map(_fetch_quote, tokens_to_fetch):
+                    strike_quotes[tk] = q_data
+
         contracts: list[OptionsContract] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -742,6 +957,9 @@ class FlattradeAPI(BrokerAPI):
             opt = str(row.get("optt") or "").upper()
             if opt not in {"CE", "PE"}:
                 continue
+            tk = str(row.get("token") or "")
+            q_info = strike_quotes.get(tk, {})
+
             contracts.append(
                 OptionsContract(
                     symbol=str(row.get("tsym") or ""),
@@ -749,12 +967,12 @@ class FlattradeAPI(BrokerAPI):
                     expiry=str(row.get("exd") or expiry or ""),
                     strike=_num(row.get("strprc")),
                     option_type=opt,
-                    last_price=_num(row.get("lp")),
-                    oi=_int(row.get("oi")),
-                    oi_change=_int(row.get("oich")),
-                    volume=_int(row.get("v")),
-                    bid=_num(row.get("bp1")) or None,
-                    ask=_num(row.get("sp1")) or None,
+                    last_price=_num(q_info.get("lp", row.get("lp"))),
+                    oi=_int(q_info.get("oi", row.get("oi"))),
+                    oi_change=_int(q_info.get("oich", row.get("oich"))),
+                    volume=_int(q_info.get("v", row.get("v"))),
+                    bid=_num(q_info.get("bp1", row.get("bp1"))) or None,
+                    ask=_num(q_info.get("sp1", row.get("sp1"))) or None,
                     lot_size=_int(row.get("ls"), 1),
                     exchange=exch,
                 )
@@ -850,15 +1068,35 @@ class FlattradeAPI(BrokerAPI):
 
     # ── WebSocket Streaming ──────────────────────────────────────────────
 
+    def _send_subscription_batches(
+        self, ws: Any, tokens: list[str], task: str = "t", batch_size: int = 25
+    ) -> None:
+        """Noren protocol requires chunked subscriptions to prevent code 1008 policy violation."""
+        if not ws or not tokens:
+            return
+        for i in range(0, len(tokens), batch_size):
+            chunk = tokens[i : i + batch_size]
+            payload = json.dumps({"t": task, "k": "#".join(chunk)})
+            try:
+                ws.send(payload)
+            except Exception as e_send:
+                logger.debug(f"[Flattrade] WebSocket {task} batch send error: {e_send}")
+            if i + batch_size < len(tokens):
+                time.sleep(0.04)
+
     def start_websocket(
         self,
         on_tick: Optional[Callable[[dict[str, Any]], None]] = None,
         on_order: Optional[Callable[[dict[str, Any]], None]] = None,
+        on_quote: Optional[Callable[[dict[str, Any]], None]] = None,
+        **kwargs: Any,
     ) -> None:
         """Start background WebSocket streaming if websocket-client is installed."""
         if not self.is_authenticated():
             log.warning("Flattrade WebSocket requested without active authentication.")
             return
+
+        tick_handler = on_tick or on_quote
 
         try:
             import websocket
@@ -869,35 +1107,110 @@ class FlattradeAPI(BrokerAPI):
         def _on_message(ws, raw_message):
             try:
                 msg = json.loads(raw_message)
-                if msg.get("t") == "tk" and on_tick:
-                    on_tick(msg)
-                elif msg.get("t") == "om" and on_order:
+                msg_type = msg.get("t", "")
+                if msg_type in {"om", "omsg"} and on_order:
                     on_order(msg)
+                elif msg_type in {"ak", "ck"}:
+                    stat = str(msg.get("s", "")).upper()
+                    if stat == "OK":
+                        log.info("[Flattrade] WebSocket connection acknowledged and authenticated.")
+                        if self._subscriptions:
+                            self._send_subscription_batches(
+                                ws, sorted(self._subscriptions), task="t"
+                            )
+                    else:
+                        log.warning(f"[Flattrade] WebSocket authentication failed: {msg}")
+                elif (
+                    msg_type in {"tk", "tf", "df", "dk"} or "lp" in msg or "ltp" in msg
+                ) and tick_handler:
+                    if "ts" not in msg and "tk" in msg:
+                        sym = self.get_symbol_for_token(
+                            str(msg["tk"]), msg.get("e") or msg.get("exch")
+                        )
+                        if sym:
+                            msg["ts"] = sym
+                    tick_handler(msg)
             except Exception as e_suppressed:
                 logger.debug(f"[brokers.flattrade] WebSocket message error: {e_suppressed}")
 
+        def _on_error(ws, error):
+            log.warning(f"[Flattrade] WebSocket notice: {error}")
+
+        def _on_close(ws, close_status_code, close_msg):
+            log.info(f"[Flattrade] WebSocket closed: code={close_status_code}, msg={close_msg}")
+            if close_status_code == 1008:
+                log.warning(
+                    "[Flattrade] WebSocket closed with code 1008 (policy violation / auth expired). "
+                    "Halting reconnect loop until re-authentication."
+                )
+                self._ws_stop.set()
+
         def _on_open(ws):
             auth_msg = {
-                "t": "c",
+                "t": "a",
                 "uid": self.user_id,
                 "actid": self.account_id,
-                "susertoken": self._token,
                 "source": "API",
+                "accesstoken": self._token,
             }
             ws.send(json.dumps(auth_msg))
-            log.info("[Flattrade] WebSocket connection opened and authenticated.")
+            log.info("[Flattrade] WebSocket connection opened and authentication sent.")
 
         def _run():
-            self._ws = websocket.WebSocketApp(
-                self.ws_url,
-                on_open=_on_open,
-                on_message=_on_message,
-            )
-            self._ws.run_forever()
+            backoff = 3.0
+            while not self._ws_stop.is_set():
+                if not self.is_authenticated():
+                    log.info("[Flattrade] WebSocket stopping: broker not authenticated.")
+                    break
+                try:
+                    self._ws = websocket.WebSocketApp(
+                        self.ws_url,
+                        on_open=_on_open,
+                        on_message=_on_message,
+                        on_error=_on_error,
+                        on_close=_on_close,
+                    )
+                    self._ws.run_forever(ping_interval=30, ping_timeout=10)
+                except Exception as e_ws:
+                    logger.debug(f"[Flattrade] WebSocket loop notice: {e_ws}")
+                if not self._ws_stop.is_set():
+                    time.sleep(backoff)
+                    backoff = min(backoff * 1.5, 30.0)
 
         self._ws_stop.clear()
         self._ws_thread = threading.Thread(target=_run, daemon=True)
         self._ws_thread.start()
+
+    def subscribe(self, instruments: list[str]) -> None:
+        """Subscribe to real-time market data ticks over WebSocket."""
+        tokens = []
+        for instrument in instruments:
+            try:
+                resolved = self._resolve_instrument(instrument)
+                token = f"{resolved['exch']}|{resolved['token']}"
+                tokens.append(token)
+                self._subscriptions.add(token)
+            except Exception as e_sub:
+                log.debug(f"[Flattrade] Resolve failed for subscription {instrument}: {e_sub}")
+        if self._ws and tokens:
+            self._send_subscription_batches(self._ws, tokens, task="t")
+
+    def unsubscribe(self, instruments: list[str]) -> None:
+        """Unsubscribe from real-time market data ticks over WebSocket."""
+        if self._ws:
+            tokens = []
+            for instrument in instruments:
+                try:
+                    resolved = self._resolve_instrument(instrument)
+                    token = f"{resolved['exch']}|{resolved['token']}"
+                    tokens.append(token)
+                    self._subscriptions.discard(token)
+                except Exception as e_unsub:
+                    log.debug(
+                        f"[Flattrade] Unsubscribe resolution error for {instrument}: {e_unsub}"
+                    )
+            if tokens:
+                self._send_subscription_batches(self._ws, tokens, task="u")
 
     def stop_websocket(self) -> None:
         self._ws_stop.set()

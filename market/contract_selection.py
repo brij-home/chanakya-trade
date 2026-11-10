@@ -597,3 +597,181 @@ def get_subscription_option_grid(
     except Exception as exc:
         logger.warning("[ContractSelection] Option grid unavailable for %s: %s", clean, exc)
         return []
+
+
+# ── MCX commodity contracts ───────────────────────────────────────────────────
+# MCX option symbols embed the expiry month (e.g. CRUDEOIL26NOV6500CE). Building
+# that suffix from a calendar guess and an assumed spot produces plausible but
+# unlisted contracts, which the broker rejects and which poison subscription and
+# depth state. Commodity selection therefore reads the published master only and
+# fails closed when the master or a fresh underlying quote is unavailable.
+
+COMMODITY_EXCHANGE = "MCX"
+
+
+def _master_expiry_date(row: Mapping[str, Any]) -> date | None:
+    raw = row.get("expiryDate")
+    if raw is None or isinstance(raw, bool) or not str(raw).strip():
+        return None
+    try:
+        return datetime.fromtimestamp(float(raw), IST).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _positive_finite(raw: Any) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _commodity_option_from_row(
+    row: Any,
+    *,
+    key: str | None,
+    underlying: str,
+    as_of: datetime,
+) -> ListedContract | None:
+    """Validate one MCX option row. Same-day expiry is excluded from new grids."""
+    if not isinstance(row, dict):
+        return None
+    symbol = str(row.get("symTicker") or key or "").strip()
+    if not symbol.startswith(f"{COMMODITY_EXCHANGE}:"):
+        return None
+    if key and row.get("symTicker") and row["symTicker"] != key:
+        return None
+    if canonical_symbol(str(row.get("underSym") or "")) != underlying:
+        return None
+    if row.get("tradeStatus") not in (1, "1"):
+        return None
+    option_type = str(row.get("optType") or "").upper()
+    if option_type not in {"CE", "PE"} or not symbol.endswith(option_type):
+        return None
+    strike = _positive_finite(row.get("strikePrice"))
+    lot = _positive_finite(row.get("minLotSize"))
+    tick = _positive_finite(row.get("tickSize"))
+    token = str(row.get("fyToken") or "").strip()
+    expiry = _master_expiry_date(row)
+    if strike is None or lot is None or tick is None or not token or token == "0":
+        return None
+    if expiry is None or expiry <= as_of.date():
+        return None
+    if not lot.is_integer():
+        return None
+    return ListedContract(
+        symbol=symbol,
+        underlying=underlying,
+        expiry=expiry,
+        option_type=option_type,
+        strike=strike,
+        lot_size=int(lot),
+        tick_size=tick,
+        token=token,
+    )
+
+
+def get_commodity_option_contracts(
+    underlying: str, *, as_of: datetime | None = None, records: Mapping[str, Any] | None = None
+) -> list[ListedContract]:
+    """Listed, active MCX option contracts for one underlying (no fabrication)."""
+    clean = canonical_symbol(underlying)
+    now = as_of or datetime.now(IST)
+    if now.tzinfo is None:
+        raise ValueError("Commodity contract selection requires an aware timestamp")
+    if records is None:
+        from market.symbol_master import load_master
+
+        try:
+            records = load_master("MCX_COM", offline_fallback=False)
+        except (RuntimeError, ValueError, OSError) as exc:
+            logger.warning("[ContractSelection] MCX master unavailable for %s: %s", clean, exc)
+            return []
+    contracts = []
+    for key, row in records.items():
+        contract = _commodity_option_from_row(row, key=key, underlying=clean, as_of=now)
+        if contract is not None:
+            contracts.append(contract)
+    return sorted(contracts, key=lambda c: (c.expiry, c.strike or 0.0, c.option_type, c.symbol))
+
+
+def front_month_commodity_future(
+    underlying: str, *, as_of: datetime | None = None, records: Mapping[str, Any] | None = None
+) -> str | None:
+    """Nearest unexpired MCX futures ticker for an underlying, from the master."""
+    clean = canonical_symbol(underlying)
+    now = as_of or datetime.now(IST)
+    if now.tzinfo is None:
+        raise ValueError("Commodity contract selection requires an aware timestamp")
+    if records is None:
+        from market.symbol_master import load_master
+
+        try:
+            records = load_master("MCX_COM", offline_fallback=False)
+        except (RuntimeError, ValueError, OSError) as exc:
+            logger.warning("[ContractSelection] MCX master unavailable for %s: %s", clean, exc)
+            return None
+    candidates: list[tuple[date, str]] = []
+    for key, row in records.items():
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symTicker") or key or "").strip()
+        if not symbol.startswith(f"{COMMODITY_EXCHANGE}:") or not symbol.endswith("FUT"):
+            continue
+        if canonical_symbol(str(row.get("underSym") or "")) != clean:
+            continue
+        if row.get("tradeStatus") not in (1, "1"):
+            continue
+        token = str(row.get("fyToken") or "").strip()
+        expiry = _master_expiry_date(row)
+        if not token or token == "0" or expiry is None or expiry < now.date():
+            continue
+        candidates.append((expiry, symbol))
+    if not candidates:
+        return None
+    return min(candidates)[1]
+
+
+def get_commodity_option_grid(
+    underlying: str,
+    *,
+    strikes_per_side: int = 2,
+    max_expiries: int = 1,
+    as_of: datetime | None = None,
+) -> list[str]:
+    """Paired CE/PE strikes around a fresh front-month quote, master-listed only."""
+    from market.quotes import get_quote
+
+    clean = canonical_symbol(underlying)
+    now = as_of or datetime.now(IST)
+    if now.tzinfo is None or strikes_per_side < 0 or max_expiries < 1:
+        return []
+    try:
+        from market.symbol_master import load_master
+
+        records = load_master("MCX_COM", offline_fallback=False)
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.warning("[ContractSelection] MCX master unavailable for %s: %s", clean, exc)
+        return []
+    contracts = get_commodity_option_contracts(clean, as_of=now, records=records)
+    if not contracts:
+        return []
+    future = front_month_commodity_future(clean, as_of=now, records=records)
+    if future is None:
+        logger.info("[ContractSelection] %s option grid held: no listed front-month future", clean)
+        return []
+    quote = get_quote([future]).get(future)
+    spot = fresh_underlying_price(quote, as_of=now)
+    if spot is None:
+        logger.info(
+            "[ContractSelection] %s option grid held: no fresh live front-month quote", clean
+        )
+        return []
+    return paired_option_grid(
+        contracts, spot, strikes_per_side=strikes_per_side, max_expiries=max_expiries
+    )

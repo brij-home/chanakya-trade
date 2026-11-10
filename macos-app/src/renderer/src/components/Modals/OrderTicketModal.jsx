@@ -1046,6 +1046,23 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                       <span className="font-semibold text-text tabular-nums">₹{totalCharges.toFixed(2)} (STT, GST, SEBI)</span>
                     </div>
                   )}
+                  {previewOrder?.charges?.execution_broker && (
+                    <div className="flex justify-between items-center text-[10px]">
+                      <span className="text-muted">Routing Broker:</span>
+                      <span className="font-bold text-text flex items-center gap-1.5">
+                        <span>{previewOrder.charges.execution_broker.toUpperCase()}</span>
+                        {previewOrder.charges.is_zero_brokerage ? (
+                          <span className="text-emerald-400 font-mono font-bold bg-emerald-500/15 px-1 py-0.5 rounded border border-emerald-500/30 text-[9px]">
+                            ₹0 BROKERAGE
+                          </span>
+                        ) : (
+                          <span className="text-muted font-mono text-[9px]">
+                            (₹20 Flat)
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span className="text-muted">Stop Loss &amp; Max Risk:</span>
                     <span className="text-red font-semibold tabular-nums">₹{stopLoss} (-₹{riskAmount.toFixed(0)})</span>

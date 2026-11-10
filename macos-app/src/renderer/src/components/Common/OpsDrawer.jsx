@@ -147,6 +147,8 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
   const overall = data?.overall_status || (loading ? 'SYNCING…' : 'NOMINAL')
   const cb = data?.circuit_breaker || {}
   const ws = data?.websocket || {}
+  const flattrade = data?.flattrade || {}
+  const flattradeWs = flattrade.websocket || {}
   const counts = data?.incident_counts || { P0: 0, P1: 0, P2: 0, P3: 0 }
   const incidents = data?.incidents || []
 
@@ -368,6 +370,23 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
             <div className="flex items-center justify-between text-[10px] font-mono text-muted">
               <span>Core Index & F&O: {ws.core_count || 0}</span>
               <span>Dynamic Screener: {ws.dynamic_count || 0}</span>
+            </div>
+
+            <div className="pt-2 border-t border-border/40 flex items-center justify-between text-[10px] font-mono">
+              <span className="text-muted flex items-center gap-1.5">
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{
+                    background: flattrade.authenticated ? 'var(--color-emerald)' : 'var(--color-muted)',
+                  }}
+                />
+                Standby: <strong className="text-text">Flattrade (Pi)</strong>
+              </span>
+              <span className={flattrade.authenticated ? 'text-emerald font-bold' : 'text-muted'}>
+                {flattrade.authenticated
+                  ? `${flattradeWs.subscriptions_count || 0} tokens ready`
+                  : 'Disconnected'}
+              </span>
             </div>
           </div>
 

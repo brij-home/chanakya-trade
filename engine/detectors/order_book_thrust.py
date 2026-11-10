@@ -57,6 +57,25 @@ def detect_order_book_thrust(ctx: DetectionContext) -> list[AutoAlert]:
             logger.debug(f"[order_book_thrust] TBT lookup exception for {ctx.symbol}: {e}")
             depth_data = None
 
+    if not depth_data or not isinstance(depth_data, dict) or not depth_data.get("bids"):
+        try:
+            from market.order_book import get_depth_book
+
+            book = get_depth_book(ctx.symbol)
+            bids_list = book.get_bids(50)
+            asks_list = book.get_asks(50)
+            if bids_list and asks_list:
+                depth_data = {
+                    "bids": bids_list,
+                    "asks": asks_list,
+                    "tbq": book.total_bid_qty(),
+                    "tsq": book.total_ask_qty(),
+                    "obi_50": book.obi(5),
+                    "density_score": 50.0,
+                }
+        except Exception as e_book:
+            logger.debug(f"[order_book_thrust] Fallback depth book error: {e_book}")
+
     if not depth_data or not isinstance(depth_data, dict):
         return []
 

@@ -241,4 +241,72 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
       expect.stringContaining('Critical timeout on quote gateway')
     )
   })
+
+  it('OpsDeckView renders institutional Dual Gateway matrix with Fyers and Flattrade telemetry', async () => {
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            overall_status: 'HEALTHY',
+            rate_gate: { plan: 'PRIME', requests_last_min: 42, max_per_min: 500, utilization_pct: 8.4, daily_budget_remaining: 480000 },
+            websocket: { total_subscribed: 680, max_capacity: 5000, utilization_pct: 13.6, core_count: 550, dynamic_count: 130 },
+            tbt: { active_total: 12, free_slots: 3 },
+            circuit_breaker: { state: 'CLOSED' },
+            flattrade: {
+              configured: true,
+              authenticated: true,
+              role: 'execution',
+              user_id: 'FZ59464',
+              rate_gate: {
+                plan: 'PI_CONNECT',
+                max_per_sec: 8,
+                requests_last_min: 15,
+                utilization_pct: 5.0,
+                status: 'NOMINAL',
+              },
+              websocket: {
+                connected: true,
+                subscriptions_count: 82,
+                state: 'STREAMING',
+              },
+            },
+            brokers: {
+              fyers: { authenticated: true, configured: true, role: 'both' },
+              flattrade: { authenticated: true, configured: true, role: 'execution' },
+              zerodha: { authenticated: false, configured: true, role: 'data' },
+            },
+            slo_report: { journeys: {} },
+            provider_health: { overall_health: 'HEALTHY', providers: {} },
+            incidents: [],
+          }),
+      })
+    )
+
+    render(<OpsDeckView />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Standby:/i)).toBeInTheDocument()
+      expect(screen.getByText(/Flattrade Feed:/i)).toBeInTheDocument()
+    })
+
+    const feedsTab = screen.getByTestId('tab-feeds')
+    await act(async () => {
+      fireEvent.click(feedsTab)
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/PRIMARY GATEWAY/i)).toBeInTheDocument()
+      expect(screen.getByText(/HOT STANDBY GATEWAY/i)).toBeInTheDocument()
+      expect(screen.getByText('FZ59464')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Set Exec/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Set Data/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Set Both/i })).toBeInTheDocument()
+      expect(screen.getAllByText(/REST Rate Governor/i).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getByRole('button', { name: /Inspect/i })).toBeInTheDocument()
+      expect(screen.getByTestId('btn-fyers-exec')).toBeInTheDocument()
+      expect(screen.getByTestId('btn-fyers-data')).toBeInTheDocument()
+      expect(screen.getByTestId('btn-fyers-both')).toBeInTheDocument()
+    })
+  })
 })

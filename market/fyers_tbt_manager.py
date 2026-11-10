@@ -18,7 +18,7 @@ Features:
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime
 from importlib import import_module
 import logging
 import math
@@ -402,7 +402,7 @@ def get_default_core_grid(
                     focus,
                     strikes_per_side=1,
                     max_expiries=1,
-                    as_of=now if ref_time is not None else None,
+                    as_of=now,
                 )
                 if s.startswith("NSE:")
             ]
@@ -412,34 +412,22 @@ def get_default_core_grid(
         # Evening (15:30 - 23:30 IST): MCX Commodities & Currency CDS
         from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
-        crude_fut = _resolve_commodity_contract("CRUDEOIL")
+        crude_fut = _resolve_commodity_contract("CRUDEOIL", ref_time=now)
         core = [
             crude_fut,
-            _resolve_commodity_contract("NATURALGAS"),
-            _resolve_commodity_contract("GOLD"),
-            _resolve_commodity_contract("SILVER"),
+            _resolve_commodity_contract("NATURALGAS", ref_time=now),
+            _resolve_commodity_contract("GOLD", ref_time=now),
+            _resolve_commodity_contract("SILVER", ref_time=now),
         ]
+        # Near-ATM crude options must come from the published master and a fresh
+        # front-month quote. No calendar-suffix or default-price fallback exists:
+        # an unavailable master simply leaves the grid on futures.
         try:
-            from market.quotes import get_ltp
+            from market.contract_selection import get_commodity_option_grid
 
-            c_ltp = get_ltp("MCX:CRUDEOIL") or 6500.0
-            c_atm = int(round(c_ltp / 50.0) * 50)
-            # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
-            c_dt = now if now.day <= 15 else now + timedelta(days=20)
-            c_suffix = c_dt.strftime("%y%b").upper()
-            core.extend(
-                [
-                    f"MCX:CRUDEOIL{c_suffix}{c_atm}CE",
-                    f"MCX:CRUDEOIL{c_suffix}{c_atm}PE",
-                ]
-            )
-        except Exception:
-            core.extend(
-                [
-                    _resolve_commodity_contract("COPPER"),
-                    _resolve_commodity_contract("ZINC"),
-                ]
-            )
+            core.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=1, as_of=now))
+        except Exception as exc:
+            logger.warning(f"[TbtManager] MCX option grid unavailable for CRUDEOIL: {exc}")
 
         # Currency derivatives (CDS) trade 09:00 - 17:00 IST.
         # After 17:00 IST, CDS is CLOSED. Never keep reserve for closed currency!
@@ -532,6 +520,12 @@ class TbtSocketWorker:
                 on_error=self._on_error,
                 reconnect=False,  # Autonomous control: prevent Fyers SDK uncontrolled 5s hammer loops
             )
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[TbtWorker-{self.worker_id}] SDK log rotation unavailable: {exc}")
             self.ws.onopen = self._on_connect
             self.ws.background_flag = True
             self.ws.connect()

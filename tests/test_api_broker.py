@@ -172,6 +172,10 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
+            patch("web.api._has_shoonya", return_value=False),
+            patch("web.api._has_mstock", return_value=False),
+            patch("web.api._has_kotak", return_value=False),
+            patch("web.api._has_flattrade", return_value=False),
             patch(
                 "web.api._env",
                 side_effect=lambda k, d="": (
@@ -210,6 +214,10 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
+            patch("web.api._has_shoonya", return_value=False),
+            patch("web.api._has_mstock", return_value=False),
+            patch("web.api._has_kotak", return_value=False),
+            patch("web.api._has_flattrade", return_value=False),
             patch(
                 "web.api._env",
                 side_effect=lambda k, d="": (
@@ -242,6 +250,10 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
+            patch("web.api._has_shoonya", return_value=False),
+            patch("web.api._has_mstock", return_value=False),
+            patch("web.api._has_kotak", return_value=False),
+            patch("web.api._has_flattrade", return_value=False),
             patch("brokers.session.register_broker") as mock_register,
             patch.dict(
                 "sys.modules",
@@ -266,6 +278,10 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
+            patch("web.api._has_shoonya", return_value=False),
+            patch("web.api._has_mstock", return_value=False),
+            patch("web.api._has_kotak", return_value=False),
+            patch("web.api._has_flattrade", return_value=False),
             patch(
                 "web.api._env",
                 side_effect=lambda k, d="": (
@@ -301,6 +317,10 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
+            patch("web.api._has_shoonya", return_value=False),
+            patch("web.api._has_mstock", return_value=False),
+            patch("web.api._has_kotak", return_value=False),
+            patch("web.api._has_flattrade", return_value=False),
             patch(
                 "web.api._env",
                 side_effect=lambda k, d="": (

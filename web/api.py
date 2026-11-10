@@ -908,19 +908,30 @@ def _auto_restore_brokers_sync() -> None:
     # Flattrade (Pi Connect)
     if _has_flattrade():
         try:
-            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
+            from brokers.flattrade import FlattradeAPI
 
-            if _FT_FLAT.exists():
-                b = FlattradeAPI()
-                if b.is_authenticated():
-                    register_broker("flattrade", b)
-                    try:
-                        from brokers.session import _start_websocket
+            b = FlattradeAPI()
+            if (
+                not b.is_authenticated()
+                and b._password
+                and b._totp_secret
+                and b._api_key
+                and b._api_secret
+            ):
+                try:
+                    b.complete_login()
+                except Exception as e_login:
+                    logging.warning("[startup] Flattrade headless auto-login failed: %s", e_login)
 
-                        _start_websocket(b)
-                    except Exception as e_suppressed:
-                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-                    logging.info("[startup] Flattrade session active & registered")
+            if b.is_authenticated():
+                register_broker("flattrade", b)
+                try:
+                    from brokers.session import _start_websocket
+
+                    _start_websocket(b)
+                except Exception as e_suppressed:
+                    logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+                logging.info("[startup] Flattrade session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore Flattrade: %s", exc)
 
@@ -1440,6 +1451,36 @@ async def get_system_health_hub(
     mem_status = get_memory_status().to_dict()
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
 
+    from market.streaming import market_streams
+    from brokers.session import get_all_brokers, get_broker_role
+    from market.flattrade_rate_gate import get_flattrade_rate_gate
+
+    all_brks = get_all_brokers()
+    flat_brk = all_brks.get("flattrade")
+    flat_ws = getattr(flat_brk, "_ws", None)
+    flat_sock = getattr(flat_ws, "sock", None) if flat_ws else None
+    flat_ws_conn = bool(flat_sock and getattr(flat_sock, "connected", False))
+    flat_stream = market_streams.status("flattrade")
+    flat_subs = list(getattr(flat_brk, "_subscriptions", set())) if flat_brk else []
+    flat_rg_diag = get_flattrade_rate_gate().get_diagnostics()
+
+    flattrade_diag = {
+        "configured": _has_flattrade(),
+        "authenticated": _flattrade_auth(),
+        "role": get_broker_role("flattrade"),
+        "user_id": getattr(flat_brk, "user_id", "") if flat_brk else "",
+        "account_id": getattr(flat_brk, "account_id", "") if flat_brk else "",
+        "rate_gate": flat_rg_diag,
+        "websocket": {
+            "connected": flat_ws_conn,
+            "state": flat_stream.state,
+            "subscriptions_count": len(flat_subs),
+            "subscriptions": flat_subs[:60],
+            "last_event_at": flat_stream.last_event_at,
+            "dropped_events": flat_stream.dropped_events,
+        },
+    }
+
     # If runtime in-memory bytecode is stale compared to disk, inject P3 advisory note (maintenance, not operational impairment)
     if code_prov.is_stale_in_memory:
         sample_path = code_prov.stale_files[0]["path"] if code_prov.stale_files else "unknown"
@@ -1498,6 +1539,7 @@ async def get_system_health_hub(
         "tbt": tbt_diag,
         "websocket": ws_diag,
         "brokers": broker_statuses,
+        "flattrade": flattrade_diag,
         "provider_health": provider_health,
         "slo_report": slo_report,
         "telemetry_summary": telem_summary,
@@ -2157,6 +2199,10 @@ def _fyers_auth() -> bool:
             profile = b.get_profile()
             if not profile or not getattr(profile, "user_id", ""):
                 return False
+            from brokers.session import register_broker
+
+            if "fyers" not in get_registered_brokers():
+                register_broker("fyers", b, primary=True, role="both")
             return True
         except Exception:
             return False
@@ -3863,8 +3909,33 @@ async def set_broker_role_endpoint(req: BrokerRoleRequest, request: Request):
         "fyers": "fyers",
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
+        "mstock": "mstock",
+        "kotak": "kotak",
+        "flattrade": "flattrade",
     }
     session_key = _API_TO_SESSION.get(req.broker, req.broker)
+
+    if session_key not in get_all_brokers():
+        from brokers.session import register_broker
+
+        if session_key == "fyers" and _has_fyers():
+            try:
+                from brokers.fyers import FyersAPI
+
+                b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
+                if b.is_authenticated():
+                    register_broker("fyers", b, primary=True, role=req.role)
+            except Exception as e_reg:
+                logger.debug(f"[web.api] JIT broker registration failed for fyers: {e_reg}")
+        elif session_key == "flattrade" and _has_flattrade():
+            try:
+                from brokers.flattrade import FlattradeAPI
+
+                b = FlattradeAPI()
+                if b.is_authenticated():
+                    register_broker("flattrade", b, role=req.role)
+            except Exception as e_reg:
+                logger.debug(f"[web.api] JIT broker registration failed for flattrade: {e_reg}")
 
     if session_key not in get_all_brokers():
         from fastapi import HTTPException

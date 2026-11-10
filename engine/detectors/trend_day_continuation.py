@@ -102,8 +102,8 @@ def detect_trend_day_pullback(
     is_test_env = bool(os.getenv("CHANAKYA_TESTING") == "1" or os.getenv("PYTEST_CURRENT_TEST"))
     now_time = now_dt.time()
 
-    # Time Window: Active from 10:15 to 14:30 IST (mid-morning to mid-afternoon continuation)
-    if not is_test_env and not (dtime(10, 15) <= now_time <= dtime(14, 30)):
+    # Time Window: Active from 10:15 to 15:15 IST (mid-morning to afternoon continuation)
+    if not is_test_env and not (dtime(10, 15) <= now_time <= dtime(15, 15)):
         return None
 
     clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
@@ -259,18 +259,36 @@ def detect_trend_day_pullback(
                 i_ltp = float(getattr(iq, "last_price", 0.0) or 0.0)
                 i_vwap = float(getattr(iq, "vwap", 0.0) or 0.0)
                 if i_vwap > 0 and i_ltp > 0:
+                    # Relative strength decoupling: If the individual stock exhibits strong momentum
+                    # (trading >= 0.8% above its own VWAP for longs, or <= 0.8% below for shorts),
+                    # it leads its sector independently of broader benchmark chop.
+                    is_stock_rs_leader = val_vwap > 0 and ltp >= (val_vwap * 1.008)
+                    is_stock_rs_laggard = val_vwap > 0 and ltp <= (val_vwap * 0.992)
+
                     if is_bull_pullback and i_ltp < i_vwap:
-                        logger.debug(
-                            f"[TrendContinuation] Suppressed Bullish Continuation on {symbol}: "
-                            f"{idx_probe_sym} ({i_ltp:.1f}) below VWAP ({i_vwap:.1f}) - counter-trend trap"
-                        )
-                        return None
+                        if not is_stock_rs_leader:
+                            logger.debug(
+                                f"[TrendContinuation] Suppressed Bullish Continuation on {symbol}: "
+                                f"{idx_probe_sym} ({i_ltp:.1f}) below VWAP ({i_vwap:.1f}) - counter-trend trap"
+                            )
+                            return None
+                        else:
+                            logger.info(
+                                f"[TrendContinuation] Bullish Continuation ALLOWED on {symbol} despite benchmark {idx_probe_sym} below VWAP: "
+                                f"stock exhibits strong Relative Strength (+{((ltp - val_vwap) / val_vwap * 100):.2f}% above own VWAP)."
+                            )
                     elif is_bear_pullback and i_ltp > i_vwap:
-                        logger.debug(
-                            f"[TrendContinuation] Suppressed Bearish Continuation on {symbol}: "
-                            f"{idx_probe_sym} ({i_ltp:.1f}) above VWAP ({i_vwap:.1f}) - counter-trend trap"
-                        )
-                        return None
+                        if not is_stock_rs_laggard:
+                            logger.debug(
+                                f"[TrendContinuation] Suppressed Bearish Continuation on {symbol}: "
+                                f"{idx_probe_sym} ({i_ltp:.1f}) above VWAP ({i_vwap:.1f}) - counter-trend trap"
+                            )
+                            return None
+                        else:
+                            logger.info(
+                                f"[TrendContinuation] Bearish Continuation ALLOWED on {symbol} despite benchmark {idx_probe_sym} above VWAP: "
+                                f"stock exhibits strong Relative Weakness ({((ltp - val_vwap) / val_vwap * 100):.2f}% below own VWAP)."
+                            )
         except Exception as e_idx_regime:
             logger.debug(
                 f"[TrendContinuation] Index regime gate non-fatal check bypassed: {e_idx_regime}"

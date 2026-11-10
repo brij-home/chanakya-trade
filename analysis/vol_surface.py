@@ -338,7 +338,12 @@ def analyze_volatility_surface(
         from market.quotes import get_ltp
         from analysis.options import _dte_days
 
-        spot = get_ltp(f"NSE:{underlying}")
+        spot = (
+            get_ltp(underlying)
+            or get_ltp(f"NSE:{underlying}")
+            or get_ltp(f"BSE:{underlying}-INDEX")
+            or 0.0
+        )
         if spot <= 0:
             return None
 

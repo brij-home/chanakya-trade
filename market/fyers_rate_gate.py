@@ -503,66 +503,81 @@ class UnifiedFyersRateGate:
             heapq.heappush(self._waiters, waiter_entry)
             self._total_throttled += 1
 
-        # Wait loop until this thread is at the top of the queue and token is available
-        deadline = (start_wait + timeout) if timeout is not None else None
+        if timeout is None:
+            if category == FyersCallCategory.ORDER:
+                timeout = 5.0
+            elif category == FyersCallCategory.URGENT_QUOTE:
+                timeout = 5.0
+            elif category == FyersCallCategory.HISTORICAL:
+                timeout = 10.0
+            elif category == FyersCallCategory.DEPTH_CHAIN:
+                timeout = 10.0
+            else:
+                timeout = 8.0
 
-        while True:
-            with self._lock:
-                now = time.time()
-                self._purge_stale_timestamps(now)
+        deadline = start_wait + timeout
+        acquired = False
 
-                # Check if we are at the top of the priority queue
-                if self._waiters and self._waiters[0][1] == tie_breaker:
-                    waiter_cat = self._waiters[0][2]
-                    sleep_needed = self._calculate_sleep_needed(now, category=waiter_cat)
-                    if sleep_needed <= 0.0:
-                        # Success: pop ourselves and record consumption
-                        heapq.heappop(self._waiters)
-                        self._sliding_window.append((now, category))
-                        self._last_dispatch_ts = now
-                        if category == FyersCallCategory.DEPTH_CHAIN:
-                            self._last_depth_dispatch_ts = now
-                        elif category == FyersCallCategory.HISTORICAL:
-                            self._last_hist_dispatch_ts = now
-                        self._total_requests[category] += 1
-                        self._daily_requests += 1
-                        self._daily_by_category[category] += 1
-                        self._quota_dirty = True
-                        if self._daily_requests % 50 == 0:
-                            self._save_daily_quota()
-                            self._quota_dirty = False
-                        elapsed_wait = now - start_wait
-                        self._total_throttle_seconds += elapsed_wait
-                        if len(self._sliding_window) > self._peak_minute_count:
-                            self._peak_minute_count = len(self._sliding_window)
-                        # Wake the next waiter if queue not empty
-                        if self._waiters:
-                            self._waiters[0][3].set()
-                        return True
+        try:
+            while True:
+                with self._lock:
+                    now = time.time()
+                    self._purge_stale_timestamps(now)
+
+                    # Check if we are at the top of the priority queue
+                    if self._waiters and self._waiters[0][1] == tie_breaker:
+                        waiter_cat = self._waiters[0][2]
+                        sleep_needed = self._calculate_sleep_needed(now, category=waiter_cat)
+                        if sleep_needed <= 0.0:
+                            # Success: pop ourselves and record consumption
+                            heapq.heappop(self._waiters)
+                            self._sliding_window.append((now, category))
+                            self._last_dispatch_ts = now
+                            if category == FyersCallCategory.DEPTH_CHAIN:
+                                self._last_depth_dispatch_ts = now
+                            elif category == FyersCallCategory.HISTORICAL:
+                                self._last_hist_dispatch_ts = now
+                            self._total_requests[category] += 1
+                            self._daily_requests += 1
+                            self._daily_by_category[category] += 1
+                            self._quota_dirty = True
+                            if self._daily_requests % 50 == 0:
+                                self._save_daily_quota()
+                                self._quota_dirty = False
+                            elapsed_wait = now - start_wait
+                            self._total_throttle_seconds += elapsed_wait
+                            if len(self._sliding_window) > self._peak_minute_count:
+                                self._peak_minute_count = len(self._sliding_window)
+                            # Wake the next waiter if queue not empty
+                            if self._waiters:
+                                self._waiters[0][3].set()
+                            acquired = True
+                            return True
+                        else:
+                            sleep_to_use = sleep_needed
                     else:
-                        sleep_to_use = sleep_needed
-                else:
-                    # We are not at the head of the queue; wait for head to finish or next slot
-                    sleep_to_use = 0.05
+                        # We are not at the head of the queue; wait for head to finish or next slot
+                        sleep_to_use = 0.05
 
-            # Handle timeout check
-            now = time.time()
-            if deadline is not None:
+                # Handle timeout check
+                now = time.time()
                 remaining = deadline - now
                 if remaining <= 0:
-                    with self._lock:
-                        # Remove ourselves from waiters if still present
+                    return False
+                sleep_to_use = min(sleep_to_use, remaining)
+
+                # Wait on event or sleep
+                event.clear()
+                safe_sleep = max(0.0, min(sleep_to_use, 60.0))
+                event.wait(timeout=safe_sleep)
+        finally:
+            if not acquired:
+                with self._lock:
+                    if any(w[1] == tie_breaker for w in self._waiters):
                         self._waiters = [w for w in self._waiters if w[1] != tie_breaker]
                         heapq.heapify(self._waiters)
                         if self._waiters:
                             self._waiters[0][3].set()
-                    return False
-                sleep_to_use = min(sleep_to_use, remaining)
-
-            # Wait on event or sleep
-            event.clear()
-            safe_sleep = max(0.0, min(sleep_to_use, 60.0))
-            event.wait(timeout=safe_sleep)
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return real-time usage telemetry, remaining capacity, and diagnostic stats."""

@@ -181,7 +181,10 @@ def detect_index_call_setup(
                 primary_vwap=vwap,
                 quotes_map=quotes_map,
             )
-            if smt_res and smt_res.verdict in ("BULLISH_DIVERGENCE_BEAR_TRAP", "CONFIRMED_HARMONY"):
+            if smt_res and (
+                smt_res.divergence_type in ("BULLISH_DIVERGENCE_BEAR_TRAP", "CONFIRMED_HARMONY")
+                or smt_res.is_trap
+            ):
                 _has_smt_reversal = True
         except Exception as e_smt:
             logger.debug(

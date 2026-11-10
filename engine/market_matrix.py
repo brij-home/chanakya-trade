@@ -247,6 +247,10 @@ class MarketMatrix:
         ts = time.time()
         atp = 0.0
 
+        provider = str(
+            (tick.get("provider") if isinstance(tick, dict) else getattr(tick, "provider", None))
+            or "stream"
+        )
         if isinstance(tick, dict):
             raw_symbol = str(tick.get("symbol") or tick.get("n") or "")
             ltp = float(tick.get("ltp") or tick.get("lp") or tick.get("last_price") or 0.0)
@@ -254,7 +258,12 @@ class MarketMatrix:
             ts = float(tick.get("exch_feed_time") or tick.get("timestamp") or time.time())
             atp = float(tick.get("atp") or tick.get("vwap") or 0.0)
         else:
-            raw_symbol = str(getattr(tick, "symbol", "") or "")
+            raw_symbol = str(
+                getattr(tick, "symbol", "")
+                or getattr(tick, "canonical_instrument_id", "")
+                or getattr(tick, "provider_symbol", "")
+                or ""
+            )
             ltp = float(getattr(tick, "ltp", 0.0) or getattr(tick, "last_price", 0.0) or 0.0)
             volume = int(getattr(tick, "volume", 0) or 0)
             ts = float(getattr(tick, "timestamp", 0.0) or time.time())
@@ -275,6 +284,7 @@ class MarketMatrix:
                 "atp": atp,
                 "symbol": clean,
                 "raw_symbol": raw_symbol,
+                "provider": provider,
             }
 
         # Thread-safe buffer append
@@ -314,6 +324,10 @@ class MarketMatrix:
                 "symbol": clean,
                 "count": 0,
                 "last_price": ltp_val,
+                "ltp": ltp_val,
+                "volume": int(latest.get("volume", 0) or 0),
+                "timestamp": float(latest.get("timestamp", 0.0) or 0.0),
+                "provider": str(latest.get("provider", "stream")),
                 "vwap": atp_val,
                 "atp": atp_val,
                 "session_vwap": atp_val,
@@ -327,12 +341,16 @@ class MarketMatrix:
                 "std": 0.0,
                 "min": 0.0,
                 "max": 0.0,
-                "total_volume": 0,
+                "total_volume": int(latest.get("volume", 0) or 0),
             }
 
         stats = buf.get_snapshot()
         stats["symbol"] = clean
         stats["atp"] = atp_val
+        stats["ltp"] = ltp_val
+        stats["volume"] = int(latest.get("volume", 0) or stats.get("total_volume", 0) or 0)
+        stats["timestamp"] = float(latest.get("timestamp", 0.0) or 0.0)
+        stats["provider"] = str(latest.get("provider", "stream"))
         stats["session_vwap"] = atp_val if atp_val > 0 else stats.get("vwap", 0.0)
         stats["atp_distance_pct"] = (
             round(((stats["last_price"] - atp_val) / atp_val) * 100.0, 3) if atp_val > 0 else 0.0

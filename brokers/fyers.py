@@ -760,6 +760,14 @@ class FyersAPI(BrokerAPI):
                 client_id=self._app_id,
                 log_path="",
             )
+            # The SDK attaches an unbounded cwd FileHandler on construction and each
+            # new client appends another one to the same logger. Bound and dedupe.
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[FyersAPI] SDK log rotation unavailable: {exc}")
         return self._fyers
 
     def _is_token_expired(self, ts: float) -> bool:

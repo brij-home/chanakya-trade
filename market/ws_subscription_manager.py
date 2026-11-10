@@ -97,14 +97,29 @@ CORE_BASE_SYMBOLS: list[str] = [
     "NSE:HEROMOTOCO-EQ",
 ]
 
-# Dynamically populate liquid taxonomy equities and benchmarks
+# Dynamically populate liquid taxonomy equities, official F&O universe, and benchmarks
 try:
+    from config.market_universes import FNO_EQUITY_SYMBOLS, FNO_INDEX_SYMBOLS
     from analysis.universe import SECTOR_TAXONOMY
     from market.instruments import resolve_corporate_alias
     from market.symbol_master import resolve_fyers_equity_symbol
+    from market.indices import INDEX_INSTRUMENTS
     import json
     from pathlib import Path
 
+    # 1. Authoritative F&O Single-Stock Equities & Benchmarks
+    for _s in sorted(FNO_EQUITY_SYMBOLS):
+        _clean = resolve_corporate_alias(_s)
+        _eq_sym = resolve_fyers_equity_symbol(_clean, exch="NSE")
+        if _eq_sym and _eq_sym not in CORE_BASE_SYMBOLS:
+            CORE_BASE_SYMBOLS.append(_eq_sym)
+
+    for _idx in sorted(FNO_INDEX_SYMBOLS):
+        _mapped = INDEX_INSTRUMENTS.get(_idx)
+        if _mapped and _mapped not in CORE_BASE_SYMBOLS:
+            CORE_BASE_SYMBOLS.append(_mapped)
+
+    # 2. Sectoral Taxonomies
     for _sec_info in SECTOR_TAXONOMY.values():
         for _s in _sec_info.get("symbols", []):
             _clean = resolve_corporate_alias(_s)
@@ -279,15 +294,20 @@ def get_active_index_options_grid(
 
 
 def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
-    """
-    Generate active MCX Commodity and Currency CDS futures and near ATM options.
-    """
-    from datetime import datetime, timedelta
+    """Active MCX/CDS futures plus master-listed near-ATM commodity options.
 
-    now = ref_time or datetime.now()
-    # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
-    c_dt = now if now.day <= 15 else now + timedelta(days=20)
-    c_suffix = c_dt.strftime("%y%b").upper()
+    Option symbols are never assembled from a calendar suffix or a default price.
+    A grid is emitted only when the published master lists both sides of a strike
+    and a fresh front-month quote anchors it. Historical/simulated reference times
+    cannot be served from today's master, so they return futures only.
+    """
+    from datetime import datetime
+
+    from config.constants import IST
+
+    now = ref_time or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
 
     from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
@@ -302,72 +322,42 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
         _resolve_currency_contract("EURINR"),
     ]
 
-    crude_atm = 6500
-    try:
-        from market.quotes import get_ltp
-
-        cl = get_ltp("MCX:CRUDEOIL") or 6500.0
-        crude_atm = int(round(cl / 50.0) * 50)
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
-        )
-
-    crude_step = 50.0
-    try:
-        from market.symbol_master import get_strike_step
-
-        crude_step = get_strike_step("CRUDEOIL", spot=cl)
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Crude step resolution non-fatal: {e_suppressed}"
-        )
-
-    for offset in (-2, -1, 0, 1, 2):
-        stk = int(round(crude_atm + (offset * crude_step)))
-        comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}CE")
-        comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}PE")
-
-    # Authoritative Pre-Subscription Filter: validate commodity/CDS contracts when running live (ref_time is None)
     if ref_time is None:
-        try:
-            from market.symbol_master import load_master
+        from market.contract_selection import get_commodity_option_grid
 
-            mcx_data = None
+        comm_symbols.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=2, as_of=now))
+
+    # Authoritative pre-subscription filter: drop symbols the published master does
+    # not list. A degraded snapshot may hide a newly listed contract, so it only
+    # prunes futures; it never invents a replacement symbol.
+    if ref_time is None:
+        from market.symbol_master import load_master
+
+        masters: dict[str, dict | None] = {}
+        for name in ("MCX_COM", "NSE_CD"):
             try:
-                mcx_data = load_master("MCX_COM", offline_fallback=True)
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[market.ws_subscription_manager] MCX_COM master load non-fatal: {e_suppressed}"
-                )
-
-            cd_data = None
-            try:
-                cd_data = load_master("NSE_CD", offline_fallback=True)
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[market.ws_subscription_manager] NSE_CD master load non-fatal: {e_suppressed}"
-                )
-
-            filtered_comm = []
-            for s in comm_symbols:
-                if s.startswith("MCX:") and mcx_data is not None:
-                    if s in mcx_data:
-                        filtered_comm.append(s)
-                elif s.startswith("NSE:") and cd_data is not None:
-                    if s in cd_data:
-                        filtered_comm.append(s)
-                else:
-                    filtered_comm.append(s)
-
-            pruned = len(comm_symbols) - len(filtered_comm)
-            if pruned > 0:
-                logger.info(
-                    f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} invalid commodity/CDS contracts before broker dispatch."
-                )
-            comm_symbols = filtered_comm
-        except Exception as e_comm_flt:
-            logger.debug(f"[ws_sub_manager] Non-fatal commodity grid filter: {e_comm_flt}")
+                masters[name] = load_master(name, offline_fallback=False)
+            except Exception as exc:
+                logger.warning(f"[ws_sub_manager] {name} master unavailable for pruning: {exc}")
+                masters[name] = None
+        kept = []
+        for symbol in comm_symbols:
+            if symbol.startswith("MCX:"):
+                master = masters["MCX_COM"]
+            elif symbol.startswith("NSE:"):
+                master = masters["NSE_CD"]
+            else:
+                master = None
+            # An unavailable master cannot prove a symbol unlisted; keep it rather
+            # than dropping possibly valid exposure or discovery contracts.
+            if master is None or symbol in master:
+                kept.append(symbol)
+        pruned = len(comm_symbols) - len(kept)
+        if pruned > 0:
+            logger.info(
+                f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} unlisted commodity/CDS contracts before broker dispatch."
+            )
+        comm_symbols = kept
 
     return comm_symbols
 

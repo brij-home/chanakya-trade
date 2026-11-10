@@ -602,6 +602,9 @@ class WebSocketManager:
         try:
             CHUNK_SIZE = 50
             for i in range(0, len(new_symbols), CHUNK_SIZE):
+                if not self._ws or not self._connected:
+                    logger.debug("[WebSocket] Disconnected during batch subscription dispatch")
+                    break
                 batch = new_symbols[i : i + CHUNK_SIZE]
                 self._ws.subscribe(batch)
                 self._subscribed.update(batch)
@@ -727,6 +730,12 @@ class WebSocketManager:
                 on_error=self._on_error,
                 on_message=self._on_message,
             )
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[WebSocket] SDK log rotation unavailable: {exc}")
             self._ws.connect()
         except ImportError:
             logger.error("fyers-apiv3 not installed — WebSocket unavailable")
@@ -917,7 +926,16 @@ class WebSocketManager:
 
     def _on_message(self, message) -> None:
         """Process incoming tick data."""
-        self._last_packet_at = time.time()
+        now_ts = time.time()
+        self._last_packet_at = now_ts
+        if now_ts - getattr(self, "_last_provider_success_at", 0.0) > 10.0:
+            self._last_provider_success_at = now_ts
+            try:
+                from engine.observability import get_registry
+
+                get_registry().record_provider_success("fyers")
+            except Exception as e_reg:
+                logger.debug(f"[market.websocket] Provider success record error: {e_reg}")
         try:
             if isinstance(message, str):
                 data_list = json.loads(message)

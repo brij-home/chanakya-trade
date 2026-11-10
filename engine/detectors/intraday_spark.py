@@ -142,7 +142,7 @@ def detect_intraday_mover_sparks(
         or (os.environ.get("DEPLOY_MODE") == "test")
         or ("PYTEST_CURRENT_TEST" in os.environ)
     )
-    if not is_test_env and (curr_t < dtime(9, 20) or curr_t >= dtime(14, 0)):
+    if not is_test_env and (curr_t < dtime(9, 20) or curr_t > dtime(15, 15)):
         return found
 
     scan_universe = list(universe) if universe else precursor_radar.get_scan_universe(segment="ALL")
@@ -247,7 +247,11 @@ def detect_intraday_mover_sparks(
 
         if vwap > 0:
             vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0
-            max_allowed_ext = 1.20 if seg == "INDEX" else 2.50
+            max_allowed_ext = (
+                1.20
+                if seg == "INDEX"
+                else (max(2.50, min(4.20, abs(chg) * 0.85)) if abs(chg) >= 1.80 else 2.50)
+            )
             if vwap_dist_pct > max_allowed_ext:
                 continue
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -318,7 +319,7 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     bd_str = "\n".join(breakdown_lines) if breakdown_lines else "  • <i>No trades executed</i>"
 
     best_str = (
-        f"<b>{best['symbol']}</b> ({best['archetype']}) <b>+{best['r_multiple']:.1f}R</b>"
+        f"<b>{best.get('symbol', 'N/A')}</b> ({best.get('archetype', 'SETUP')}) <b>+{best.get('r_multiple', best.get('realized_r', 0.0)):.1f}R</b>"
         if best
         else "None"
     )
@@ -365,13 +366,40 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     )
 
 
-def broadcast_eod_scorecard(scorecard: dict[str, Any]) -> None:
-    """Send EOD scorecard to Telegram and SSE."""
+def broadcast_eod_scorecard(
+    scorecard: dict[str, Any], force: bool = False, enforce_disk_latch: bool = False
+) -> bool:
+    """Send EOD scorecard to Telegram and SSE (strictly once per session date unless force=True)."""
+    session_date = scorecard.get("session_date") or datetime.now(IST).strftime("%Y-%m-%d")
+    session_slug = str(session_date).replace("-", "")
+
+    # Durable broadcast deduplication latch on disk
+    sc_dir = app_data_path("postmortem")
+    broadcast_marker = sc_dir / f"broadcast_{session_slug}.sent"
+
+    is_test_runner = (
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+    )
+
+    if broadcast_marker.exists() and not force and (not is_test_runner or enforce_disk_latch):
+        logger.info(
+            f"[AlertPostMortem] EOD scorecard for session {session_date} was already broadcast. Suppressing duplicate."
+        )
+        return False
+
     msg = format_eod_scorecard_telegram(scorecard)
     try:
         from bot.telegram_bot import send_message
 
         send_message(msg, parse_mode="HTML")
+        if not is_test_runner or enforce_disk_latch:
+            try:
+                sc_dir.mkdir(parents=True, exist_ok=True)
+                broadcast_marker.write_text(datetime.now(IST).isoformat(), encoding="utf-8")
+            except Exception as e_mark:
+                logger.debug(f"[AlertPostMortem] Could not write broadcast marker: {e_mark}")
     except Exception as e:
         logger.debug(f"[AlertPostMortem] Telegram EOD scorecard broadcast failed: {e}")
 
@@ -383,6 +411,7 @@ def broadcast_eod_scorecard(scorecard: dict[str, Any]) -> None:
         logger.debug(
             f"[engine.alert_postmortem_runner] Non-fatal exception suppressed: {e_suppressed}"
         )
+    return True
 
 
 def run_eod_alert_postmortems(
@@ -491,7 +520,7 @@ def run_eod_alert_postmortems(
         logger.debug(f"[AlertPostMortem] Optional local scorecard save note: {e_local}")
 
     if broadcast and len(today_alerts) > 0:
-        broadcast_eod_scorecard(scorecard)
+        broadcast_eod_scorecard(scorecard, force=force)
 
     for alert in today_alerts:
         alert_id = getattr(alert, "alert_id", "") or str(getattr(alert, "id", ""))

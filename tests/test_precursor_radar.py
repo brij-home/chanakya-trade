@@ -216,7 +216,9 @@ def test_precursor_radar_uses_passed_quotes_map(scanner):
             force_refresh=True,
         )
         mock_get_quote.assert_not_called()
-        mock_eval.assert_called_once_with("TESTSTOCK", quote=mock_q)
+        assert mock_eval.call_count == 1
+        assert mock_eval.call_args.args[0] == "TESTSTOCK"
+        assert mock_eval.call_args.kwargs.get("quote") == mock_q
 
 
 def test_commodity_adaptive_regime_callable_ref_time_guard():
