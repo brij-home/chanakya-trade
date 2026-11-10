@@ -67,10 +67,10 @@ def test_low_vix_regime_recommends_debit_spread():
 
 def test_crisis_vix_applies_fifty_percent_lot_haircut():
     """Under Crisis VIX (>22.0), lot sizing must be cut by 50% to prevent ruin during volatility shocks."""
-    # Sized with normal VIX (14.0) on option contract: 65 lot size, 50 pt stop = 3250 risk per lot
+    # Sized with normal VIX (14.0) on NIFTY option: 65 lot size, 50 pt stop = 3250 risk per lot
     # On 2,000,000 capital at 1.5% max risk = 30,000 risk budget
     res_normal = calculate_position_size(
-        symbol="NIFTY26NOV24000CE",
+        symbol="NIFTY",
         entry_price=150.0,
         stop_loss=100.0,
         capital=2_000_000.0,
@@ -80,7 +80,7 @@ def test_crisis_vix_applies_fifty_percent_lot_haircut():
 
     # Sized with crisis VIX (26.0)
     res_crisis = calculate_position_size(
-        symbol="NIFTY26NOV24000CE",
+        symbol="NIFTY",
         entry_price=150.0,
         stop_loss=100.0,
         capital=2_000_000.0,

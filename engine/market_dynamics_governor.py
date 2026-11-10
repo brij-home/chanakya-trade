@@ -258,8 +258,15 @@ class MarketDynamicsGovernor:
         clean_sym = canonical_symbol(symbol).upper()
         now_wall = time.time()
         cache_key = f"{clean_sym}:{strategy}"
+        cache_eligible = (
+            not bypass_cache
+            and as_of_time is None
+            and vix_override is None
+            and cpr_type is None
+            and adr_exhaustion_pct is None
+        )
 
-        if not bypass_cache and as_of_time is None and vix_override is None:
+        if cache_eligible:
             with self._lock:
                 if cache_key in self._cache:
                     cached_ts, cached_ctx = self._cache[cache_key]
@@ -425,8 +432,9 @@ class MarketDynamicsGovernor:
             rationale=rationale,
         )
 
-        with self._lock:
-            self._cache[cache_key] = (now_wall, ctx)
+        if cache_eligible:
+            with self._lock:
+                self._cache[cache_key] = (now_wall, ctx)
 
         return ctx
 

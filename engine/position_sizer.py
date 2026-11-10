@@ -967,7 +967,11 @@ def calculate_position_size(
             recommended_structure = "FUTURES_OR_FAR_MONTH"
             notes += " [DELIVERY_QUARANTINE: SEBI physical settlement risk; stock options quarantined to Futures/Far-Month]"
 
-        if (calib.volatility_regime == "CRISIS_VIX" or calib.mandate == "FADE_SPRING") and lots > 1:
+        if (
+            (calib.volatility_regime == "CRISIS_VIX" or calib.mandate == "FADE_SPRING")
+            and (is_fno or lot_size > 1)
+            and lots > 1
+        ):
             haircut_lots = max(1, int(lots * 0.50))
             if haircut_lots < lots:
                 notes += f" [MARKET_GOVERNOR: {calib.volatility_regime} 50% lot haircut applied ({lots} -> {haircut_lots} lots)]"
