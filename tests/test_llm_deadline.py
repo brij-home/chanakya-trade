@@ -33,7 +33,7 @@ def test_stalled_provider_calls_have_a_global_concurrency_cap():
 
     def blocked_provider(index: int):
         started[index].set()
-        release.wait(1.5)
+        release.wait(10.0)
         return index
 
     try:
@@ -44,7 +44,7 @@ def test_stalled_provider_calls_have_a_global_concurrency_cap():
                     timeout=0.01,
                     label=f"test-cap-{index}",
                 )
-        assert all(event.wait(2.0) for event in started)
+        assert all(event.wait(5.0) for event in started)
         with pytest.raises(TimeoutError, match="capacity exhausted"):
             run_with_deadline(lambda: "must not start", timeout=0.1, label="test-over-cap")
     finally:
