@@ -2064,6 +2064,36 @@ class AutoAlertEngine:
             except Exception as _tbt_prom_err:
                 logger.debug(f"[AutoAlertEngine] TBT JIT promotion non-fatal: {_tbt_prom_err}")
 
+        # Dynamic Market Calibration Enrichment (MarketDynamicsGovernor)
+        if is_fno_eligible:
+            try:
+                from engine.market_dynamics_governor import get_market_dynamics_governor
+
+                gov = get_market_dynamics_governor()
+                cpr_t = (
+                    alert.metrics.get("cpr_type")
+                    if isinstance(getattr(alert, "metrics", None), dict)
+                    else None
+                )
+                adr_p = (
+                    alert.metrics.get("adr_exhaustion_pct")
+                    if isinstance(getattr(alert, "metrics", None), dict)
+                    else None
+                )
+                calib = gov.get_calibration(
+                    clean_target or alert.symbol,
+                    strategy=str(getattr(alert, "alert_type", "DEFAULT")),
+                    cpr_type=cpr_t,
+                    adr_exhaustion_pct=adr_p,
+                )
+                if alert.metrics is None or not isinstance(alert.metrics, dict):
+                    alert.metrics = {}
+                alert.metrics["dynamic_calibration"] = calib.to_dict()
+                if not getattr(alert, "recommended_vehicle", None):
+                    alert.recommended_vehicle = calib.preferred_vehicle
+            except Exception as _calib_err:
+                logger.debug(f"[AutoAlertEngine] Calibration enrichment non-fatal: {_calib_err}")
+
         policy = get_discovery_policy()
 
         if policy.fno_only:

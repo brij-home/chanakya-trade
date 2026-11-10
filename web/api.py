@@ -1224,6 +1224,34 @@ async def api_market_subscriptions_revolve(drift_pct: float = 1.0):
     return JSONResponse(res)
 
 
+@app.get("/api/market/dynamics", tags=["Market"])
+async def api_market_dynamics(symbol: Optional[str] = None):
+    """
+    Unified Market Dynamics & Context-Adaptive Calibration Telemetry API.
+    Returns:
+      - Current Intraday Session Phase (IST timeline)
+      - Volatility Regime (India VIX tier)
+      - Active Governor Telemetry & Cache status
+      - Dynamic Calibration for a requested symbol (defaults to NIFTY)
+    """
+
+    def _do():
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        gov = get_market_dynamics_governor()
+        diag = gov.get_diagnostics()
+        target_sym = symbol or "NIFTY"
+        calib = gov.get_calibration(target_sym)
+        return {
+            **diag,
+            "target_symbol": target_sym,
+            "calibration": calib.to_dict(),
+        }
+
+    res = await asyncio.to_thread(_do)
+    return JSONResponse(res)
+
+
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
 
 
@@ -1434,6 +1462,9 @@ async def get_system_health_hub(
     ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
     tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    from engine.market_dynamics_governor import get_market_dynamics_governor
+
+    market_dynamics_diag = await asyncio.to_thread(get_market_dynamics_governor().get_diagnostics)
     broker_statuses = await asyncio.to_thread(_compute_status)
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
@@ -1537,6 +1568,7 @@ async def get_system_health_hub(
         "circuit_breaker": cb_diag,
         "rate_gate": rate_gate_diag,
         "tbt": tbt_diag,
+        "market_dynamics": market_dynamics_diag,
         "websocket": ws_diag,
         "brokers": broker_statuses,
         "flattrade": flattrade_diag,

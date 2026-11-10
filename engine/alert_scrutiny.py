@@ -248,6 +248,37 @@ class AlertScrutinyAuditor:
                     break
         is_index_sym = bool(clean_sym in INDEX_MIN_SL_FLOORS or underlying_idx)
 
+        # 1.5. Dynamic Market Dynamics Governor & Physical Delivery Quarantine
+        try:
+            from engine.market_dynamics_governor import get_market_dynamics_governor
+
+            gov = get_market_dynamics_governor()
+            cpr_t = metrics_d.get("cpr_type")
+            adr_p = metrics_d.get("adr_exhaustion_pct")
+            calib = gov.get_calibration(
+                clean_sym,
+                strategy=raw_atype,
+                cpr_type=cpr_t,
+                adr_exhaustion_pct=adr_p,
+            )
+            # SEBI Expiry Week Physical Delivery Quarantine for Single-Stock Options
+            if calib.stock_options_quarantined and not is_index_sym:
+                is_opt = bool(
+                    getattr(alert, "contract_symbol", None)
+                    or getattr(alert, "option_type", None)
+                    or getattr(alert, "derivative_type", "") == "OPT"
+                )
+                if is_opt:
+                    flags["stock_options_quarantined"] = True
+                    return (
+                        False,
+                        f"SEBI Expiry Week Physical Delivery Quarantine: Single-stock option buying for {clean_sym} is frozen to prevent physical settlement delivery risk. Use Futures or Far-Month.",
+                        flags,
+                    )
+            metrics_d["dynamic_calibration"] = calib.to_dict()
+        except Exception as _e_gov:
+            logger.debug(f"[AlertScrutiny] Market dynamics evaluation non-fatal: {_e_gov}")
+
         atype = str(getattr(alert, "alert_type", "") or "")
         has_opt_marker = bool(
             getattr(alert, "contract_symbol", None)
