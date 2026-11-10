@@ -549,6 +549,7 @@ def get_subscription_option_grid(
     strikes_per_side: int = 8,
     max_expiries: int = 2,
     as_of: datetime | None = None,
+    spot: float | None = None,
 ) -> list[str]:
     from market.indices import INDEX_INSTRUMENTS
     from market.quotes import get_quote
@@ -563,19 +564,8 @@ def get_subscription_option_grid(
 
         effective_max_age = 120.0 if is_market_open("NSE", ref_dt=now) else 300.0
 
-        quotes = get_quote([instrument], ws_only=True)
-        quote = (
-            quotes.get(instrument)
-            or quotes.get(clean)
-            or quotes.get(underlying)
-            or (list(quotes.values())[0] if quotes else None)
-        )
-        spot = fresh_underlying_price(
-            quote, as_of=as_of or datetime.now(IST), max_age_seconds=effective_max_age
-        )
-        if spot is None:
-            # Fallback to general get_quote if WebSocket cache has not populated yet
-            quotes = get_quote([instrument], ws_only=False)
+        if spot is None or spot <= 0:
+            quotes = get_quote([instrument], ws_only=True)
             quote = (
                 quotes.get(instrument)
                 or quotes.get(clean)
@@ -585,6 +575,18 @@ def get_subscription_option_grid(
             spot = fresh_underlying_price(
                 quote, as_of=as_of or datetime.now(IST), max_age_seconds=effective_max_age
             )
+            if spot is None:
+                # Fallback to general get_quote if WebSocket cache has not populated yet
+                quotes = get_quote([instrument], ws_only=False)
+                quote = (
+                    quotes.get(instrument)
+                    or quotes.get(clean)
+                    or quotes.get(underlying)
+                    or (list(quotes.values())[0] if quotes else None)
+                )
+                spot = fresh_underlying_price(
+                    quote, as_of=as_of or datetime.now(IST), max_age_seconds=effective_max_age
+                )
         if spot is None:
             logger.info(
                 "[ContractSelection] Option grid held for %s: no fresh live underlying quote", clean

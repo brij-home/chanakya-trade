@@ -293,6 +293,66 @@ def get_active_index_options_grid(
     return list(dict.fromkeys(grid))
 
 
+def get_active_stock_options_grid(
+    stocks: Optional[list[str]] = None,
+    num_strikes_per_side: int = 2,
+    max_expiries: int = 1,
+    ref_time: Optional[datetime] = None,
+) -> list[str]:
+    """Return actual listed CE/PE pairs around fresh spot prices for top liquid F&O stocks.
+
+    Pre-seeds ATM +- 2 strikes into WebSocket subscriptions to guarantee sub-millisecond
+    in-memory quote hits for high-velocity stock option setups with zero REST latency.
+    """
+    from config.constants import IST
+    from config.discovery_policy import get_discovery_policy
+    from market.contract_selection import fresh_underlying_price, get_subscription_option_grid
+    from market.quotes import get_quote
+
+    if not get_discovery_policy().allows("FNO_STOCK"):
+        return []
+
+    now = ref_time or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+
+    if stocks is None:
+        from market.universe_depth_radar import LIQUID_FNO_LEADERS
+
+        target_stocks = LIQUID_FNO_LEADERS[:25]
+    else:
+        target_stocks = stocks
+
+    if not target_stocks:
+        return []
+
+    # Batch quote resolution for all target stocks in 1 single call to avoid sequential latency
+    instruments = [f"NSE:{s}-EQ" for s in target_stocks]
+    try:
+        quotes_map = get_quote(instruments, ws_only=True)
+    except Exception as exc:
+        logger.debug(f"[WsSubManager] WS batch quote fetch for stock options grid: {exc}")
+        quotes_map = {}
+
+    grid: list[str] = []
+    for underlying in target_stocks:
+        clean = underlying.upper().replace("NSE:", "").replace("-EQ", "").strip()
+        instrument = f"NSE:{clean}-EQ"
+        quote = quotes_map.get(instrument) or quotes_map.get(clean)
+        spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=300.0) if quote else None
+
+        sub_grid = get_subscription_option_grid(
+            clean,
+            strikes_per_side=num_strikes_per_side,
+            max_expiries=max_expiries,
+            as_of=now if ref_time is not None else None,
+            spot=spot,
+        )
+        grid.extend(sub_grid)
+
+    return list(dict.fromkeys(grid))
+
+
 def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
     """Active MCX/CDS futures plus master-listed near-ATM commodity options.
 
@@ -384,15 +444,20 @@ class WsSubscriptionManager:
 
     def seed_active_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
         """
-        Pre-seed active Index Options grid (NIFTY, BANKNIFTY, FINNIFTY, SENSEX)
-        and MCX Commodities into the persistent WebSocket subscription registry.
+        Pre-seed active Index Options grid (NIFTY, BANKNIFTY, FINNIFTY, SENSEX),
+        top Liquid Stock Options grid, and MCX Commodities into the persistent WebSocket subscription registry.
         Leverages Fyers Prime 5,000 capacity to ensure 100% in-memory quote hits.
         """
         options_grid = get_active_index_options_grid()
+        stock_options_grid = (
+            get_active_stock_options_grid() if get_discovery_policy().allows("FNO_STOCK") else []
+        )
         commodity_grid = (
             get_active_commodity_grid() if get_discovery_policy().allows("COMMODITY") else []
         )
-        to_add = [s for s in (options_grid + commodity_grid) if is_valid_ws_symbol(s)]
+        to_add = [
+            s for s in (options_grid + stock_options_grid + commodity_grid) if is_valid_ws_symbol(s)
+        ]
 
         with self._lock:
             new_syms = [s for s in to_add if s not in self._core_symbols]
@@ -401,7 +466,7 @@ class WsSubscriptionManager:
         if new_syms:
             self._save_to_disk()
             logger.info(
-                f"[WsSubManager] Pre-seeded {len(to_add)} active derivatives (Options={len(options_grid)}, Comm={len(commodity_grid)})"
+                f"[WsSubManager] Pre-seeded {len(to_add)} active derivatives (IndexOptions={len(options_grid)}, StockOptions={len(stock_options_grid)}, Comm={len(commodity_grid)})"
             )
 
         if ws_client and to_add:

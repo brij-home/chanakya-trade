@@ -59,6 +59,11 @@ def detect_currency_breakouts(
     Scans liquid Currency pairs (USDINR, EURINR, GBPINR, JPYINR) for macro session breakouts.
     Active during post-equity session (15:30 - 17:00 IST).
     """
+    from config.discovery_policy import get_discovery_policy
+
+    if not get_discovery_policy().allows("CURRENCY"):
+        return []
+
     from market.quotes import get_quote
 
     found: list[AutoAlert] = []

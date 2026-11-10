@@ -1735,6 +1735,11 @@ def detect_crypto_signals(universe: Optional[list[str]] = None) -> list[AutoAler
     """
     24x7 Real-Time Autonomous Crypto Market Alert Scanner across provided universe.
     """
+    from config.discovery_policy import get_discovery_policy
+
+    if not get_discovery_policy().allows("CRYPTO"):
+        return []
+
     targets = universe or DEFAULT_CRYPTO
     found: list[AutoAlert] = []
     for sym in targets:

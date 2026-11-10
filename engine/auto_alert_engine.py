@@ -334,6 +334,11 @@ class AutoAlertEngine:
 
         self._cached_orb_levels: dict[str, tuple[str, float, float, float, float]] = {}
 
+        # Dynamic universe staggered rotation counters for bounded detector cycles
+        self._predator_rotation_step: int = 0
+        self._ib_rotation_step: int = 0
+        self._turtle_rotation_step: int = 0
+
         self._save_worker_thread: Optional[threading.Thread] = None
 
         self._poller_thread: Optional[threading.Thread] = None
@@ -16425,6 +16430,83 @@ class AutoAlertEngine:
 
         return found
 
+    def _rank_candidates_by_velocity(
+        self, candidates: list[str], quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[str]:
+        """Rank equity candidates by live intraday turnover (Cr) and velocity (abs change %)."""
+        if not quotes_map or not candidates:
+            return list(candidates)
+
+        def _v_score(sym: str) -> float:
+            q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+            if not q:
+                return 0.0
+            chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
+            vol = float(getattr(q, "volume", 0.0) or 0.0)
+            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+            turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
+            is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
+            return chg * (1.5 if is_liquid else 1.0)
+
+        return sorted(candidates, key=_v_score, reverse=True)
+
+    def _select_staggered_targets(
+        self,
+        eq_candidates: list[str],
+        cycle_step: int,
+        base_targets: list[str],
+        max_total_targets: int = 15,
+        anchor_count: int = 5,
+        max_pool_depth: int = 50,
+    ) -> list[str]:
+        """
+        Dynamically selects targets for a detector cycle, guaranteeing len(targets) <= max_total_targets
+        while rotating through the top `max_pool_depth` candidates across cycles.
+        """
+        targets = list(base_targets)
+        if not eq_candidates:
+            return targets[:max_total_targets]
+
+        remaining_budget = max(0, max_total_targets - len(targets))
+        if remaining_budget == 0:
+            return targets[:max_total_targets]
+
+        # 1. Anchors: Top high-velocity candidates up to anchor_count
+        anchors = []
+        for s in eq_candidates:
+            if len(anchors) >= min(anchor_count, remaining_budget):
+                break
+            if s not in targets:
+                anchors.append(s)
+                targets.append(s)
+
+        remaining_budget = max(0, max_total_targets - len(targets))
+        if remaining_budget == 0:
+            return targets[:max_total_targets]
+
+        # 2. Pool for rotation: from anchor_count up to max_pool_depth
+        pool = [s for s in eq_candidates[anchor_count:max_pool_depth] if s not in targets]
+        if not pool:
+            pool = [s for s in eq_candidates if s not in targets]
+
+        if pool:
+            chunk_size = remaining_budget
+            num_chunks = max(1, (len(pool) + chunk_size - 1) // chunk_size)
+            chunk_idx = cycle_step % num_chunks
+            start_idx = chunk_idx * chunk_size
+            rotating = pool[start_idx : start_idx + chunk_size]
+            if len(rotating) < chunk_size and len(pool) > len(rotating):
+                wrap_needed = chunk_size - len(rotating)
+                for item in pool[:wrap_needed]:
+                    if item not in rotating:
+                        rotating.append(item)
+            for s in rotating:
+                if len(targets) >= max_total_targets:
+                    break
+                targets.append(s)
+
+        return targets[:max_total_targets]
+
     def scan_predator_liquidity_sweeps(
         self, quotes_map: Optional[dict[str, Any]] = None
     ) -> list[AutoAlert]:
@@ -16444,29 +16526,23 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-
-        if hasattr(self, "watched_equities") and self.watched_equities:
-            eq_candidates = list(self.watched_equities)
-            if quotes_map:
-
-                def _v_score(sym: str) -> float:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
-                    if not q:
-                        return 0.0
-                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
-                    vol = float(getattr(q, "volume", 0.0) or 0.0)
-                    ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-                    turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
-                    is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
-                    return chg * (1.5 if is_liquid else 1.0)
-
-                eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates:
-                if len(targets) >= 15:
-                    break
-                if eq_s not in targets:
-                    targets.append(eq_s)
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_predator_rotation_step", 0)
+        self._predator_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> Optional[AutoAlert]:
 
@@ -16643,29 +16719,23 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-
-        if hasattr(self, "watched_equities") and self.watched_equities:
-            eq_candidates = list(self.watched_equities)
-            if quotes_map:
-
-                def _v_score(sym: str) -> float:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
-                    if not q:
-                        return 0.0
-                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
-                    vol = float(getattr(q, "volume", 0.0) or 0.0)
-                    ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-                    turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
-                    is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
-                    return chg * (1.5 if is_liquid else 1.0)
-
-                eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates:
-                if len(targets) >= 15:
-                    break
-                if eq_s not in targets:
-                    targets.append(eq_s)
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_ib_rotation_step", 0)
+        self._ib_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> list[AutoAlert]:
 
@@ -16747,29 +16817,23 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-
-        if hasattr(self, "watched_equities") and self.watched_equities:
-            eq_candidates = list(self.watched_equities)
-            if quotes_map:
-
-                def _v_score(sym: str) -> float:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
-                    if not q:
-                        return 0.0
-                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
-                    vol = float(getattr(q, "volume", 0.0) or 0.0)
-                    ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-                    turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
-                    is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
-                    return chg * (1.5 if is_liquid else 1.0)
-
-                eq_candidates.sort(key=_v_score, reverse=True)
-            for eq_s in eq_candidates:
-                if len(targets) >= 15:
-                    break
-                if eq_s not in targets:
-                    targets.append(eq_s)
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_turtle_rotation_step", 0)
+        self._turtle_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> Optional[AutoAlert]:
 
