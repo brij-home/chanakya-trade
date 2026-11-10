@@ -33,7 +33,7 @@ def test_stalled_provider_calls_have_a_global_concurrency_cap():
 
     def blocked_provider(index: int):
         started[index].set()
-        release.wait(10.0)
+        release.wait(60.0)
         return index
 
     try:
