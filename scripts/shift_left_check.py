@@ -214,6 +214,17 @@ if [ "$SKIP_PRE_PUSH" = "1" ] || [ "$FAST_PUSH" = "1" ]; then
     exit 0
 fi
 
+# Optimization: Skip pre-push if current tree was already verified by shift_left_check during pre-commit
+CURRENT_TREE=$(git rev-parse "HEAD^{tree}" 2>/dev/null || git rev-parse "HEAD:" 2>/dev/null)
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
+if [ -f "$GIT_DIR/shift_left_verified_tree" ]; then
+    VERIFIED_TREE=$(cat "$GIT_DIR/shift_left_verified_tree" 2>/dev/null)
+    if [ -n "$CURRENT_TREE" ] && [ "$CURRENT_TREE" = "$VERIFIED_TREE" ]; then
+        echo "⚡ Git tree ($CURRENT_TREE) was already verified by Shift-Left Gate — skipping redundant pre-push run."
+        exit 0
+    fi
+fi
+
 if [ -f ".venv/Scripts/python.exe" ] && .venv/Scripts/python.exe -m ruff --version >/dev/null 2>&1; then
     PYTHON_BIN=".venv/Scripts/python.exe"
 elif command -v py >/dev/null 2>&1; then
@@ -657,6 +668,25 @@ def main() -> int:
         status_icon = "✅" if success else "❌"
         print(f"  {status_icon} {name:<55} {dur:>6.2f}s")
     print("=" * 65)
+
+    # Record verified tree hash so pre-push can avoid redundant re-run of same commit
+    try:
+        git_dir_out = subprocess.check_output(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
+        git_dir = Path(git_dir_out)
+        if not git_dir.is_absolute():
+            git_dir = (ROOT_DIR / git_dir).resolve()
+        tree_hash = subprocess.check_output(
+            ["git", "write-tree"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
+        (git_dir / "shift_left_verified_tree").write_text(tree_hash, encoding="utf-8")
+    except Exception as e_tree:
+        logger.debug(f"[shift_left_check] Non-fatal exception recording verified tree: {e_tree}")
 
     return 0
 

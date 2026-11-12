@@ -38,6 +38,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -62,8 +63,6 @@ jobs:
         if: always()
         run: |
           python scripts/print_failures.py junit.xml
-          echo "=== JUNIT XML OUTPUT ==="
-          cat junit.xml || true
 
       - name: Upload test report
         if: always()
@@ -85,6 +84,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -148,9 +148,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install lint dependencies
-        run: pip install -e ".[dev]"
+        run: pip install ruff
 
       - name: Lint
         run: ruff check .
