@@ -152,6 +152,21 @@ def _isolate_fyers_rate_gate_and_circuit_breaker():
         except Exception:
             pass
 
+        try:
+            from market.quotes import clear_quote_cache
+
+            clear_quote_cache()
+        except Exception:
+            pass
+
+        try:
+            import market.sentiment as ms
+
+            ms._BREADTH_CACHE = None
+            ms._BREADTH_CACHE_TS = 0.0
+        except Exception:
+            pass
+
     _do_reset()
     yield
     _do_reset()
