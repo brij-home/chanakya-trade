@@ -105,7 +105,7 @@ def test_explain_alert_allowed_transparent_reasons():
     assert "Zero-Ghost" in reason
 
 
-def test_opening_drive_timing_at_09_15_30():
+def test_opening_drive_timing_at_09_15_30(monkeypatch):
     """Verify Opening Drive activates at 09:15:30 IST with live candle expansion."""
     ref_dt = datetime(2026, 10, 9, 9, 15, 30, tzinfo=IST)
     dates = pd.date_range("2026-10-09 09:15:00", periods=1, freq="5min")
@@ -118,6 +118,16 @@ def test_opening_drive_timing_at_09_15_30():
             "volume": [150000.0],
         },
         index=dates,
+    )
+
+    monkeypatch.setattr(
+        "market.indices.get_heavyweights_posture",
+        lambda *a, **kw: {
+            "heavyweights": [{"symbol": "HDFCBANK", "change_pct": 1.2}],
+            "bull_count": 4,
+            "bear_count": 0,
+            "all_bearish": False,
+        },
     )
 
     with patch("market.options.get_options_chain", return_value=[]):

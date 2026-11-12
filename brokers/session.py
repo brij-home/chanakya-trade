@@ -495,22 +495,12 @@ def set_broker_role(key: str, role: str) -> None:
 
 
 def get_data_broker() -> BrokerAPI:
-    """Return the current data broker. Falls back to primary or healthy secondary if unauthenticated."""
+    """Return the current data broker. Falls back to primary if no explicit data broker."""
     if not _brokers:
         _try_auto_restore_sessions()
     apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
-        candidate = _brokers[_data_key]
-        if candidate.is_authenticated():
-            return candidate
-        # Failover: If configured data broker is unauthenticated, probe other registered brokers
-        for key, alt in _brokers.items():
-            if key != _data_key and alt.is_authenticated():
-                logger.info(
-                    f"[brokers.session] Configured data broker '{_data_key}' unauthenticated. Failing over to healthy '{key}'."
-                )
-                return alt
-        return candidate
+        return _brokers[_data_key]
     return get_broker()
 
 

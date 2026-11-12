@@ -641,15 +641,12 @@ class AlertScrutinyAuditor:
                 if is_spread_mandate:
                     flags["risk_within_bounds"] = True
                 else:
-                    # Dynamically calibrate stop_loss to minimum floor rather than dropping valid setup
-                    calibrated_sl = round(max(0.5, entry_anchor - opt_min_floor), 1)
-                    if hasattr(alert, "stop_loss"):
-                        alert.stop_loss = calibrated_sl
-                    if isinstance(getattr(alert, "actionable_plan", None), dict):
-                        alert.actionable_plan["stop_loss"] = f"₹{calibrated_sl:,.1f}"
-                    flags["risk_within_bounds"] = True
-                    risk_pts = opt_min_floor
-                    risk_pct = (risk_pts / entry_anchor) * 100.0 if entry_anchor > 0 else 0.0
+                    flags["risk_within_bounds"] = False
+                    return (
+                        False,
+                        f"Sub-ATR Option Noise Trap: Premium risk {risk_pts:.1f} pts is below volatility noise floor {opt_min_floor:.1f} pts",
+                        flags,
+                    )
 
         if risk_pct < 0.10:
             return (
@@ -806,6 +803,10 @@ class AlertScrutinyAuditor:
                     logger.info(
                         f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: defined-risk hedged spread"
                     )
+                elif is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot >= u_vwap:
+                    logger.info(
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: confirmed breakout trading above VWAP ({u_spot:.1f} >= {u_vwap:.1f})"
+                    )
                 else:
                     return (
                         False,
@@ -816,6 +817,10 @@ class AlertScrutinyAuditor:
                 if is_spread:
                     logger.info(
                         f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: defined-risk hedged spread"
+                    )
+                elif is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot <= u_vwap:
+                    logger.info(
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: confirmed breakdown trading below VWAP ({u_spot:.1f} <= {u_vwap:.1f})"
                     )
                 else:
                     return (

@@ -1192,7 +1192,7 @@ def detect_options_momentum_breakouts(
                     # ── Upper/Lower Wick Supply/Demand Collision on Expanding Bar ──
                     if (
                         opt_type == "CE"
-                        and upper_wick_ratio >= 0.35
+                        and upper_wick_ratio >= 0.58
                         and candle_range >= (spot * 0.0020)
                     ):
                         logger.debug(
@@ -1201,7 +1201,7 @@ def detect_options_momentum_breakouts(
                         continue
                     elif (
                         opt_type == "PE"
-                        and lower_wick_ratio >= 0.35
+                        and lower_wick_ratio >= 0.58
                         and candle_range >= (spot * 0.0020)
                     ):
                         logger.debug(

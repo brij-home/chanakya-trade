@@ -284,6 +284,10 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_defined_risk_neutral", return_value=[]),
         patch.object(engine, "scan_pairs_arbitrage", return_value=[]),
         patch.object(engine, "scan_order_book_thrusts", return_value=[]),
+        patch.object(engine, "scan_initial_balance_setups", return_value=[]),
+        patch.object(engine, "scan_0dte_gamma_unpin", return_value=[]),
+        patch.object(engine, "scan_smt_sweeps", return_value=[]),
+        patch.object(engine, "scan_trend_day_pullbacks", return_value=[]),
     ]
     with ExitStack() as stack:
         for p in mocked_scanners:

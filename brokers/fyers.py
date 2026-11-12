@@ -1327,6 +1327,11 @@ class FyersAPI(BrokerAPI):
             except Exception as e_suppressed:
                 logger.debug(f"[brokers.fyers] Error invalidating auth cache: {e_suppressed}")
 
+            try:
+                TOKEN_FILE.unlink(missing_ok=True)
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Error deleting invalid token file: {e_suppressed}")
+
             return False
 
     def is_authenticated(self, headless_retry: bool = True) -> bool:

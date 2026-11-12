@@ -747,6 +747,7 @@ def test_maintenance_storage_breakdown_disappearing_file_resilience(tmp_path):
 
 def test_fyers_data_socket_patch_none_keys_and_deduplication():
     """Verify patched FyersDataSocket handles None symbol_conversion safely and prunes tokens on unsubscribe."""
+    pytest.importorskip("fyers_apiv3")
     from fyers_apiv3.FyersWebsocket import data_ws
 
     mock_sock = MagicMock()
