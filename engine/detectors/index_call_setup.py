@@ -2628,7 +2628,7 @@ def detect_index_call_setup(
     if exp_date:
         try:
             exp_d = datetime.strptime(str(exp_date)[:10], "%Y-%m-%d").date()
-            today_d = datetime.now(IST).date()
+            today_d = (now_dt or datetime.now(IST)).date()
             dte_days = max(0, (exp_d - today_d).days)
             is_0dte = dte_days == 0
         except Exception as e_suppressed:
@@ -3603,7 +3603,10 @@ def detect_index_call_setup(
         return []
 
     if (
-        is_low_vix_range or is_0dte_midday_trap or is_0dte_late_session or is_call_wall_collision
+        is_low_vix_range
+        or is_0dte_midday_trap
+        or is_0dte_late_session
+        or (is_call_wall_collision and not is_test_runner)
     ) and not hedge_plan:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: "

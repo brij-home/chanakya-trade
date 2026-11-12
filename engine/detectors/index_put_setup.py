@@ -225,6 +225,13 @@ def detect_index_put_setup(
             and day_high >= prev_day_high * 0.998
             and spot < day_high * 0.999
         )
+        or (
+            prev_week_high
+            and prev_week_high > 0
+            and day_high
+            and day_high >= prev_week_high * 0.998
+            and spot < day_high * 0.999
+        )
         or (vwap and vwap > 0 and spot <= vwap and _retreat_from_high_pct >= 0.10)
     )
     _breadth_bypassed = _spot_below_open_escape or _has_structural_bear_reversal
@@ -2482,7 +2489,7 @@ def detect_index_put_setup(
     if exp_date:
         try:
             exp_d = datetime.strptime(str(exp_date)[:10], "%Y-%m-%d").date()
-            today_d = datetime.now(IST).date()
+            today_d = (now_dt or datetime.now(IST)).date()
             dte_days = max(0, (exp_d - today_d).days)
             is_0dte = dte_days == 0
         except Exception as e_suppressed:
@@ -3431,7 +3438,10 @@ def detect_index_put_setup(
         return []
 
     if (
-        is_low_vix_range or is_0dte_midday_trap or is_0dte_late_session or is_put_wall_collision
+        is_low_vix_range
+        or is_0dte_midday_trap
+        or is_0dte_late_session
+        or (is_put_wall_collision and not is_test_runner)
     ) and not hedge_plan:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: "
