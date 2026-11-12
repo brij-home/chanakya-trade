@@ -692,3 +692,171 @@ def test_telemetry_priority_suppression_for_llm_deadline_and_scan_timeout():
         )
         == "P3"
     )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "brokers.flattrade",
+            "WARNING",
+            "[Flattrade] WebSocket notice: Connection closed normally (code 1000)",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "brokers.flattrade",
+            "WARNING",
+            "[Flattrade] WebSocket notice: ping/pong timed out",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "chanakya.detectors.options_momentum",
+            "WARNING",
+            "[OptionsBreakout] Evaluation timeout (28s) reached. Proceeding safely with 0 qualified candidates.",
+        )
+        == "P3"
+    )
+
+
+# ── 18. OpsDeck RCA: Disappearing Ephemeral File Resilience in Maintenance ─────
+
+
+def test_maintenance_storage_breakdown_disappearing_file_resilience(tmp_path):
+    """Verify get_storage_breakdown does not crash with FileNotFoundError when WAL/temp files vanish."""
+    from engine.maintenance import _file_or_dir_size_bytes
+
+    phantom_file = tmp_path / "ephemeral_wal.db-wal"
+    # File does not exist -> returns 0 bytes without raising FileNotFoundError
+    assert _file_or_dir_size_bytes(phantom_file) == 0
+
+    # Also verify with a mock file whose stat() raises FileNotFoundError
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+    mock_path.is_file.return_value = True
+    mock_path.stat.side_effect = FileNotFoundError(
+        "[WinError 2] The system cannot find the file specified"
+    )
+    assert _file_or_dir_size_bytes(mock_path) == 0
+
+
+# ── 19. OpsDeck RCA: FyersDataSocket NoneType Keys & Capacity Pruning ──────────
+
+
+def test_fyers_data_socket_patch_none_keys_and_deduplication():
+    """Verify patched FyersDataSocket handles None symbol_conversion safely and prunes tokens on unsubscribe."""
+    from fyers_apiv3.FyersWebsocket import data_ws
+
+    mock_sock = MagicMock()
+    mock_sock._FyersDataSocket__valid_token = True
+    mock_sock.channel_num = 11
+    mock_sock.symbol_limit = 5000
+    mock_sock.symbol_token = {"token_1": "NSE:SBIN-EQ", "token_2": "NSE:TCS-EQ"}
+    mock_sock.scrips_count = {11: ["token_1", "token_2"]}
+    mock_sock.scrips_per_channel = {11: ["NSE:SBIN-EQ", "NSE:TCS-EQ"]}
+    mock_sock._FyersDataSocket__channel_resume_pause = MagicMock()
+    mock_sock.add_message = MagicMock()
+
+    # 1. When symbol conversion returns None, unsubscribe must not crash with AttributeError: 'NoneType' object has no attribute 'keys'
+    mock_sock._FyersDataSocket__symbol_conversion = MagicMock(return_value=None)
+    data_ws.FyersDataSocket.unsubscribe(mock_sock, ["INVALID_SYMBOL"])
+    assert mock_sock.symbol_token == {"token_1": "NSE:SBIN-EQ", "token_2": "NSE:TCS-EQ"}
+
+    # 2. When valid conversion, unsubscribe prunes symbol_token and scrips_per_channel
+    mock_sock._FyersDataSocket__symbol_conversion = MagicMock(
+        return_value={"token_1": "NSE:SBIN-EQ"}
+    )
+    mock_sock._FyersDataSocket__unsubscription_msg = MagicMock(return_value="unsub_msg")
+    data_ws.FyersDataSocket.unsubscribe(mock_sock, ["NSE:SBIN-EQ"])
+    assert "token_1" not in mock_sock.symbol_token
+    assert "token_2" in mock_sock.symbol_token
+    assert "NSE:SBIN-EQ" not in mock_sock.scrips_per_channel[11]
+
+    # 3. Duplicate subscribe does not falsely increment token limit count
+    mock_sock._FyersDataSocket__symbol_conversion = MagicMock(
+        return_value={"token_2": "NSE:TCS-EQ"}
+    )
+    mock_sock._FyersDataSocket__subscription_msg = MagicMock(return_value="sub_msg")
+    mock_sock.On_error = MagicMock()
+    data_ws.FyersDataSocket.subscribe(mock_sock, ["NSE:TCS-EQ"])
+    mock_sock.On_error.assert_not_called()
+
+
+# ── 20. OpsDeck RCA: Fyers WebSocket Token Expiration vs 5000 Limit Guard ─────
+
+
+def test_fyers_websocket_token_expired_guard_does_not_trip_on_5000_symbols():
+    """Verify FyersDataSocket 5000 limit error is not misidentified as token expiration."""
+    from market.websocket import WebSocketManager
+
+    ws = WebSocketManager()
+    ws._schedule_token_refresh = MagicMock()
+
+    # Case A: Fyers 5000 symbols error -> must NOT schedule token refresh
+    err_5000 = {"code": -99, "message": "Please provide less than 5000 symbols", "s": "error"}
+    ws._on_error(err_5000)
+    ws._schedule_token_refresh.assert_not_called()
+
+    # Case B: Genuine token expiration -> DOES schedule token refresh
+    err_token = {"code": -99, "message": "Token is expired", "s": "error"}
+    ws._on_error(err_token)
+    ws._schedule_token_refresh.assert_called_once()
+
+
+# ── 21. OpsDeck RCA: Historical Warehouse Concurrent Unlink Resilience ────────
+
+
+def test_historical_warehouse_read_safely_concurrent_unlinked_file(tmp_path):
+    """Verify _read_safely handles concurrently unlinked segments without logging false lock warnings."""
+    from engine.historical_warehouse import HistoricalWarehouse
+
+    wh = HistoricalWarehouse(base_dir=tmp_path / "warehouse")
+    missing_segment = tmp_path / "warehouse" / "5m" / "NSE_SBIN" / "part-0001-deleted.parquet"
+
+    # Reading an unlinked/non-existent file returns None safely
+    res = wh._read_safely(missing_segment)
+    assert res is None
+
+
+# ── 22. OpsDeck RCA: Position Sizer Master Lot on Undated Option Setups ────────
+
+
+def test_position_sizer_undated_option_resolves_underlying_lot():
+    """Verify generic undated strike references from trade plans resolve underlying lot without failing closed."""
+    from engine.position_sizer import get_lot_size
+
+    # Undated option setups must resolve legitimate F&O lot sizes
+    assert get_lot_size("BAJAJHLDNG 11300 CE") == 75
+    assert get_lot_size("MOTHERSON 5 CE") == 6150
+    assert get_lot_size("BANKBARODA 5 CE") == 2925
+
+
+# ── 23. OpsDeck RCA: Normal Closure Code 1000 Is P3 Informational ──────────────
+
+
+def test_websocket_normal_closure_code_1000_classified_as_p3():
+    """Verify normal RFC 6455 closure (code 1000) from websocket library is P3/INFO."""
+    from engine.telemetry import TelemetryLogHandler
+    from unittest.mock import patch
+
+    handler = TelemetryLogHandler()
+    record = logging.LogRecord(
+        name="websocket",
+        level=logging.ERROR,
+        pathname="websocket/_logging.py",
+        lineno=92,
+        msg="Connection closed normally (code 1000) - goodbye",
+        args=(),
+        exc_info=None,
+    )
+
+    with patch("engine.telemetry.record_event") as mock_record:
+        handler.emit(record)
+        assert mock_record.called
+        kwargs = mock_record.call_args[1]
+        assert kwargs["priority"] == "P3", (
+            f"Expected P3 for normal closure, got {kwargs['priority']}"
+        )
+        assert kwargs["severity"] == "INFO"

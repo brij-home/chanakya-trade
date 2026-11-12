@@ -306,6 +306,14 @@ async def lifespan(app: FastAPI):
     except Exception as e_rec:
         logger.warning(f"[lifespan] Failed starting RecoveryWorker: {e_rec}")
 
+    # Bootstrap MarketMatrix intraday indicators for key index symbols (non-blocking background threads)
+    try:
+        from engine.indicator_snapshot import bootstrap_all_index_symbols
+
+        bootstrap_all_index_symbols()
+    except Exception as e_bs:
+        logger.warning(f"[lifespan] Failed starting indicator bootstrap: {e_bs}")
+
     yield
     if not broker_restore_task.done():
         broker_restore_task.cancel()
@@ -499,6 +507,7 @@ async def global_exception_middleware(request: _Request, call_next):
             return Response(status_code=204)
 
         try:
+            import traceback
             from engine.telemetry import record_exception
 
             clean_headers = {
@@ -513,6 +522,10 @@ async def global_exception_middleware(request: _Request, call_next):
                 "client": request.client.host if request.client else "unknown",
                 "headers": clean_headers,
             }
+            logger.error(
+                f"[web.api] Unhandled exception on {request.method} {request.url.path}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
             incident = record_exception(
                 component="web.api",
                 error=exc,
@@ -1370,14 +1383,30 @@ async def set_mode(payload: dict[str, Any]):
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
+    from config.discovery_policy import get_discovery_policy
+
     return JSONResponse(
         {
             "status": "SUCCESS",
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
             "description": mode_info.description,
+            "discovery_policy": get_discovery_policy().to_dict(),
         }
     )
+
+
+@app.post("/api/discovery-policy", tags=["System"])
+async def api_set_discovery_policy(payload: dict[str, Any]):
+    """Set discovery policy profile (FNO_ONLY, FNO_PRIORITY, BALANCED)."""
+    from config.discovery_policy import set_discovery_policy
+
+    profile = str(payload.get("profile") or payload.get("focus_mode") or "").strip().upper()
+    try:
+        policy = set_discovery_policy(profile)
+        return JSONResponse({"status": "SUCCESS", "discovery_policy": policy.to_dict()})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/slo", tags=["Observability"])
@@ -1458,14 +1487,23 @@ async def get_system_health_hub(
     from market.fyers_tbt_manager import fyers_tbt_manager
     from engine.code_provenance import get_code_provenance
 
+    import time
+
+    _t_hh = time.time()
+    logger.info("[HealthHub] Starting health-hub data aggregation")
+
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
     ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
+    logger.info(f"[HealthHub] cb/ws/rg collected in {time.time() - _t_hh:.3f}s")
     tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    logger.info(f"[HealthHub] tbt collected in {time.time() - _t_hh:.3f}s")
     from engine.market_dynamics_governor import get_market_dynamics_governor
 
     market_dynamics_diag = await asyncio.to_thread(get_market_dynamics_governor().get_diagnostics)
+    logger.info(f"[HealthHub] market_dynamics collected in {time.time() - _t_hh:.3f}s")
     broker_statuses = await asyncio.to_thread(_compute_status)
+    logger.info(f"[HealthHub] broker_statuses collected in {time.time() - _t_hh:.3f}s")
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
@@ -1483,10 +1521,10 @@ async def get_system_health_hub(
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
 
     from market.streaming import market_streams
-    from brokers.session import get_all_brokers, get_broker_role
+    from brokers.session import get_registered_brokers, get_broker_role
     from market.flattrade_rate_gate import get_flattrade_rate_gate
 
-    all_brks = get_all_brokers()
+    all_brks = get_registered_brokers()
     flat_brk = all_brks.get("flattrade")
     flat_ws = getattr(flat_brk, "_ws", None)
     flat_sock = getattr(flat_ws, "sock", None) if flat_ws else None
@@ -1581,10 +1619,15 @@ async def get_system_health_hub(
         "code_provenance": code_prov_dict,
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
+    body_bytes = json.dumps(payload, default=str).encode("utf-8")
+    logger.info(
+        f"[HealthHub] Completed and serialized {len(body_bytes)} bytes in {time.time() - _t_hh:.3f}s"
+    )
     return Response(
-        content=json.dumps(payload, default=str),
+        content=body_bytes,
         media_type="application/json",
         status_code=200,
+        headers={"content-length": str(len(body_bytes))},
     )
 
 
@@ -2218,18 +2261,13 @@ def _fyers_auth() -> bool:
             from brokers.session import get_registered_brokers
 
             registered = get_registered_brokers().get("fyers")
-            if registered and registered.is_authenticated():
-                profile = registered.get_profile()
-                if profile and getattr(profile, "user_id", ""):
-                    return True
+            if registered and registered.is_authenticated(headless_retry=False):
+                return True
 
             from brokers.fyers import FyersAPI
 
             b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
-            if not b.is_authenticated():
-                return False
-            profile = b.get_profile()
-            if not profile or not getattr(profile, "user_id", ""):
+            if not b.is_authenticated(headless_retry=False):
                 return False
             from brokers.session import register_broker
 
@@ -2350,10 +2388,16 @@ def _flattrade_auth() -> bool:
         try:
             if not _has_flattrade():
                 return False
+            from brokers.session import get_registered_brokers
+
+            registered = get_registered_brokers().get("flattrade")
+            if registered and registered.is_authenticated(headless_retry=False):
+                return True
+
             from brokers.flattrade import FlattradeAPI
 
             b = FlattradeAPI()
-            return b.is_authenticated()
+            return b.is_authenticated(headless_retry=False)
         except Exception:
             return False
 
@@ -3437,13 +3481,18 @@ async def api_status(request: Request):
 
 
 @app.get("/api/reports/eod")
-async def api_get_eod_report(date: Optional[str] = None):
-    """Fetch structured EOD report for specified date (default today)."""
+async def api_get_eod_report(date: Optional[str] = None, refresh: bool = False):
+    """Fetch structured EOD report for specified date (default today). Checks disk cache first for sub-10ms response."""
     try:
         from engine.eod_report_generator import EODReportGenerator
 
         gen = EODReportGenerator()
-        rep = gen.generate(target_date=date)
+        if not refresh:
+            cached = gen.load_from_disk(target_date=date)
+            if cached:
+                return cached
+
+        rep = gen.generate(target_date=date, use_ai=False)
         _, md_p = gen.save_to_disk(rep)
         return {
             "status": "ok",
@@ -3465,7 +3514,7 @@ async def api_generate_eod_report(
         from engine.eod_report_generator import EODReportGenerator
 
         gen = EODReportGenerator()
-        rep = gen.generate(target_date=date)
+        rep = gen.generate(target_date=date, use_ai=dispatch_telegram)
         _, md_p = gen.save_to_disk(rep)
         dispatched = False
         if dispatch_telegram:

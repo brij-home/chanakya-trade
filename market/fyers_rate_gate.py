@@ -509,9 +509,9 @@ class UnifiedFyersRateGate:
             elif category == FyersCallCategory.URGENT_QUOTE:
                 timeout = 5.0
             elif category == FyersCallCategory.HISTORICAL:
-                timeout = 10.0
+                timeout = 30.0
             elif category == FyersCallCategory.DEPTH_CHAIN:
-                timeout = 10.0
+                timeout = 25.0
             else:
                 timeout = 8.0
 

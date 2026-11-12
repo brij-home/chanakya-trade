@@ -118,6 +118,12 @@ _FYERS_INDEX_MAP = {
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "NIFTY NEXT 50": "NSE:NIFTYNXT50-INDEX",
+    "NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+    "NEXT50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTY NEXT 50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTYNXT50-INDEX": "NSE:NIFTYNXT50-INDEX",
     "NSE:NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
     "NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
     "PSU_BANK": "NSE:NIFTYPSUBANK-INDEX",
@@ -665,12 +671,11 @@ class FyersAPI(BrokerAPI):
         # Auto-load from config/credentials or environment if not passed
         if not app_id:
             try:
-                from dotenv import load_dotenv
-                from pathlib import Path
+                from config.credentials import load_all
 
-                load_dotenv(Path(__file__).parent.parent / ".env")
+                load_all()
             except Exception as e_suppressed:
-                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+                logger.debug(f"[brokers.fyers] Credential load notice: {e_suppressed}")
 
         app_id = (
             app_id
@@ -800,39 +805,10 @@ class FyersAPI(BrokerAPI):
             logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
-    def _load_token(self) -> None:
-        try:
-            if TOKEN_FILE.exists():
-                data = json.loads(TOKEN_FILE.read_text())
-                ts = data.get("timestamp", 0)
-                if not self._is_token_expired(ts):
-                    self._access_token = data.get("access_token", "")
-                    self._token_ts = ts
-                    if not self._app_id and data.get("app_id"):
-                        self._app_id = data.get("app_id")
-                else:
-                    self._access_token = ""
-                    self._token_ts = 0.0
-                    self._profile = None
-                    self._fyers = None
-                    TOKEN_FILE.unlink(missing_ok=True)
-        except Exception as e_suppressed:
-            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
-
-    def _save_token(self, token: str) -> None:
-        from brokers.base import save_secure_token
-
-        save_secure_token(
-            TOKEN_FILE,
-            json.dumps(
-                {
-                    "access_token": token,
-                    "app_id": self._app_id,
-                    "timestamp": time.time(),
-                }
-            ),
-        )
-        # Instantly propagate renewed token to background streaming sockets
+    def _notify_sockets_token_updated(self, token: str) -> None:
+        """Instantly propagate renewed token to background streaming sockets."""
+        if not token or not self._app_id:
+            return
         try:
             from market.fyers_tbt_manager import fyers_tbt_manager
 
@@ -859,6 +835,42 @@ class FyersAPI(BrokerAPI):
             get_fyers_circuit_breaker().record_auth_success()
         except Exception as e_suppressed:
             logger.debug(f"[brokers.fyers] Error recording auth success: {e_suppressed}")
+
+    def _load_token(self) -> None:
+        try:
+            if TOKEN_FILE.exists():
+                data = json.loads(TOKEN_FILE.read_text())
+                ts = data.get("timestamp", 0)
+                if not self._is_token_expired(ts):
+                    prev_tok = self._access_token
+                    self._access_token = data.get("access_token", "")
+                    self._token_ts = ts
+                    if not self._app_id and data.get("app_id"):
+                        self._app_id = data.get("app_id")
+                    if self._access_token and prev_tok and self._access_token != prev_tok:
+                        self._notify_sockets_token_updated(self._access_token)
+                else:
+                    self._access_token = ""
+                    self._token_ts = 0.0
+                    self._profile = None
+                    self._fyers = None
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
+    def _save_token(self, token: str) -> None:
+        from brokers.base import save_secure_token
+
+        save_secure_token(
+            TOKEN_FILE,
+            json.dumps(
+                {
+                    "access_token": token,
+                    "app_id": self._app_id,
+                    "timestamp": time.time(),
+                }
+            ),
+        )
+        self._notify_sockets_token_updated(token)
 
     # ── Auth ──────────────────────────────────────────────────
 
@@ -1135,7 +1147,11 @@ class FyersAPI(BrokerAPI):
                         )
                         _GLOBAL_AUTH_BACKOFF_UNTIL = time.time() + backoff_duration
                         try:
-                            get_fyers_circuit_breaker().record_failure("Fyers Auth 429 Rate Limit")
+                            get_fyers_circuit_breaker().record_failure(
+                                status_code=429,
+                                error_message=f"Fyers Headless Auth Throttled: {e}",
+                                is_429=True,
+                            )
                         except Exception as e_cb:
                             logger.debug(f"[brokers.fyers] Error tripping circuit breaker: {e_cb}")
                     else:
@@ -1211,10 +1227,52 @@ class FyersAPI(BrokerAPI):
             self._access_token = ""
             self._profile = None
             self._fyers = None
-            try:
-                TOKEN_FILE.unlink(missing_ok=True)
-            except Exception as e_suppressed:
-                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
+            # Attempt credential reload if headless keys are missing in memory
+            if not (self._fy_id and self._totp_secret and self._pin):
+                try:
+                    from config.credentials import get_credential
+
+                    self._fy_id = self._fy_id or get_credential(
+                        "FYERS_FY_ID", secret=False, required=False
+                    )
+                    self._totp_secret = self._totp_secret or get_credential(
+                        "FYERS_TOTP_SECRET", secret=True, required=False
+                    )
+                    self._pin = self._pin or get_credential(
+                        "FYERS_PIN", secret=True, required=False
+                    )
+                    self._app_id = self._app_id or get_credential(
+                        "FYERS_APP_ID", secret=False, required=False
+                    )
+                    self._secret_key = self._secret_key or get_credential(
+                        "FYERS_SECRET_KEY", secret=True, required=False
+                    )
+                except Exception as e_cred:
+                    logger.debug(f"[brokers.fyers] Credential re-fetch notice: {e_cred}")
+
+            # Attempt credential reload if headless keys are missing in memory
+            if not (self._fy_id and self._totp_secret and self._pin):
+                try:
+                    from config.credentials import get_credential
+
+                    self._fy_id = self._fy_id or get_credential(
+                        "FYERS_FY_ID", secret=False, required=False
+                    )
+                    self._totp_secret = self._totp_secret or get_credential(
+                        "FYERS_TOTP_SECRET", secret=True, required=False
+                    )
+                    self._pin = self._pin or get_credential(
+                        "FYERS_PIN", secret=True, required=False
+                    )
+                    self._app_id = self._app_id or get_credential(
+                        "FYERS_APP_ID", secret=False, required=False
+                    )
+                    self._secret_key = self._secret_key or get_credential(
+                        "FYERS_SECRET_KEY", secret=True, required=False
+                    )
+                except Exception as e_cred:
+                    logger.debug(f"[brokers.fyers] Credential lookup notice: {e_cred}")
 
             if (
                 self._fy_id
@@ -1271,22 +1329,48 @@ class FyersAPI(BrokerAPI):
 
             return False
 
-    def is_authenticated(self) -> bool:
+    def is_authenticated(self, headless_retry: bool = True) -> bool:
+        if not self._access_token:
+            self._load_token()
         if self._access_token and not self._is_token_expired(self._token_ts):
             return True
 
+        if not headless_retry:
+            return False
+
         with _GLOBAL_FYERS_AUTH_LOCK:
             # Double-check after acquiring lock
-            if self._access_token and not self._is_token_expired(self._token_ts):
-                return True
-
-            self._load_token()
+            if not self._access_token:
+                self._load_token()
             if self._access_token and not self._is_token_expired(self._token_ts):
                 return True
 
             # If backoff is active from a recent failure / 429, do NOT hammer network
             if _get_auth_backoff_remaining() > 0:
                 return False
+
+            # Attempt credential reload if headless keys are missing in memory
+            if not (self._fy_id and self._totp_secret and self._pin):
+                try:
+                    from config.credentials import get_credential
+
+                    self._fy_id = self._fy_id or get_credential(
+                        "FYERS_FY_ID", secret=False, required=False
+                    )
+                    self._totp_secret = self._totp_secret or get_credential(
+                        "FYERS_TOTP_SECRET", secret=True, required=False
+                    )
+                    self._pin = self._pin or get_credential(
+                        "FYERS_PIN", secret=True, required=False
+                    )
+                    self._app_id = self._app_id or get_credential(
+                        "FYERS_APP_ID", secret=False, required=False
+                    )
+                    self._secret_key = self._secret_key or get_credential(
+                        "FYERS_SECRET_KEY", secret=True, required=False
+                    )
+                except Exception as e_cred:
+                    logger.debug(f"[brokers.fyers] Credential lookup notice: {e_cred}")
 
             if (
                 self._fy_id

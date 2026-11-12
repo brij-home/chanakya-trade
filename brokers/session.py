@@ -191,6 +191,41 @@ def unregister_broker(key: str) -> None:
 
 _last_auto_restore_attempt: float = 0.0
 _AUTO_RESTORE_COOLDOWN_SEC: float = 10.0
+_session_watchdog_thread: Optional[threading.Thread] = None
+_session_watchdog_lock = threading.Lock()
+
+
+def _ensure_session_watchdog() -> None:
+    """Spawns a resilient background watchdog to maintain broker connectivity."""
+    global _session_watchdog_thread
+    if (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    ):
+        return
+    with _session_watchdog_lock:
+        if _session_watchdog_thread is None or not _session_watchdog_thread.is_alive():
+
+            def _watchdog_loop():
+                while True:
+                    time.sleep(45.0)
+                    try:
+                        needs_recover = not _brokers or any(
+                            not b.is_authenticated() for b in _brokers.values() if b
+                        )
+                        if needs_recover:
+                            logger.info(
+                                "[SessionWatchdog] Unauthenticated or disconnected broker detected. Auto-recovering..."
+                            )
+                            _try_auto_restore_sessions()
+                    except Exception as e_wd:
+                        logger.debug(f"[SessionWatchdog] Watchdog loop note: {e_wd}")
+
+            _session_watchdog_thread = threading.Thread(
+                target=_watchdog_loop, name="broker-session-watchdog", daemon=True
+            )
+            _session_watchdog_thread.start()
 
 
 def _try_auto_restore_sessions() -> None:
@@ -199,8 +234,14 @@ def _try_auto_restore_sessions() -> None:
     if os.environ.get("CHANAKYA_TESTING") == "1":
         return
 
+    _ensure_session_watchdog()
+
     now = time.time()
-    if not _brokers and (now - _last_auto_restore_attempt) < _AUTO_RESTORE_COOLDOWN_SEC:
+    if (
+        (now - _last_auto_restore_attempt) < _AUTO_RESTORE_COOLDOWN_SEC
+        and _brokers
+        and all(b.is_authenticated() for b in _brokers.values() if b)
+    ):
         return
     _last_auto_restore_attempt = now
 
@@ -211,14 +252,14 @@ def _try_auto_restore_sessions() -> None:
     )
 
     # 0. Fyers (Primary Institutional Data & Execution Broker)
-    if "fyers" not in _brokers:
+    if "fyers" not in _brokers or not _brokers["fyers"].is_authenticated():
         try:
             from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
             if os.path.exists(_FT) or os.environ.get("FYERS_APP_ID"):
-                b = FyersAPI()
+                b = _brokers.get("fyers") or FyersAPI()
                 if b.is_authenticated():
-                    is_first = not _brokers
+                    is_first = not _brokers or _primary_key == "fyers"
                     register_broker(
                         "fyers", b, primary=is_first, role="both" if is_first else "data"
                     )
@@ -307,23 +348,16 @@ def _try_auto_restore_sessions() -> None:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Flattrade (Secondary Backup Broker)
-    if "flattrade" not in _brokers:
+    if "flattrade" not in _brokers or not _brokers["flattrade"].is_authenticated():
         try:
             from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
 
-            if os.path.exists(_FT_FLAT) or os.environ.get("FLATTRADE_API_KEY"):
-                b = FlattradeAPI()
-                if (
-                    not b.is_authenticated()
-                    and b._password
-                    and b._totp_secret
-                    and b._api_key
-                    and b._api_secret
-                ):
-                    try:
-                        b.complete_login()
-                    except Exception as e_login:
-                        logger.debug(f"[brokers.session] Flattrade auto-login failed: {e_login}")
+            if (
+                os.path.exists(_FT_FLAT)
+                or os.environ.get("FLATTRADE_API_KEY")
+                or os.environ.get("FLATTRADE_USER_ID")
+            ):
+                b = _brokers.get("flattrade") or FlattradeAPI()
                 if b.is_authenticated():
                     is_first = not _brokers
                     register_broker(
@@ -346,7 +380,11 @@ def _try_auto_restore_sessions() -> None:
 
 def get_broker() -> BrokerAPI:
     """Return the primary broker. Raises if login() has not been called."""
-    if not _primary_key or _primary_key not in _brokers:
+    if (
+        not _primary_key
+        or _primary_key not in _brokers
+        or not _brokers[_primary_key].is_authenticated()
+    ):
         _try_auto_restore_sessions()
     if not _primary_key or _primary_key not in _brokers:
         from .exceptions import BrokerAuthError
@@ -356,7 +394,15 @@ def get_broker() -> BrokerAPI:
             broker="SESSION",
             error_code="NOT_LOGGED_IN",
         )
-    return _brokers[_primary_key]
+    primary = _brokers[_primary_key]
+    if not primary.is_authenticated():
+        for key, alt in _brokers.items():
+            if key != _primary_key and alt.is_authenticated():
+                logger.info(
+                    f"[brokers.session] Primary broker '{_primary_key}' unauthenticated. Serving healthy '{key}' fallback."
+                )
+                return alt
+    return primary
 
 
 def get_all_brokers() -> dict[str, BrokerAPI]:
@@ -366,8 +412,9 @@ def get_all_brokers() -> dict[str, BrokerAPI]:
     return dict(_brokers)
 
 
-# Alias for backward-compatibility across all modules and stream endpoints
-get_registered_brokers = get_all_brokers
+def get_registered_brokers() -> dict[str, BrokerAPI]:
+    """Return currently registered brokers from in-memory session registry without auto-restore."""
+    return dict(_brokers)
 
 
 def is_multi_broker() -> bool:
@@ -384,8 +431,8 @@ def apply_env_broker_roles() -> None:
     """
     Apply DATA_BROKER and EXEC_BROKER environment overrides if configured.
     Enables zero-touch institutional dual-broker division of labor:
-      - DATA_BROKER=fyers (5,000 WebSocket streams + L3 50-Depth TBT)
-      - EXEC_BROKER=flattrade (Zero-brokerage execution order routing)
+      - DATA_BROKER=fyers (Quotes, historical charts, and standard WebSocket streaming)
+      - EXEC_BROKER=flattrade (Zero-brokerage execution order routing and session tick stream)
     """
     global _data_key, _exec_key
     preferred_exec = os.environ.get("EXEC_BROKER") or os.environ.get("EXECUTION_BROKER")
@@ -448,12 +495,22 @@ def set_broker_role(key: str, role: str) -> None:
 
 
 def get_data_broker() -> BrokerAPI:
-    """Return the current data broker. Falls back to primary if unset."""
+    """Return the current data broker. Falls back to primary or healthy secondary if unauthenticated."""
     if not _brokers:
         _try_auto_restore_sessions()
     apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
-        return _brokers[_data_key]
+        candidate = _brokers[_data_key]
+        if candidate.is_authenticated():
+            return candidate
+        # Failover: If configured data broker is unauthenticated, probe other registered brokers
+        for key, alt in _brokers.items():
+            if key != _data_key and alt.is_authenticated():
+                logger.info(
+                    f"[brokers.session] Configured data broker '{_data_key}' unauthenticated. Failing over to healthy '{key}'."
+                )
+                return alt
+        return candidate
     return get_broker()
 
 
@@ -941,14 +998,18 @@ def _oauth_local_server(
 
 
 def _recreate_broker_from_token(key: str):
-    """Re-create a broker instance from its saved token file (after sidecar OAuth or auto-login)."""
+    """Re-create a broker instance from its saved token file or headless credentials."""
     try:
         from config.credentials import get_credential
 
         if key == "fyers":
             from brokers.fyers import FyersAPI, TOKEN_FILE
 
-            if TOKEN_FILE.exists():
+            has_fyers_cred = TOKEN_FILE.exists() or bool(
+                get_credential("FYERS_APP_ID", secret=False, required=False)
+                or os.environ.get("FYERS_APP_ID")
+            )
+            if has_fyers_cred:
                 b = FyersAPI(
                     get_credential("FYERS_APP_ID", secret=False, required=False)
                     or os.environ.get("FYERS_APP_ID", ""),
@@ -1055,7 +1116,11 @@ def _recreate_broker_from_token(key: str):
         elif key == "flattrade":
             from brokers.flattrade import FlattradeAPI, TOKEN_FILE
 
-            if TOKEN_FILE.exists():
+            has_flat_cred = TOKEN_FILE.exists() or bool(
+                get_credential("FLATTRADE_USER_ID", secret=False, required=False)
+                or os.environ.get("FLATTRADE_USER_ID")
+            )
+            if has_flat_cred:
                 b = FlattradeAPI()
                 if b.is_authenticated():
                     return b
@@ -1259,9 +1324,11 @@ def _start_websocket(broker: BrokerAPI) -> None:
 
             broker.start_websocket(on_tick=_on_flattrade_tick)
             try:
-                from market.ws_subscription_manager import get_ws_subscription_manager
+                from market.symbol_facade import _FLATTRADE_INDEX_REGISTRY
 
-                get_ws_subscription_manager().on_ws_connected(broker)
+                # Subscribe Flattrade strictly to known index registry symbols to avoid 1380-symbol REST search storm
+                index_subs = list(_FLATTRADE_INDEX_REGISTRY.keys())
+                broker.subscribe(index_subs)
             except Exception as e_sub:
                 logger.debug(f"[brokers.session] Flattrade ws subscription seed notice: {e_sub}")
             return

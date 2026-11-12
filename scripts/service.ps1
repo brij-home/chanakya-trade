@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # ChanakyaTrade — Ultra-Fast Background Service Manager (Windows PowerShell)
 # ==============================================================================
 # Usage:
@@ -29,7 +29,13 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir = Split-Path -Parent $ScriptDir
 $LogDir = Join-Path $RootDir ".logs"
-$PythonExe = Join-Path $RootDir ".venv\Scripts\python.exe"
+$PythonExe = if (Test-Path "C:\Users\brije\AppData\Local\Programs\Python\Python313\python.exe") {
+    "C:\Users\brije\AppData\Local\Programs\Python\Python313\python.exe"
+} elseif (Test-Path (Join-Path $RootDir ".venv\Scripts\python.exe")) {
+    Join-Path $RootDir ".venv\Scripts\python.exe"
+} else {
+    "python.exe"
+}
 $FrontendDir = Join-Path $RootDir "macos-app"
 $PidFile = Join-Path $LogDir "services.json"
 
@@ -208,9 +214,8 @@ $startupInfo.ShowWindow = 0  # SW_HIDE (0): zero black console window
 
 $processClass = [wmiclass]"Win32_Process"
 $reloadFlag = if ($Reload) { "--reload" } else { "" }
-$venvDir = Join-Path $RootDir ".venv"
-$venvScripts = Join-Path $venvDir "Scripts"
-$backendCmd = "cmd.exe /c `"set VIRTUAL_ENV=$venvDir&& set PATH=$venvScripts;%PATH%&& set PYTHONUNBUFFERED=1&& set PYTHONIOENCODING=utf-8&& `"$PythonExe`" -u -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
+$userProf = [System.Environment]::GetFolderPath('UserProfile')
+$backendCmd = "cmd.exe /c `"set USERPROFILE=$userProf&& set TRADING_PLATFORM_DATA=$userProf\.trading_platform&& set PYTHONUNBUFFERED=1&& set PYTHONIOENCODING=utf-8&& `"$PythonExe`" -u -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
 $bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 
@@ -279,15 +284,15 @@ if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
     $frontendReady = $false
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         try {
-            $fConn = Get-NetTCPConnection -LocalPort $VitePort -State Listen -ErrorAction SilentlyContinue
+            $fConn = Get-NetTCPConnection -LocalPort $VitePort -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($fConn) {
                 $frontendReady = $true
-                $frontendPid = $fConn.OwningProcess
+                if ($fConn.OwningProcess) { $frontendPid = $fConn.OwningProcess }
                 break
             }
         } catch {}
         try {
-            $fResTest = Invoke-WebRequest -Uri "http://localhost:$VitePort" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
+            $fResTest = Invoke-WebRequest -Uri "http://127.0.0.1:$VitePort" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
             if ($fResTest -and $fResTest.StatusCode -lt 500) {
                 $frontendReady = $true
                 break

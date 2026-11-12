@@ -317,9 +317,11 @@ def get_active_stock_options_grid(
         now = now.replace(tzinfo=IST)
 
     if stocks is None:
-        from market.universe_depth_radar import LIQUID_FNO_LEADERS
+        from market.universe_depth_radar import LIQUID_FNO_LEADERS, TOP_FNO_STOCKS
 
-        target_stocks = LIQUID_FNO_LEADERS[:25]
+        plan = os.environ.get("FYERS_PLAN", "PRIME").upper()
+        limit = 60 if plan == "PRIME" else 25
+        target_stocks = TOP_FNO_STOCKS[:limit] if TOP_FNO_STOCKS else LIQUID_FNO_LEADERS[:limit]
     else:
         target_stocks = stocks
 
@@ -490,6 +492,8 @@ class WsSubscriptionManager:
         if not path.exists():
             return
         try:
+            from market.websocket import _to_ws_symbol
+
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             loaded_dynamic = data.get("dynamic", [])
@@ -498,21 +502,29 @@ class WsSubscriptionManager:
             sanitized_needed = False
 
             with self._lock:
-                for sym in loaded_dynamic:
-                    if not is_valid_ws_symbol(sym) or is_contract_expired(sym):
+                for raw_sym in loaded_dynamic:
+                    sym = _to_ws_symbol(raw_sym)
+                    if not sym or not is_valid_ws_symbol(sym) or is_contract_expired(sym):
                         sanitized_needed = True
                         continue
+                    if sym != raw_sym:
+                        sanitized_needed = True
                     if sym not in self._core_symbols:
                         self._dynamic_symbols[sym] = now
 
                 # Also cleanse expired from loaded core (preserve CORE_BASE_SYMBOLS)
-                for sym in loaded_core:
+                for raw_sym in loaded_core:
+                    sym = _to_ws_symbol(raw_sym)
+                    if sym != raw_sym:
+                        sanitized_needed = True
                     if sym not in CORE_BASE_SYMBOLS:
-                        if is_contract_expired(sym) or not is_valid_ws_symbol(sym):
+                        if not sym or is_contract_expired(sym) or not is_valid_ws_symbol(sym):
                             sanitized_needed = True
-                            self._core_symbols.discard(sym)
+                            self._core_symbols.discard(raw_sym)
                         else:
                             self._core_symbols.add(sym)
+                    else:
+                        self._core_symbols.add(sym)
 
             if sanitized_needed:
                 self._save_to_disk()

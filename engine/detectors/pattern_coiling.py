@@ -141,9 +141,40 @@ def detect_learned_pattern_coiling(
                 e_max = round(ltp * 1.005, 1)
             entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
 
+            ote_limit = float(tp_dict.get("optimal_entry_limit") or 0.0) if tp_dict else 0.0
+            is_ext = bool(tp_dict.get("is_extended")) if tp_dict else False
+            base_struct = str(tp_dict.get("base_structure") or "") if tp_dict else ""
+            ote_rg_str = str(tp_dict.get("optimal_entry_range") or "") if tp_dict else ""
+            entry_strat = str(tp_dict.get("entry_strategy") or "") if tp_dict else ""
+
+            if is_ext and ote_limit > 0:
+                entry_rg = ote_rg_str or entry_rg
+                rec_entry = f"₹{ote_limit:,.1f} (Limit on Retest)"
+                effective_trigger = ote_limit
+                effective_action = "BUY_PULLBACK_RETEST"
+                effective_headline = f"🎯 [LIMIT RETEST: {base_struct or 'OTE'}] {headline}"
+            elif entry_strat == "CONFIRMATION_STOP_LIMIT":
+                effective_headline = f"🚀 [CONTINUATION RUNNER] {headline}"
+                rec_entry = f"₹{ltp:.1f} (Stop-Limit Pivot)"
+                effective_trigger = ltp
+                effective_action = "BUY_ON_PIVOT_RUNNER"
+                effective_headline = headline
+            else:
+                rec_entry = entry_rg
+                effective_trigger = ltp
+                effective_action = res.recommended_entry_action
+                effective_headline = headline
+
             act_plan = {
-                "action": res.recommended_entry_action,
+                "action": effective_action,
                 "entry_range": entry_rg,
+                "recommended_entry": rec_entry,
+                "recommended_entry_type": "LIMIT_PULLBACK"
+                if (is_ext and ote_limit > 0)
+                else "STOP_LIMIT_PIVOT",
+                "optimal_entry_limit": ote_limit,
+                "base_structure": base_struct,
+                "is_extended": is_ext,
                 "no_chase_boundary": f"₹{e_max:,.1f}",
                 "target": f"₹{t1:.1f}",
                 "stop_loss": f"₹{sl:.1f}",
@@ -159,11 +190,11 @@ def detect_learned_pattern_coiling(
                 symbol=symbol,
                 exchange=exchange,
                 direction="BULLISH",
-                headline=headline,
+                headline=effective_headline,
                 summary=summary,
                 ltp=ltp,
                 underlying_spot=ltp,
-                trigger_level=ltp,
+                trigger_level=effective_trigger,
                 target_level=t1,
                 stop_loss=sl,
                 no_chase_boundary=e_max,
@@ -172,6 +203,9 @@ def detect_learned_pattern_coiling(
                     "closest_archetype": res.closest_archetype,
                     "matched_factors": res.matched_factors,
                     "expected_rr": res.expected_asymmetry_rr,
+                    "optimal_entry_limit": ote_limit,
+                    "is_extended": is_ext,
+                    "base_structure": base_struct,
                     "atr": round(atr20, 2),
                     "atr_14": round(atr20, 2),
                     "min_noise_sl_pts": round(min_sl_dist, 2),

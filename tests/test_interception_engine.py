@@ -107,13 +107,17 @@ def test_proximity_promotion_stalk_to_primed():
         assert len(ignited) == 0
         assert alert.stage == STAGE_STALK
 
-    # 2. Price moves to 3492.0 (dist = 8 pts = 0.23% <= 0.35%): promoted to PRIMED
-    with patch.object(engine, "_batch_refresh_quotes", return_value={"NSE:TCS": 3492.0}):
+    # 2. Price moves to 3492.0 (dist = 8 pts = 0.23% <= 0.35%): promoted to PRIMED and allocated L3 TBT scout slot
+    with (
+        patch("market.fyers_tbt_manager.fyers_tbt_manager.promote_jit_scout") as mock_tbt_promote,
+        patch.object(engine, "_batch_refresh_quotes", return_value={"NSE:TCS": 3492.0}),
+    ):
         ignited = engine.check_and_ignite_early_warnings()
         assert len(ignited) == 0  # Not yet ignited
         assert alert.stage == STAGE_PRIMED
         assert alert.is_primed is True
         assert alert.ltp == 3492.0
+        assert mock_tbt_promote.called is True
 
     # 3. Price crosses 3501.0: promoted to IGNITED
     with patch.object(engine, "_batch_refresh_quotes", return_value={"NSE:TCS": 3501.0}):

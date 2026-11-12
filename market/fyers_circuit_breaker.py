@@ -190,7 +190,12 @@ class FyersCircuitBreaker:
                     )
                 except Exception:
                     limit_desc = "10 req/s or rolling window"
-                reason = f"Fyers REST Rate Limit Exceeded ({limit_desc}): {error_message}"
+                if "auth" in err_lower or "login" in err_lower or "totp" in err_lower:
+                    reason = (
+                        f"Fyers Auth Endpoint Throttled (Headless Login Backoff): {error_message}"
+                    )
+                else:
+                    reason = f"Fyers REST Rate Limit Exceeded ({limit_desc}): {error_message}"
             else:
                 self._failure_timestamps = [
                     t for t in self._failure_timestamps if now - t <= self._failure_window_sec

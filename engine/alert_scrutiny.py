@@ -626,12 +626,30 @@ class AlertScrutinyAuditor:
                     opt_min_floor = max(opt_min_floor, min_idx_opt_floor)
 
             if risk_pts < (opt_min_floor * 0.95):  # 5% precision tolerance
-                flags["risk_within_bounds"] = False
-                return (
-                    False,
-                    f"Sub-ATR Option Noise Trap: {clean_sym} option stop-loss ({risk_pts:.1f} pts) < minimum premium volatility floor ({opt_min_floor:.1f} pts). Mandate wider premium stop to absorb bid-ask noise.",
-                    flags,
+                # If a hedged spread is mandated or attached, spread risk is defined by net debit
+                is_spread_mandate = bool(
+                    getattr(alert, "hedged_spread", None)
+                    or getattr(alert, "execution_style_mandate", "") == "HEDGED_SPREAD_MANDATORY"
+                    or (getattr(alert, "actionable_plan", {}) or {}).get("execution_style_mandate")
+                    == "HEDGED_SPREAD_MANDATORY"
+                    or (
+                        isinstance(getattr(alert, "actionable_plan", None), dict)
+                        and "SPREAD"
+                        in str(alert.actionable_plan.get("preferred_vehicle", "")).upper()
+                    )
                 )
+                if is_spread_mandate:
+                    flags["risk_within_bounds"] = True
+                else:
+                    # Dynamically calibrate stop_loss to minimum floor rather than dropping valid setup
+                    calibrated_sl = round(max(0.5, entry_anchor - opt_min_floor), 1)
+                    if hasattr(alert, "stop_loss"):
+                        alert.stop_loss = calibrated_sl
+                    if isinstance(getattr(alert, "actionable_plan", None), dict):
+                        alert.actionable_plan["stop_loss"] = f"₹{calibrated_sl:,.1f}"
+                    flags["risk_within_bounds"] = True
+                    risk_pts = opt_min_floor
+                    risk_pct = (risk_pts / entry_anchor) * 100.0 if entry_anchor > 0 else 0.0
 
         if risk_pct < 0.10:
             return (
@@ -746,6 +764,19 @@ class AlertScrutinyAuditor:
             logger.debug(f"[AlertScrutiny] Regime check error: {e_rg}")
 
         # 3c-1. Tom Williams VSA Climax & False Breakout Sanity Gate
+        act_plan = getattr(alert, "actionable_plan", {}) or {}
+        is_spread = bool(
+            (
+                isinstance(act_plan, dict)
+                and (
+                    act_plan.get("instrument_type") == "OPTION_SPREAD"
+                    or "SPREAD" in str(act_plan.get("action", "")).upper()
+                )
+            )
+            or bool(metrics_d.get("hedge_plan"))
+            or "SPREAD" in str(getattr(alert, "headline", "")).upper()
+            or "SPREAD" in str(getattr(alert, "derivative_type", "")).upper()
+        )
         vsa_sig = str(metrics_d.get("vsa_signal") or "").upper()
         if vsa_sig:
             u_spot = float(
@@ -771,12 +802,9 @@ class AlertScrutinyAuditor:
                 "STAGE_1_TO_2_EXPANSION",
             )
             if direction == "BULLISH" and vsa_sig in ("EFFORT_NO_RESULT_BEARISH", "NO_DEMAND"):
-                # Institutional Absorption Thrust: During confirmed breakouts holding above VWAP,
-                # an upper wick bar reflects initial limit absorption, not an immediate distribution trap veto.
-                if is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot >= u_vwap:
+                if is_spread:
                     logger.info(
-                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: "
-                        f"confirmed breakout {atype} holding above VWAP ({u_spot:.1f} >= {u_vwap:.1f})."
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: defined-risk hedged spread"
                     )
                 else:
                     return (
@@ -785,10 +813,9 @@ class AlertScrutinyAuditor:
                         flags,
                     )
             elif direction == "BEARISH" and vsa_sig in ("STOPPING_VOLUME", "NO_SUPPLY"):
-                if is_breakout_type and u_spot > 0 and u_vwap > 0 and u_spot <= u_vwap:
+                if is_spread:
                     logger.info(
-                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: "
-                        f"confirmed breakdown {atype} holding below VWAP ({u_spot:.1f} <= {u_vwap:.1f})."
+                        f"[AlertScrutiny] {alert.alert_id} permitted despite {vsa_sig}: defined-risk hedged spread"
                     )
                 else:
                     return (
@@ -2032,7 +2059,13 @@ class AlertScrutinyAuditor:
             )
 
             is_intentional_bull_breakout = (
-                alert.alert_type in ("ORB_BREAKOUT", "SQUEEZE_BREAKOUT")
+                alert.alert_type
+                in (
+                    "ORB_BREAKOUT",
+                    "SQUEEZE_BREAKOUT",
+                    "INDEX_CALL_SETUP",
+                    "OPTIONS_MOMENTUM",
+                )
                 or any(
                     s
                     in (
@@ -2040,27 +2073,83 @@ class AlertScrutinyAuditor:
                         "ORB_BREAKOUT",
                         "VCP_COILING",
                         "DOUBLE_BOTTOM_BREAKOUT",
+                        "VWAP_BREAKOUT",
+                        "CAMARILLA_H4_BREAKOUT",
+                        "CAMARILLA_H5_EXPANSION",
+                        "INSTITUTIONAL_EXPANSION_BREAKOUT",
+                        "RANGE_EXPANSION_THRUST",
+                        "INITIAL_BALANCE_HIGH_EXPANSION",
+                        "GAP_GO_EXPANSION",
+                        "OPENING_DRIVE",
+                        "PUT_WRITING_FLOOR",
+                        "DAY_HIGH_PROXIMITY",
                     )
                     for s in signals_list
                 )
-                or "DAY HIGH BREAKOUT" in headline_str
-                or "ORB-15 BREAKOUT" in headline_str
+                or any(
+                    k in headline_str
+                    for k in (
+                        "DAY HIGH BREAKOUT",
+                        "ORB-15 BREAKOUT",
+                        "VWAP BREAKOUT",
+                        "CAMARILLA H4",
+                        "CAMARILLA H5",
+                        "EXPANSION THRUST",
+                        "INITIAL BALANCE",
+                        "PUT WRITING FLOOR",
+                        "CALL SETUP",
+                    )
+                )
             )
             is_intentional_bear_breakdown = (
-                alert.alert_type in ("ORB_BREAKDOWN", "SQUEEZE_BREAKDOWN")
+                alert.alert_type
+                in (
+                    "ORB_BREAKDOWN",
+                    "SQUEEZE_BREAKDOWN",
+                    "INDEX_PUT_SETUP",
+                    "OPTIONS_MOMENTUM",
+                )
                 or any(
-                    s in ("DAY_LOW_BREAKDOWN", "ORB_BREAKDOWN", "DOUBLE_TOP_BREAKDOWN")
+                    s
+                    in (
+                        "DAY_LOW_BREAKDOWN",
+                        "ORB_BREAKDOWN",
+                        "DOUBLE_TOP_BREAKDOWN",
+                        "VWAP_BREAKDOWN",
+                        "CAMARILLA_L4_BREAKDOWN",
+                        "CAMARILLA_L5_EXPANSION",
+                        "INSTITUTIONAL_EXPANSION_BREAKDOWN",
+                        "RANGE_EXPANSION_FLUSH",
+                        "INITIAL_BALANCE_LOW_EXPANSION",
+                        "GAP_GO_BREAKDOWN",
+                        "CALL_WRITING_CEILING",
+                        "DAY_LOW_PROXIMITY",
+                    )
                     for s in signals_list
                 )
-                or "DAY LOW BREAKDOWN" in headline_str
-                or "ORB-15 BREAKDOWN" in headline_str
+                or any(
+                    k in headline_str
+                    for k in (
+                        "DAY LOW BREAKDOWN",
+                        "ORB-15 BREAKDOWN",
+                        "VWAP BREAKDOWN",
+                        "CAMARILLA L4",
+                        "CAMARILLA L5",
+                        "EXPANSION FLUSH",
+                        "CALL WRITING CEILING",
+                        "PUT SETUP",
+                    )
+                )
             )
 
+            actionable_plan = getattr(alert, "actionable_plan", {}) or {}
             is_spread = (
-                (getattr(alert, "actionable_plan", {}) or {}).get("instrument_type")
-                == "OPTION_SPREAD"
+                actionable_plan.get("instrument_type") == "OPTION_SPREAD"
                 or bool(metrics_dict.get("hedge_plan"))
                 or "SPREAD" in (getattr(alert, "headline", "") or "").upper()
+                or "SPREAD" in str(actionable_plan.get("preferred_vehicle") or "").upper()
+                or "SPREAD" in str(actionable_plan.get("recommended_vehicle") or "").upper()
+                or "SPREAD" in str(metrics_dict.get("preferred_vehicle") or "").upper()
             )
 
             if is_bull_setup and not is_bear_setup:
@@ -2084,9 +2173,11 @@ class AlertScrutinyAuditor:
                     overhead_barriers.append((call_wall, "Max Call OI Wall"))
 
                 for barrier_lvl, barrier_name in overhead_barriers:
-                    # Breakout setups testing or coiled right beneath Day High / PDH are intentional breakouts
-                    if is_intentional_bull_breakout and (
-                        barrier_name == "Day High" or has_breakout_momentum
+                    # Breakout setups testing or coiled right beneath Day High / PDH / PWH are intentional breakouts
+                    if (is_intentional_bull_breakout or is_spread) and (
+                        barrier_name
+                        in ("Day High", "Previous Day High (PDH)", "Previous Week High (PWH)")
+                        or has_breakout_momentum
                     ):
                         continue
                     headroom_pts = barrier_lvl - ref_spot
@@ -2121,9 +2212,11 @@ class AlertScrutinyAuditor:
                     underneath_barriers.append((put_wall, "Max Put OI Wall"))
 
                 for barrier_lvl, barrier_name in underneath_barriers:
-                    # Breakdown setups testing or coiled right above Day Low / PDL are intentional breakdowns
-                    if is_intentional_bear_breakdown and (
-                        barrier_name == "Day Low" or has_breakout_momentum
+                    # Breakdown setups testing or coiled right above Day Low / PDL / PWL are intentional breakdowns
+                    if (is_intentional_bear_breakdown or is_spread) and (
+                        barrier_name
+                        in ("Day Low", "Previous Day Low (PDL)", "Previous Week Low (PWL)")
+                        or has_breakout_momentum
                     ):
                         continue
                     headroom_pts = ref_spot - barrier_lvl
@@ -2191,6 +2284,22 @@ class AlertScrutinyAuditor:
                 )
                 if is_trend_expansion:
                     max_ext = 1.60 if clean_sym in ("BANKNIFTY", "SENSEX", "MIDCPNIFTY") else 1.25
+            else:
+                # Dynamic scaling for Equities:
+                # For INTRADAY_BREAKOUT_SPARK, ASYMMETRIC_OPPORTUNITY, or high-RVOL momentum breakout,
+                # a stock surging +2% to +5% on volume will naturally trade 1.8% to 3.5% above VWAP.
+                atype = str(getattr(alert, "alert_type", "") or "")
+                rvol_val = float(
+                    getattr(alert, "rvol", 1.0)
+                    or (metrics_dict.get("rvol") if isinstance(metrics_dict, dict) else 1.0)
+                    or 1.0
+                )
+                if (
+                    atype
+                    in ("INTRADAY_BREAKOUT_SPARK", "ASYMMETRIC_OPPORTUNITY", "OPTIONS_MOMENTUM")
+                    or rvol_val >= 1.8
+                ):
+                    max_ext = 3.50 if rvol_val >= 2.0 else 2.50
 
             if (
                 direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
@@ -2463,6 +2572,20 @@ class AlertScrutinyAuditor:
                 logger.debug(
                     f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
                 )
+
+        if rsi_val is None and not is_option_premium_levels and not is_test_runner:
+            try:
+                from market.history import get_ohlcv
+                from analysis.technical import rsi
+
+                df_rsi = get_ohlcv(clean_sym, days=2, interval="5minute")
+                if df_rsi is not None and len(df_rsi) >= 15:
+                    c_s = df_rsi["close"] if "close" in df_rsi.columns else df_rsi["Close"]
+                    rsi_s = rsi(c_s, period=14).dropna()
+                    if len(rsi_s) > 0:
+                        rsi_val = float(rsi_s.iloc[-1])
+            except Exception as _e_rsi:
+                logger.debug(f"[AlertScrutiny] On-the-fly RSI check fallback bypassed: {_e_rsi}")
 
         if rsi_val is not None and rsi_val > 0:
             is_put_option = (
@@ -3059,9 +3182,9 @@ class AlertScrutinyAuditor:
             # Live fallback if cache lookup was empty
             if nifty_change is None and not is_test_runner:
                 try:
-                    from market.quotes import get_market_quote
+                    from market.quotes import get_quote
 
-                    nq = get_market_quote("NIFTY 50") or get_market_quote("NIFTY")
+                    nq = get_quote("NIFTY 50") or get_quote("NIFTY")
                     if nq and getattr(nq, "change_pct", None) is not None:
                         n_ltp = float(
                             getattr(nq, "last_price", 0.0) or getattr(nq, "ltp", 0.0) or 0.0
@@ -3513,15 +3636,15 @@ class AlertScrutinyAuditor:
                     or "DEMAND REJECTION" in (getattr(alert, "headline", "") or "").upper()
                 )
 
-                # True decoupling requires price displacement (>= 0.45% from high or below VWAP) AND constituent support
+                # True decoupling requires price displacement (>= 0.30% from high/low or below/above VWAP) AND constituent support
                 # For structural reversal setups (V-bottom / V-top capitulation), price displacement alone establishes decoupling
                 bullish_decoupled = bool(
                     (hbcm_allows_long or is_reversal_alert)
-                    and (sym_bounce_from_low >= 0.45 or sym_above_vwap_pct >= 0.45)
+                    and (sym_bounce_from_low >= 0.30 or sym_above_vwap_pct >= 0.30)
                 )
                 bearish_decoupled = bool(
                     (hbcm_allows_short or is_reversal_alert)
-                    and (sym_drop_from_high >= 0.45 or sym_below_vwap_pct >= 0.45)
+                    and (sym_drop_from_high >= 0.30 or sym_below_vwap_pct >= 0.30)
                 )
 
                 # Counter-benchmark short trap: Nifty is green (>= +0.05%) and holding above VWAP
@@ -3548,10 +3671,13 @@ class AlertScrutinyAuditor:
                                 f"Benchmark Divergence Trap: Cannot short NIFTY (PE/Short) while NIFTY 50 is structurally bullish (+{n_chg_f:.2f}%, holding above VWAP). Disallow counter-trend index shorts into benchmark markup.",
                                 flags,
                             )
-                # Counter-benchmark long trap: Nifty is red (<= -0.05%) and trading below VWAP
+                # Counter-benchmark long trap: Nifty is red (<= -0.15%) and trading below VWAP without active rebound
                 elif is_index_bullish and not is_index_bearish:
-                    nifty_bearish = (n_chg_f <= -0.05) and (
-                        n_ltp <= n_vwap if (n_ltp > 0 and n_vwap > 0) else True
+                    n_bounce = float(metrics_dict.get("nifty_bounce_from_low", 0.0) or 0.0)
+                    nifty_bearish = (
+                        (n_chg_f <= -0.15)
+                        and (n_ltp <= n_vwap if (n_ltp > 0 and n_vwap > 0) else True)
+                        and (n_bounce < 0.25)
                     )
                     if clean_sym != "NIFTY":
                         if nifty_bearish and not bullish_decoupled:
@@ -4199,24 +4325,26 @@ class AlertScrutinyAuditor:
                         or getattr(alert, "option_type", "") == "CE"
                     ) and dh > 0:
                         if (dh - ltp) / ltp <= 0.005:  # within 0.5% of day high
-                            flags["adr_exhaustion_valid"] = False
-                            return (
-                                False,
-                                f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's high lacks expansion runway for Target 1.",
-                                flags,
-                            )
+                            if not (is_intentional_bull_breakout or is_spread):
+                                flags["adr_exhaustion_valid"] = False
+                                return (
+                                    False,
+                                    f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's high lacks expansion runway for Target 1.",
+                                    flags,
+                                )
                     # Short setup shorting near day low
                     elif (
                         direction in ("BEARISH", "SHORT", "SELL")
                         or getattr(alert, "option_type", "") == "PE"
                     ) and dl > 0:
                         if (ltp - dl) / ltp <= 0.005:  # within 0.5% of day low
-                            flags["adr_exhaustion_valid"] = False
-                            return (
-                                False,
-                                f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's low lacks expansion runway for Target 1.",
-                                flags,
-                            )
+                            if not (is_intentional_bear_breakdown or is_spread):
+                                flags["adr_exhaustion_valid"] = False
+                                return (
+                                    False,
+                                    f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's low lacks expansion runway for Target 1.",
+                                    flags,
+                                )
             except (ValueError, TypeError) as e_suppressed:
                 logger.debug(
                     f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
@@ -4334,7 +4462,7 @@ class AlertScrutinyAuditor:
 
                     # Broad market liquidation (declines heavily outnumber advances)
                     if (
-                        mb.verdict == "BROAD_DECLINE"
+                        (mb.verdict == "BROAD_DECLINE" and mb.ad_ratio <= 0.75)
                         or mb.ad_ratio <= 0.65
                         or (mb.declines >= 1.5 * max(1, mb.advances))
                     ):
@@ -4360,11 +4488,29 @@ class AlertScrutinyAuditor:
                                     float(
                                         metrics_dict.get("rvol", 0.0)
                                         or metrics_dict.get("rvol_val", 0.0)
+                                        or metrics_dict.get("bar_rvol", 0.0)
+                                        or metrics_dict.get("tod_rvol", 0.0)
                                         or 0.0
                                     )
-                                    >= 1.6
+                                    >= 1.5
                                 )
                                 or (metrics_dict.get("day_high_breakout") is True)
+                                or (
+                                    getattr(alert, "alert_type", "")
+                                    in (
+                                        "INITIAL_BALANCE_BREAKOUT",
+                                        "INTRADAY_BREAKOUT_SPARK",
+                                        "OPTIONS_MOMENTUM",
+                                    )
+                                )
+                                or (
+                                    getattr(alert, "strategy", "")
+                                    in (
+                                        "INITIAL_BALANCE_BREAKOUT",
+                                        "INTRADAY_BREAKOUT_SPARK",
+                                        "OPTIONS_MOMENTUM",
+                                    )
+                                )
                                 or (float(metrics_dict.get("day_change_pct", 0.0) or 0.0) >= 0.80)
                             )
                             is_equity_decoupled = bool(
@@ -4489,25 +4635,52 @@ class AlertScrutinyAuditor:
                                 or getattr(alert, "prev_close", 0.0)
                                 or 0.0
                             )
-                            is_gap_down_or_breakdown = bool(
-                                prev_close_ref > 0
-                                and (prev_close_ref - u_spot_ref) / prev_close_ref * 100 >= 0.40
-                            ) or bool(has_bear_order_flow)
+                            day_high_ref = float(
+                                metrics_dict.get("day_high", 0.0)
+                                or getattr(alert, "day_high", 0.0)
+                                or 0.0
+                            )
+                            u_vwap_ref = float(
+                                metrics_dict.get("underlying_vwap", 0.0)
+                                or metrics_dict.get("vwap", 0.0)
+                                or getattr(alert, "underlying_vwap", 0.0)
+                                or 0.0
+                            )
+                            is_below_vwap = bool(u_vwap_ref > 0 and u_spot_ref < u_vwap_ref * 0.999)
+                            is_retreat_from_high = bool(
+                                day_high_ref > 0
+                                and (day_high_ref - u_spot_ref) / day_high_ref * 100 >= 0.35
+                            )
+                            is_intraday_liq = bool(
+                                getattr(mb, "intraday_verdict", "") == "INTRADAY_LIQUIDATION"
+                                or (
+                                    getattr(mb, "vwap_ratio", 1.0) > 0
+                                    and getattr(mb, "vwap_ratio", 1.0) <= 0.65
+                                )
+                            )
+                            is_gap_down_or_breakdown = (
+                                bool(
+                                    prev_close_ref > 0
+                                    and (prev_close_ref - u_spot_ref) / prev_close_ref * 100 >= 0.40
+                                )
+                                or bool(has_bear_order_flow)
+                                or is_below_vwap
+                                or is_retreat_from_high
+                            )
+
                             is_index_breakdown = bool(
                                 is_index_sym
                                 and hbcm_allows_pe
                                 and (
-                                    (
-                                        metrics_dict.get("day_high")
-                                        and (float(metrics_dict["day_high"]) - u_spot_ref)
-                                        / max(1.0, float(metrics_dict["day_high"]))
-                                        * 100
-                                        >= 0.40
-                                    )
+                                    is_retreat_from_high
+                                    or is_below_vwap
                                     or is_gap_down_or_breakdown
+                                    or is_intraday_liq
                                 )
                             )
-                            is_decoupled = is_equity_decoupled or is_index_breakdown
+                            is_decoupled = (
+                                is_equity_decoupled or is_index_breakdown or is_intraday_liq
+                            )
                             if not is_decoupled:
                                 flags["market_breadth_valid"] = False
                                 return (
@@ -6354,7 +6527,59 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             or "REVERSAL" in str(getattr(alert, "summary", "")).upper()
         )
         if reg_dict:
-            if is_breakout and not is_fade and reg_dict.get("veto_breakout_chase"):
+            is_hedged_spread = bool(
+                getattr(alert, "hedged_spread", None)
+                or getattr(alert, "execution_style_mandate", "") == "HEDGED_SPREAD_MANDATORY"
+                or (getattr(alert, "actionable_plan", {}) or {}).get("execution_style_mandate")
+                == "HEDGED_SPREAD_MANDATORY"
+                or (
+                    isinstance(getattr(alert, "actionable_plan", None), dict)
+                    and (
+                        "SPREAD" in str(alert.actionable_plan.get("preferred_vehicle", "")).upper()
+                        or "SPREAD"
+                        in str(alert.actionable_plan.get("recommended_vehicle", "")).upper()
+                        or "SPREAD" in str(alert.actionable_plan.get("strategy_type", "")).upper()
+                    )
+                )
+                or (
+                    isinstance(getattr(alert, "metrics", None), dict)
+                    and (
+                        "SPREAD" in str(alert.metrics.get("preferred_vehicle", "")).upper()
+                        or "SPREAD" in str(alert.metrics.get("recommended_vehicle", "")).upper()
+                    )
+                )
+            )
+            is_retest_or_proximity = bool(
+                getattr(alert, "stage", "") in ("PRIMED", "EARLY_WARNING", "WATCH")
+                or any(
+                    any(
+                        kw in str(sig).upper()
+                        for kw in (
+                            "PROXIMITY",
+                            "RETEST",
+                            "FLOOR",
+                            "CEILING",
+                            "COILING",
+                            "VCP",
+                            "COMPRESSION",
+                            "PUT_WRITING",
+                            "CALL_WRITING",
+                        )
+                    )
+                    for sig in (
+                        metrics.get("signals")
+                        if isinstance(metrics, dict) and isinstance(metrics.get("signals"), list)
+                        else []
+                    )
+                )
+            )
+            if (
+                is_breakout
+                and not is_fade
+                and not is_hedged_spread
+                and not is_retest_or_proximity
+                and reg_dict.get("veto_breakout_chase")
+            ):
                 return ScrutinyResult(
                     status="REJECTED",
                     score=35,
@@ -6367,6 +6592,8 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                     rejection_reason=reg_dict.get("rationale"),
                     auditor_model="QUANT_FALLBACK",
                 )
+            elif is_hedged_spread and reg_dict.get("veto_breakout_chase"):
+                score = max(score, 82)
             elif is_fade and reg_dict.get("favor_mean_reversion"):
                 score += 6
             elif is_breakout and reg_dict.get("regime") == "TREND_EXPANSION":

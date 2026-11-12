@@ -681,6 +681,15 @@ def detect_trend_day_pullback(
         tactical_sl=opt_sl if has_opt else sl_price,
         actionable_plan=act_plan,
         metrics={
+            "day_high": round(float(df_5m[col_h].max()), 2)
+            if df_5m is not None and col_h in df_5m.columns
+            else None,
+            "day_low": round(float(df_5m[col_l].min()), 2)
+            if df_5m is not None and col_l in df_5m.columns
+            else None,
+            "prev_close": round(float(prev_close), 2) if prev_close else None,
+            "underlying_spot": round(float(ltp), 2),
+            "underlying_vwap": round(val_vwap, 2),
             "rvol": round(rvol_val, 2),
             "trend_impulse_rvol": trend_rvol,
             "pullback_vol_ratio": pullback_vol_ratio,

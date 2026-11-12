@@ -238,6 +238,28 @@ def enrich_options_chain_deltas(
             from analysis.options import compute_greeks
 
             spot = get_ltp(underlying) or get_ltp(f"NSE:{clean_und}") or 0.0
+            if spot <= 0:
+                # Derive synthetic spot via Put-Call Parity: S = K + C - P
+                try:
+                    ce_map = {
+                        float(c.strike): float(getattr(c, "last_price", 0.0) or 0.0)
+                        for c in chain
+                        if getattr(c, "option_type", "") == "CE"
+                        and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    }
+                    pe_map = {
+                        float(c.strike): float(getattr(c, "last_price", 0.0) or 0.0)
+                        for c in chain
+                        if getattr(c, "option_type", "") == "PE"
+                        and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    }
+                    common_k = set(ce_map.keys()) & set(pe_map.keys())
+                    if common_k:
+                        atm_k = min(common_k, key=lambda k: abs(ce_map[k] - pe_map[k]))
+                        spot = atm_k + (ce_map[atm_k] - pe_map[atm_k])
+                except Exception as e_pcp:
+                    logger.debug(f"[market.options] Put-Call Parity spot derivation note: {e_pcp}")
+
             if spot > 0:
                 for c in chain:
                     if getattr(c, "delta", None) is None:
@@ -528,6 +550,7 @@ def get_options_chain(
         if allow_synthetic:
             if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
                 try:
+                    from market.contract_selection import fresh_underlying_price
                     from market.quotes import get_ltp
 
                     idx_spot = get_ltp(
@@ -535,6 +558,8 @@ def get_options_chain(
                         if clean_sym in ("SENSEX", "BANKEX")
                         else f"NSE:{clean_sym}"
                     ) or get_ltp(clean_sym)
+                    if not idx_spot or idx_spot <= 0:
+                        idx_spot = fresh_underlying_price(clean_sym)
                     if not idx_spot or idx_spot <= 0:
                         _ANCHOR_SPOTS = {
                             "NIFTY": 25000.0,

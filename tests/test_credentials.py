@@ -138,6 +138,7 @@ class TestLoadAll:
     def test_loads_from_keyring(self, monkeypatch):
         """load_all should populate env from keyring for unset keys."""
         monkeypatch.delenv("NEWSAPI_KEY", raising=False)
+        monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
 
         def mock_kr_get(key):
             if key == "NEWSAPI_KEY":

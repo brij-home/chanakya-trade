@@ -174,21 +174,32 @@ class HistoricalWarehouse:
                         f"[HistoricalWarehouse] Temp cleanup deferred for {temp.name}: {e_cleanup}"
                     )
 
-    def _read_parquet_with_retry(self, file_path: Path, max_retries: int = 3) -> pd.DataFrame:
+    def _read_parquet_with_retry(
+        self, file_path: Path, max_retries: int = 5
+    ) -> Optional[pd.DataFrame]:
         """Reads a parquet file with retry for Windows sharing violations.
 
         A transient external lock (antivirus, indexer, another reader) raises
         PermissionError/OSError on Windows; those are retried with backoff and
         then re-raised so callers never mistake a lock for corruption.
+        If the file was removed/absorbed concurrently by compaction, returns None.
         """
         last_error: Optional[Exception] = None
         for attempt in range(max_retries):
+            if not file_path.exists():
+                return None
             try:
                 return pd.read_parquet(file_path)
+            except FileNotFoundError:
+                # Concurrently unlinked by compaction
+                return None
             except (PermissionError, OSError) as e:
+                # If file disappeared during the read attempt, treat as unlinked
+                if not file_path.exists():
+                    return None
                 last_error = e
                 if attempt < max_retries - 1:
-                    time.sleep(0.08 * (2**attempt))
+                    time.sleep(0.05 * (2**attempt))
                     continue
                 logger.warning(
                     f"[HistoricalWarehouse] File locked beyond retry budget: {file_path} ({e})"
@@ -202,7 +213,12 @@ class HistoricalWarehouse:
             return None
         try:
             return self._read_parquet_with_retry(file_path)
+        except FileNotFoundError:
+            return None
         except Exception as e_read:
+            # If the file was unlinked while attempting to read, it was superseded by compaction
+            if not file_path.exists():
+                return None
             logger.warning(
                 f"[HistoricalWarehouse] Skipping unreadable file {file_path.name}: {e_read}"
             )

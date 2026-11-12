@@ -262,6 +262,7 @@ def detect_options_momentum_breakouts(
         spot = sym_info["spot"]
         spot_change_pct = sym_info["spot_change_pct"]
         spot_open = sym_info["spot_open"]
+        spot_high = sym_info.get("spot_high", 0.0)
         spot_vwap = sym_info["spot_vwap"]
         is_idx = sym_info["is_idx"]
         alert_segment = sym_info["alert_segment"]
@@ -336,17 +337,17 @@ def detect_options_momentum_breakouts(
 
             max_strike_dist = (
                 (
-                    120.0
+                    max(spot * 0.015, 300.0)
                     if clean_sym in ("NIFTY", "FINNIFTY")
                     else (
-                        250.0
+                        max(spot * 0.018, 900.0)
                         if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
-                        else (75.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
+                        else (120.0 if clean_sym in ("MIDCPNIFTY",) else 150.0)
                     )
                 )
                 if is_idx
                 else max(
-                    spot * 0.025, 2.5 if spot < 100.0 else (5.0 if spot < 250.0 else spot * 0.02)
+                    spot * 0.035, 3.0 if spot < 100.0 else (6.0 if spot < 250.0 else spot * 0.03)
                 )
             )
             min_opt_price = (
@@ -517,7 +518,8 @@ def detect_options_momentum_breakouts(
                     min_vol_oi = 1.00 if is_idx else 1.20
                     min_contracts = 2500 if is_idx else 600
 
-                if vol_oi < min_vol_oi or vol < min_contracts:
+                has_vol_surge = (vol_oi >= min_vol_oi) or (vol >= (min_contracts * 2.5))
+                if not has_vol_surge or vol < min_contracts:
                     continue
 
                 # 0DTE Afternoon Theta Decay Acceleration Guard (post 13:00 IST):
@@ -654,9 +656,23 @@ def detect_options_momentum_breakouts(
                 elif opt_type == "PE":
                     if pchange is not None and pchange < min_pchange:
                         continue
-                    if spot_change_pct is not None and spot_change_pct > 1.5:
+                    retreat_pct = (
+                        ((spot_high - spot) / spot_high * 100.0)
+                        if (spot_high and spot_high > spot)
+                        else 0.0
+                    )
+                    is_intraday_dump = bool(
+                        retreat_pct >= 0.8 or (spot_vwap and spot_vwap > 0 and spot < spot_vwap)
+                    )
+                    max_pe_change = 3.5 if is_intraday_dump else 1.5
+                    if spot_change_pct is not None and spot_change_pct > max_pe_change:
                         continue
-                    if spot_open and spot_open > 0 and spot > spot_open * 1.005:
+                    if (
+                        spot_open
+                        and spot_open > 0
+                        and spot > spot_open * 1.005
+                        and not is_intraday_dump
+                    ):
                         continue
                     if cpr_gate_pe.is_vetoed:
                         logger.debug(
@@ -1138,8 +1154,61 @@ def detect_options_momentum_breakouts(
                 obv_div_status = "NEUTRAL"
                 dmi_model_verdict = "NEUTRAL"
                 vsa_sig_status = "NEUTRAL"
+                vsa_fake_risk = False
+                rsi_5m = None
+                ema20_5m = None
                 avwap_bias_status = "NEUTRAL"
                 flow_bonus = 0
+                if df_5m is not None and len(df_5m) >= 5:
+                    try:
+                        from analysis.technical import rsi
+
+                        c_series = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
+                        rsi_s = rsi(c_series, period=14).dropna()
+                        if len(rsi_s) > 0:
+                            rsi_5m = round(float(rsi_s.iloc[-1]), 1)
+                        if len(c_series) >= 20:
+                            ema20_5m = round(
+                                float(c_series.ewm(span=20, adjust=False).mean().iloc[-1]), 2
+                            )
+                    except Exception as e_rsi:
+                        logger.debug(
+                            f"[OptionsBreakout] RSI computation failed for {clean_sym}: {e_rsi}"
+                        )
+
+                    # ── Climax / Blow-off Exhaustion Gate ──
+                    if rsi_5m is not None:
+                        if opt_type == "CE" and rsi_5m >= 76.0:
+                            logger.debug(
+                                f"[OptionsBreakout] Suppressed CE on {clean_sym}: 5m RSI ({rsi_5m:.1f}) >= 76.0 (Parabolic climax overbought)"
+                            )
+                            continue
+                        elif opt_type == "PE" and rsi_5m <= 24.0:
+                            logger.debug(
+                                f"[OptionsBreakout] Suppressed PE on {clean_sym}: 5m RSI ({rsi_5m:.1f}) <= 24.0 (Oversold capitulation floor)"
+                            )
+                            continue
+
+                    # ── Upper/Lower Wick Supply/Demand Collision on Expanding Bar ──
+                    if (
+                        opt_type == "CE"
+                        and upper_wick_ratio >= 0.35
+                        and candle_range >= (spot * 0.0020)
+                    ):
+                        logger.debug(
+                            f"[OptionsBreakout] Suppressed CE on {clean_sym}: Heavy upper wick rejection ({upper_wick_ratio * 100:.1f}%) on expanding bar"
+                        )
+                        continue
+                    elif (
+                        opt_type == "PE"
+                        and lower_wick_ratio >= 0.35
+                        and candle_range >= (spot * 0.0020)
+                    ):
+                        logger.debug(
+                            f"[OptionsBreakout] Suppressed PE on {clean_sym}: Heavy lower wick rejection ({lower_wick_ratio * 100:.1f}%) on expanding bar"
+                        )
+                        continue
+
                 if df_5m is not None and len(df_5m) >= 10:
                     try:
                         from analysis.obv import analyse_obv
@@ -1168,10 +1237,26 @@ def detect_options_momentum_breakouts(
 
                         _vsa = analyse_vsa(df_5m, symbol=clean_sym, is_intraday=True)
                         vsa_sig_status = _vsa.vsa_signal
-                        if opt_type == "CE" and _vsa.bias == "BULLISH":
-                            flow_bonus += min(8, max(3, _vsa.conviction_modifier))
-                        elif opt_type == "PE" and _vsa.bias == "BEARISH":
-                            flow_bonus += min(8, max(3, _vsa.conviction_modifier))
+                        vsa_fake_risk = _vsa.is_fake_breakout_risk
+                        if opt_type == "CE":
+                            if vsa_fake_risk or vsa_sig_status in (
+                                "EFFORT_NO_RESULT_BEARISH",
+                                "NO_DEMAND",
+                            ):
+                                logger.debug(
+                                    f"[OptionsBreakout] Suppressed CE on {clean_sym}: VSA distribution / effort vs result trap ({vsa_sig_status})"
+                                )
+                                continue
+                            elif _vsa.bias == "BULLISH":
+                                flow_bonus += min(8, max(3, _vsa.conviction_modifier))
+                        elif opt_type == "PE":
+                            if vsa_fake_risk or vsa_sig_status in ("STOPPING_VOLUME", "NO_SUPPLY"):
+                                logger.debug(
+                                    f"[OptionsBreakout] Suppressed PE on {clean_sym}: VSA absorption / stopping volume floor ({vsa_sig_status})"
+                                )
+                                continue
+                            elif _vsa.bias == "BEARISH":
+                                flow_bonus += min(8, max(3, _vsa.conviction_modifier))
 
                         _avwap = detect_intraday_anchors(df_5m, spot_price=spot)
                         avwap_bias_status = _avwap.get("bias", "NEUTRAL")
@@ -1453,11 +1538,11 @@ def detect_options_momentum_breakouts(
                     if sfr >= 3.0:
                         is_wide_spread = True
 
-                ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
+                ote_lower = round(max(0.05, opt_ltp * 0.94), 1)
                 ote_upper = round(opt_ltp * 1.01, 1)
-                max_chase = round(opt_ltp * 1.08, 1)
+                max_chase = round(opt_ltp * 1.045, 1)
                 entry_range_str = f"₹{ote_lower:,.1f} – ₹{ote_upper:,.1f}"
-                when_to_wait_str = f"DO NOT CHASE if premium surges > 8% past entry (> ₹{max_chase:,.1f}). Wait for 5m consolidation retest."
+                when_to_wait_str = f"DO NOT CHASE if premium surges > 4.5% past entry (> ₹{max_chase:,.1f}). Wait for 5m consolidation retest."
                 spot_anchor_str = (
                     f" (Spot Anchor: ₹{tp.invalidation_stop:,.1f})"
                     if (tp and tp.invalidation_stop > 0)
@@ -1690,6 +1775,10 @@ def detect_options_momentum_breakouts(
                         else 0.0,
                         "time_stop_mins": 20,
                         "hedge_plan": hedge_plan,
+                        "rsi": rsi_5m,
+                        "rsi_5m": rsi_5m,
+                        "ema20": ema20_5m,
+                        "vsa_fake_breakout_risk": vsa_fake_risk,
                     },
                     actionable_plan={
                         "action": f"BUY {opt_type}",
@@ -1838,17 +1927,27 @@ def detect_options_momentum_breakouts(
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(6, len(active_targets))
+            max_workers=min(10, len(active_targets))
         ) as executor:
-            try:
-                for cand_res in executor.map(_eval_sym, active_targets, timeout=28.0):
+            future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in active_targets}
+            deadline = time.time() + 28.0
+            for future in concurrent.futures.as_completed(future_to_sym):
+                remaining = max(0.1, deadline - time.time())
+                try:
+                    cand_res = future.result(timeout=remaining)
                     if cand_res:
                         candidate_alerts.append(cand_res)
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    f"[OptionsBreakout] Evaluation timeout (28s) reached. "
-                    f"Proceeding safely with {len(candidate_alerts)} qualified candidates."
-                )
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        f"[OptionsBreakout] Evaluation timeout (28s) reached. "
+                        f"Proceeding safely with {len(candidate_alerts)} qualified candidates."
+                    )
+                    break
+                except Exception as e_sym:
+                    sym_name = future_to_sym.get(future, "unknown")
+                    logger.debug(
+                        f"[OptionsBreakout] Target evaluation notice for {sym_name}: {e_sym}"
+                    )
 
     # ── ANTI-STORM PACING & TOP-N QUALITY SELECTION ──
     candidate_alerts.sort(key=lambda x: x[0], reverse=True)

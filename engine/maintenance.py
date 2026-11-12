@@ -17,10 +17,11 @@ import logging
 import os
 import shutil
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from config.paths import app_data_dir, app_data_path
 
@@ -93,22 +94,38 @@ class MaintenanceReport:
 
 def _file_or_dir_size_bytes(path: Path) -> int:
     """Return total bytes for a file or directory tree."""
-    if not path.exists():
+    try:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
         return 0
-    if path.is_file():
-        return path.stat().st_size
     total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += Path(root, f).stat().st_size
-            except Exception as e_suppressed:
-                logger.debug(f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        for root, _, files in os.walk(path):
+            for f in files:
+                try:
+                    total += Path(root, f).stat().st_size
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+    except OSError as e_os:
+        logger.debug(f"[engine.maintenance] Storage walk OSError suppressed: {e_os}")
     return total
 
 
-def get_storage_breakdown() -> StorageBreakdown:
-    """Analyze current storage allocation across tiers and SSD free space."""
+_last_storage_breakdown: Optional[tuple[float, StorageBreakdown]] = None
+
+
+def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
+    """Analyze current storage allocation across tiers and SSD free space with 60s caching."""
+    global _last_storage_breakdown
+    now = time.time()
+    if not force and _last_storage_breakdown and (now - _last_storage_breakdown[0] < 60.0):
+        return _last_storage_breakdown[1]
+
     root = app_data_dir()
 
     # Business files
@@ -156,7 +173,7 @@ def get_storage_breakdown() -> StorageBreakdown:
     wal_files = list(root.glob("*.db-wal")) + list(Path("data").glob("*.db-wal"))
     wal_bytes = sum(_file_or_dir_size_bytes(f) for f in wal_files)
 
-    return StorageBreakdown(
+    res = StorageBreakdown(
         business_data_mb=b_bytes / (1024 * 1024),
         market_data_mb=m_bytes / (1024 * 1024),
         analysis_cache_mb=ac_bytes / (1024 * 1024),
@@ -167,6 +184,8 @@ def get_storage_breakdown() -> StorageBreakdown:
         total_ssd_gb=total_ssd_gb,
         wal_mb=wal_bytes / (1024 * 1024),
     )
+    _last_storage_breakdown = (now, res)
+    return res
 
 
 def run_maintenance_purge(

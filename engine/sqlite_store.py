@@ -38,6 +38,29 @@ def get_default_db_path() -> Path:
     return p
 
 
+class _ManagedConnection:
+    """Connection wrapper ensuring transactions commit and connections close on exit."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._conn.__enter__()
+        return self._conn
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        try:
+            self._conn.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 class SQLiteAlertStore:
     """
     Thread-safe SQLite storage engine for ChanakyaTrade market alerts.
@@ -48,26 +71,30 @@ class SQLiteAlertStore:
         self._lock = threading.Lock()
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Returns SQLite connection with WAL pragmas."""
+    def _get_connection(self) -> _ManagedConnection:
+        """Returns SQLite connection with WAL pragmas wrapped in auto-closing manager."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(
             str(self.db_path),
-            timeout=10.0,
+            timeout=30.0,
             check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
-        # Enable WAL mode and high-performance RAM/SSD pragmas
-        conn.execute("PRAGMA journal_mode = WAL;")
+        # Set busy timeout first before any other pragma to prevent lock contention
+        conn.execute("PRAGMA busy_timeout = 10000;")
         conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA cache_size = -65536;")  # 64 MB RAM cache (negative = KiB)
         conn.execute("PRAGMA mmap_size = 268435456;")  # 256 MB memory-mapped file I/O
         conn.execute("PRAGMA temp_store = MEMORY;")  # Intermediate tables and sorts in RAM
-        return conn
+        return _ManagedConnection(conn)
 
     def _init_db(self) -> None:
         """Initializes database schema and indexes."""
         with self._lock, self._get_connection() as conn:
+            try:
+                conn.execute("PRAGMA journal_mode = WAL;")
+            except Exception as e_wal:
+                logger.debug(f"[SQLiteAlertStore] WAL pragma non-fatal: {e_wal}")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alerts (

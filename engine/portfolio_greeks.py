@@ -131,11 +131,20 @@ def calculate_portfolio_greeks(
     positions: list[dict[str, Any]],
     spot_map: Optional[dict[str, float]] = None,
     vix: float = 13.5,
-    nifty_spot: float = 24500.0,
+    nifty_spot: Optional[float] = None,
 ) -> PortfolioGreekSnapshot:
     """
     Aggregates open positions into a unified Greek risk surface.
     """
+    if nifty_spot is None or nifty_spot <= 0:
+        try:
+            from market.contract_selection import fresh_underlying_price
+
+            dyn_nifty = fresh_underlying_price("NIFTY")
+            nifty_spot = float(dyn_nifty) if dyn_nifty and dyn_nifty > 0 else 24500.0
+        except Exception:
+            nifty_spot = 24500.0
+
     spots = spot_map or {}
     parsed_positions: list[PositionGreek] = []
 
@@ -168,12 +177,19 @@ def calculate_portfolio_greeks(
         # Resolve underlying spot price accurately
         spot_p = spots.get(underlying) or spots.get(sym)
         if not spot_p or spot_p <= 0:
-            if "BANK" in underlying or "BANKNIFTY" in sym:
-                spot_p = 52000.0
+            try:
+                from market.contract_selection import fresh_underlying_price
+
+                resolved_spot = fresh_underlying_price(underlying) or fresh_underlying_price(sym)
+                if resolved_spot and resolved_spot > 0:
+                    spot_p = float(resolved_spot)
+            except Exception as e_spot:
+                logger.debug(f"[portfolio_greeks] Underlying spot resolution suppressed: {e_spot}")
+        if not spot_p or spot_p <= 0:
+            if strike and strike > 0:
+                spot_p = strike  # ATM proxy
             elif "NIFTY" in underlying or "NIFTY" in sym:
                 spot_p = nifty_spot
-            elif strike and strike > 0:
-                spot_p = strike  # ATM proxy
             else:
                 spot_p = ltp or nifty_spot
 

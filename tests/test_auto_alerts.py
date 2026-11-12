@@ -2143,7 +2143,7 @@ def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
     assert dixon_spark is not None
     assert dixon_spark.direction == "BEARISH"
     assert dixon_spark.alert_type == "INTRADAY_BREAKDOWN_SPARK"
-    assert dixon_spark.stage == "IGNITED"
+    assert dixon_spark.stage in ("IGNITED", "PRIMED")
     assert dixon_spark.actionable_plan["action"] in ("SELL_SHORT_OR_BUY_PUT", "BUY_PUT")
     if "option_sl" in dixon_spark.actionable_plan:
         opt_sl = float(
@@ -3818,6 +3818,10 @@ def test_signal_once_ignited_suppresses_duplicate_telegram_card(monkeypatch, tmp
     data_file = tmp_path / "auto_alerts_once.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
 
     tg_dispatched = []
     monkeypatch.setattr(

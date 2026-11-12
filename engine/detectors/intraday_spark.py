@@ -69,7 +69,9 @@ def get_cached_avg_volume_20(symbol: str) -> float:
     except Exception as e_hist:
         logger.debug("[IntradaySpark] get_ohlcv failed for %s: %s", clean_sym, e_hist)
 
-    return 1.0
+    # Cache default fallback to prevent hammering the network on every 45s scan cycle
+    _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, 500000.0)
+    return 500000.0
 
 
 def expected_volume_fraction(minutes_from_open: float) -> float:
@@ -178,7 +180,12 @@ def detect_intraday_mover_sparks(
 
     for sym in scan_universe:
         clean_sym = canonical_alert_symbol(sym)
-        q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
+        q = (
+            quotes_map.get(f"NSE:{clean_sym}")
+            or quotes_map.get(clean_sym)
+            or quotes_map.get(f"NSE:{sym}")
+            or quotes_map.get(sym)
+        )
         if not q:
             continue
 
@@ -205,29 +212,27 @@ def detect_intraday_mover_sparks(
         # Calculate TOD-RVOL using L1 session-cached 20-day average volume
         df = None
         avg_vol = get_cached_avg_volume_20(clean_sym)
-        try:
-            import engine.auto_alert_engine as aae
-
-            _rvol_fn = getattr(aae, "compute_time_of_day_rvol", compute_time_of_day_rvol)
-        except Exception:
-            _rvol_fn = compute_time_of_day_rvol
-        rvol = _rvol_fn(vol, avg_vol, ref_dt=datetime.now(IST))
+        rvol = compute_time_of_day_rvol(vol, avg_vol, ref_dt=datetime.now(IST))
 
         min_pos_chg = 0.22 if seg == "INDEX" else 0.85
         min_neg_chg = -0.22 if seg == "INDEX" else -0.80
         min_rvol = 1.35 if seg == "INDEX" else 1.50
 
         # Adaptive Trend-Day RVOL Floor:
-        # On quiet institutional trend days, leaders move steadily on 1.15x-1.30x RVOL.
-        # If stock demonstrates significant directional expansion (|chg| >= 1.80%),
-        # allow institutional markup/markdown at 1.15x RVOL instead of requiring retail frenzy volume.
-        if seg != "INDEX" and abs(chg) >= 1.80:
-            min_rvol = 1.15
+        # On quiet institutional trend days, leaders move steadily on 1.15x-1.35x RVOL.
+        # If stock demonstrates directional expansion, allow institutional markup/markdown:
+        #   |chg| >= 1.80% -> 1.15x RVOL
+        #   |chg| >= 1.20% -> 1.25x RVOL
+        if seg != "INDEX":
+            if abs(chg) >= 1.80:
+                min_rvol = 1.15
+            elif abs(chg) >= 1.20:
+                min_rvol = 1.25
 
         # Session Time Gates
-        is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or (
-            "PYTEST_CURRENT_TEST" in os.environ
-        )
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1") or ("PYTEST_CURRENT_TEST" in os.environ)
+        ) and (os.environ.get("ENFORCE_SESSION_TIME_GATES") != "1")
         if not is_test_env:
             try:
                 import engine.auto_alert_engine as aae
@@ -244,6 +249,13 @@ def detect_intraday_mover_sparks(
                 min_rvol = max(min_rvol, 2.0)
                 if seg != "INDEX" and abs(chg) < 1.20:
                     continue
+            if 690 <= time_hm < 795 and seg != "INDEX":
+                # Midday lull (11:30-13:15): filter routine drift, allow institutional breakouts (|chg| >= 1.2% and rvol >= 1.25x)
+                if abs(chg) < 1.20 or rvol < 1.25:
+                    continue
+            if time_hm >= 840 and seg != "INDEX":
+                # Intraday cash stock entries silenced after 14:00 IST (75m runway gate before 15:15 square-off)
+                continue
 
         if vwap > 0:
             vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0
@@ -261,6 +273,14 @@ def detect_intraday_mover_sparks(
         is_bearish = (
             (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
         )
+
+        # Macro Index Markdown Protection:
+        # If Nifty is in markdown (down >= 0.35% and below VWAP), long stock breakouts
+        # must have true institutional relative strength (RVOL >= 2.0x and chg >= 1.50%)
+        # to avoid catching fake morning gap runners that succumb to index gravity.
+        if is_bullish and is_nifty_markdown and seg != "INDEX":
+            if rvol < 2.0 or chg < 1.50:
+                continue
 
         if not (is_bullish or is_bearish):
             continue
@@ -486,11 +506,27 @@ def detect_intraday_mover_sparks(
                         f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
+            ote_limit = getattr(tp, "optimal_entry_limit", 0.0)
+            is_ext = getattr(tp, "is_extended", False)
+            base_struct = getattr(tp, "base_structure", "")
+            ote_range_str = (
+                getattr(tp, "optimal_entry_range", "") or f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
+            )
+            rec_entry = (
+                f"₹{ote_limit:,.1f} (Limit on Retest)"
+                if (is_ext and ote_limit > 0)
+                else f"₹{ltp:,.1f}"
+            )
+
             plan = {
                 "action": "BUY / LONG",
                 "segment": seg,
-                "recommended_entry": f"₹{ltp:,.1f}",
-                "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
+                "recommended_entry": rec_entry,
+                "recommended_entry_type": "LIMIT_PULLBACK" if is_ext else "STOP_LIMIT_PIVOT",
+                "optimal_entry_limit": ote_limit,
+                "base_structure": base_struct,
+                "is_extended": is_ext,
+                "entry_range": ote_range_str,
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
                 "target_2": f"₹{t2_price:,.1f}",
@@ -498,7 +534,11 @@ def detect_intraday_mover_sparks(
                 "target_moonshot": f"₹{t3_price:,.1f}",
                 "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
                 "risk_reward": rr_str,
-                "when_to_buy": f"Enter on 1m/5m consolidation holding above VWAP (₹{vwap:,.1f}).",
+                "when_to_buy": (
+                    f"Wait for pullback to OTE / Base zone {ote_range_str} (Limit Order). Do NOT buy market CMP."
+                    if is_ext
+                    else f"Enter on 1m/5m consolidation holding above VWAP (₹{vwap:,.1f})."
+                ),
                 "when_to_wait": f"Do not chase if price moves beyond ₹{no_chase_lvl:,.1f}.",
                 "profit_rule": "Book 50% at T1, trail SL to Breakeven for T2 & Runner.",
                 "trade_plan": tp_dict
@@ -642,11 +682,27 @@ def detect_intraday_mover_sparks(
                         f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
+            ote_limit = getattr(tp, "optimal_entry_limit", 0.0)
+            is_ext = getattr(tp, "is_extended", False)
+            base_struct = getattr(tp, "base_structure", "")
+            ote_range_str = (
+                getattr(tp, "optimal_entry_range", "") or f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
+            )
+            rec_entry = (
+                f"₹{ote_limit:,.1f} (Limit on Retest)"
+                if (is_ext and ote_limit > 0)
+                else f"₹{ltp:,.1f}"
+            )
+
             plan = {
                 "action": "SELL_SHORT_OR_BUY_PUT",
                 "segment": seg,
-                "recommended_entry": f"₹{ltp:,.1f}",
-                "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
+                "recommended_entry": rec_entry,
+                "recommended_entry_type": "LIMIT_PULLBACK" if is_ext else "STOP_LIMIT_PIVOT",
+                "optimal_entry_limit": ote_limit,
+                "base_structure": base_struct,
+                "is_extended": is_ext,
+                "entry_range": ote_range_str,
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
                 "target_2": f"₹{t2_price:,.1f}",
@@ -654,7 +710,11 @@ def detect_intraday_mover_sparks(
                 "target_moonshot": f"₹{t3_price:,.1f}",
                 "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
                 "risk_reward": rr_str,
-                "when_to_buy": f"Short on rejection retest of VWAP (₹{vwap:,.1f}) from below.",
+                "when_to_buy": (
+                    f"Wait for pullback retest into OTE / Base zone {ote_range_str} (Limit Sell). Do NOT short extended CMP."
+                    if is_ext
+                    else f"Short on rejection retest of VWAP (₹{vwap:,.1f}) from below."
+                ),
                 "when_to_wait": f"Do not chase if price moves beyond ₹{no_chase_lvl:,.1f}.",
                 "profit_rule": "Cover 50% at T1, trail stop to breakeven for T2 & Runner.",
                 "trade_plan": tp_dict
@@ -846,10 +906,20 @@ def detect_intraday_mover_sparks(
             alert_type,
             variant=f"{direction.lower()[:4]}-{phase_slot}",
         )
+
+        # Optimal Entry & Limit Retest Calibration (Invariant 12):
+        # If the move is extended beyond the consolidation base, do not market-buy CMP candle exhaustion peaks.
+        # Anchor the primary trigger at the OTE Limit or Base zone retest level.
+        effective_trigger = float(ote_limit) if (is_ext and ote_limit > 0) else float(ltp)
+        effective_stage = "PRIMED" if (is_ext and ote_limit > 0) else stage
+
+        if is_ext and ote_limit > 0:
+            headline = f"🎯 [LIMIT RETEST: {base_struct or 'OTE'}] {headline}"
+
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
-            stage=stage,
+            stage=effective_stage,
             symbol=clean_sym,
             exchange="NSE",
             direction=direction,
@@ -857,7 +927,7 @@ def detect_intraday_mover_sparks(
             summary=summary,
             ltp=ltp,
             underlying_spot=ltp,
-            trigger_level=ltp,
+            trigger_level=effective_trigger,
             target_level=t1_price,
             stop_loss=sl_price,
             no_chase_boundary=no_chase_lvl,
@@ -890,6 +960,10 @@ def detect_intraday_mover_sparks(
                 "target_1": t1_price,
                 "target_2": t2_price,
                 "target_3": t3_price,
+                "optimal_entry_limit": ote_limit,
+                "is_extended": is_ext,
+                "base_structure": base_struct,
+                "entry_range": ote_range_str,
                 "nifty_change_pct": nifty_chg if nifty_q else None,
                 "nifty_below_vwap": (
                     ((nifty_ltp < nifty_vwap) if nifty_vwap > 0 else (nifty_chg < 0))

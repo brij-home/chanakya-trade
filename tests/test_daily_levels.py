@@ -448,3 +448,47 @@ def test_daily_levels_purge_stale_sessions(tmp_path):
     assert f"{recent_date}:NIFTY" in store._memory_cache
     assert not old_file.exists()
     assert new_file.exists()
+
+
+def test_niftynxt50_index_mapping_and_daily_levels():
+    """
+    Ensure NIFTYNXT50 index mapping resolves correctly across Fyers, WS alias map,
+    and INDEX_INSTRUMENT_MAP in DailyLevelsStore, preventing incomplete/stale data.
+    """
+    from brokers.fyers import to_fyers_symbol
+    from engine.daily_levels import INDEX_INSTRUMENT_MAP, DailyLevelsStore
+    from market.quotes import _INDEX_WS_ALIAS_MAP
+
+    assert to_fyers_symbol("NIFTYNXT50") == "NSE:NIFTYNXT50-INDEX"
+    assert to_fyers_symbol("NSE:NIFTY NEXT 50") == "NSE:NIFTYNXT50-INDEX"
+    assert INDEX_INSTRUMENT_MAP.get("NIFTYNXT50") == "NSE:NIFTY NEXT 50"
+    assert _INDEX_WS_ALIAS_MAP.get("NIFTYNXT50") == "NSE:NIFTYNXT50-INDEX"
+
+    # Verify DailyLevelsStore computes with valid OHLCV df
+    store = DailyLevelsStore()
+    df_bars = pd.DataFrame(
+        {
+            "open": [73000.0, 73379.0],
+            "high": [73500.0, 73771.55],
+            "low": [72800.0, 73099.05],
+            "close": [73200.0, 73486.20],
+            "volume": [500000.0, 874600.0],
+        },
+        index=pd.to_datetime(["2026-11-09", "2026-11-11"]),
+    )
+    from types import SimpleNamespace
+
+    q = SimpleNamespace(last_price=73500.0, close=73486.20)
+
+    dl = store.compute_and_store(
+        "NIFTYNXT50",
+        session_date="2026-11-12",
+        persist=False,
+        preloaded_quote=q,
+        preloaded_df=df_bars,
+    )
+    assert dl is not None
+    assert dl.pdh == 73771.55
+    assert dl.pdl == 73099.05
+    assert dl.pdc == 73486.20
+    assert dl.cpr["regime"] != ""

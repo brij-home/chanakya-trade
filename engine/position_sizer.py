@@ -419,7 +419,8 @@ def get_lot_size(symbol: str) -> int:
             # If this is an exact dated derivative contract, enforce fail-closed zero
             from market.instruments import parse_derivative_contract
 
-            if parse_derivative_contract(raw):
+            parsed = parse_derivative_contract(raw)
+            if parsed and parsed.expiry_date is not None:
                 logger.warning(
                     "[engine.position_sizer] Exact contract has no valid active listed master lot: %s (%s)",
                     raw,
@@ -1180,6 +1181,7 @@ _CONVICTION_TIER_LOT_MULTIPLIERS: dict[str, float] = {
     "HIGH_CONVICTION": 1.0,  # Baseline institutional sizing (80-89% conviction)
     "DEFINED_RISK_ONLY": 0.65,  # -35% risk compression for tier-3 defined-risk setups (70-79% conviction)
     "LOW_CONVICTION": 0.50,  # Damped sizing for marginal setups (<70%)
+    "REJECTED": 0.0,  # Disqualified setup -> zero size
 }
 
 _CHEETAH_MANDATE_MULTIPLIERS: dict[str, float] = {

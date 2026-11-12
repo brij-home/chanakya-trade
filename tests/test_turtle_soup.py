@@ -64,6 +64,8 @@ def test_turtle_soup_bullish_spring():
     assert alert.actionable_plan["action"] in ("BUY", "BUY_CALL")
     assert alert.metrics["sweep_type"] == "BULLISH_SPRING"
     assert alert.alert_id.startswith("aa-turtle-soup-sweep-infy-spring-20261003")
+    assert "recommended_structure" in alert.metrics
+    assert "market_phase" in alert.metrics
 
 
 def test_turtle_soup_bearish_upthrust():

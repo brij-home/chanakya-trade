@@ -454,7 +454,9 @@ class MarketDynamicsGovernor:
             "india_vix": round(current_vix, 2),
             "cached_calibrations": cached_count,
             "cache_ttl_seconds": self._cache_ttl,
-            "sample_index_calibration": self.get_calibration("NIFTY").to_dict(),
+            "sample_index_calibration": self.get_calibration(
+                "NIFTY", vix_override=current_vix
+            ).to_dict(),
         }
 
     def reset_for_testing(self) -> None:

@@ -363,9 +363,9 @@ def detect_gamma_blast(
     for c in ce_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.25%), equities allow up to 1.2%
-        max_call_otm = 0.35 if is_index else 1.2
-        max_call_itm = 0.25 if is_index else 0.8
+        # Delta-Gated Sweet-Spot Filter: Indices allow ATM & ITM runners up to 1.2% (Delta 0.50-0.72), equities up to 1.8%
+        max_call_otm = 0.8 if is_index else 1.5
+        max_call_itm = 1.2 if is_index else 1.8
         if not (-max_call_itm <= strike_diff_pct <= max_call_otm):
             continue
 
@@ -1161,9 +1161,9 @@ def detect_gamma_blast(
     for c in pe_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.25%), equities allow up to 1.2%
-        max_put_otm = 0.35 if is_index else 1.2
-        max_put_itm = 0.25 if is_index else 0.8
+        # Delta-Gated Sweet-Spot Filter: Indices allow ATM & ITM runners up to 1.2% (Delta 0.50-0.72), equities up to 1.8%
+        max_put_otm = 0.8 if is_index else 1.5
+        max_put_itm = 1.2 if is_index else 1.8
         if not (-max_put_otm <= strike_diff_pct <= max_put_itm):
             continue
 

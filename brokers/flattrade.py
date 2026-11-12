@@ -97,22 +97,58 @@ class FlattradeAPI(BrokerAPI):
         ws_url: Optional[str] = None,
         token_file: Optional[Path] = None,
     ) -> None:
+        from config.credentials import get_credential
+
+        self._explicit_creds = bool(
+            user_id is not None
+            or password is not None
+            or totp_secret is not None
+            or api_key is not None
+            or api_secret is not None
+        )
         self.user_id = (
-            (user_id if user_id is not None else os.environ.get("FLATTRADE_USER_ID", ""))
+            (
+                user_id
+                if user_id is not None
+                else (
+                    get_credential("FLATTRADE_USER_ID", secret=False, required=False)
+                    or os.environ.get("FLATTRADE_USER_ID", "")
+                )
+            )
             .strip()
             .upper()
         )
         self._password = (
-            password if password is not None else os.environ.get("FLATTRADE_PASSWORD", "")
+            password
+            if password is not None
+            else (
+                get_credential("FLATTRADE_PASSWORD", secret=True, required=False)
+                or os.environ.get("FLATTRADE_PASSWORD", "")
+            )
         ).strip()
         self._totp_secret = (
-            totp_secret if totp_secret is not None else os.environ.get("FLATTRADE_TOTP_SECRET", "")
+            totp_secret
+            if totp_secret is not None
+            else (
+                get_credential("FLATTRADE_TOTP_SECRET", secret=True, required=False)
+                or os.environ.get("FLATTRADE_TOTP_SECRET", "")
+            )
         ).strip()
         self._api_key = (
-            api_key if api_key is not None else os.environ.get("FLATTRADE_API_KEY", "")
+            api_key
+            if api_key is not None
+            else (
+                get_credential("FLATTRADE_API_KEY", secret=False, required=False)
+                or os.environ.get("FLATTRADE_API_KEY", "")
+            )
         ).strip()
         self._api_secret = (
-            api_secret if api_secret is not None else os.environ.get("FLATTRADE_API_SECRET", "")
+            api_secret
+            if api_secret is not None
+            else (
+                get_credential("FLATTRADE_API_SECRET", secret=True, required=False)
+                or os.environ.get("FLATTRADE_API_SECRET", "")
+            )
         ).strip()
 
         self.api_url = (
@@ -204,8 +240,67 @@ class FlattradeAPI(BrokerAPI):
             encoding="utf-8",
         )
 
-    def is_authenticated(self) -> bool:
-        return bool(self._token and self._token_date == _today_ist())
+    def _ensure_credentials(self) -> None:
+        """Dynamically reload credentials from environment or keychain if unpopulated."""
+        if getattr(self, "_explicit_creds", False):
+            return
+        from config.credentials import get_credential
+
+        if not self.user_id:
+            self.user_id = (
+                (
+                    get_credential("FLATTRADE_USER_ID", secret=False, required=False)
+                    or os.environ.get("FLATTRADE_USER_ID", "")
+                )
+                .strip()
+                .upper()
+            )
+        if not self._password:
+            self._password = (
+                get_credential("FLATTRADE_PASSWORD", secret=True, required=False)
+                or os.environ.get("FLATTRADE_PASSWORD", "")
+            ).strip()
+        if not self._totp_secret:
+            self._totp_secret = (
+                get_credential("FLATTRADE_TOTP_SECRET", secret=True, required=False)
+                or os.environ.get("FLATTRADE_TOTP_SECRET", "")
+            ).strip()
+        if not self._api_key:
+            self._api_key = (
+                get_credential("FLATTRADE_API_KEY", secret=False, required=False)
+                or os.environ.get("FLATTRADE_API_KEY", "")
+            ).strip()
+        if not self._api_secret:
+            self._api_secret = (
+                get_credential("FLATTRADE_API_SECRET", secret=True, required=False)
+                or os.environ.get("FLATTRADE_API_SECRET", "")
+            ).strip()
+
+    def is_authenticated(self, headless_retry: bool = True) -> bool:
+        if self._token and self._token_date == _today_ist():
+            return True
+        # Try reloading token file from disk if date changed or external login occurred
+        if self._load_token():
+            return True
+        if not headless_retry:
+            return False
+        self._ensure_credentials()
+        # If token expired or not for today, but headless credentials exist, auto-authenticate
+        if (
+            self.user_id
+            and self._password
+            and self._totp_secret
+            and self._api_key
+            and self._api_secret
+        ):
+            try:
+                log.info("[Flattrade] Auto-authenticating via headless TOTP flow...")
+                self.complete_login()
+                return bool(self._token and self._token_date == _today_ist())
+            except Exception as e_login:
+                log.warning(f"[Flattrade] Headless auto-login attempt failed: {e_login}")
+                return False
+        return False
 
     def get_login_url(self) -> str:
         api_key = self._api_key or os.environ.get("FLATTRADE_API_KEY", "")
@@ -222,6 +317,7 @@ class FlattradeAPI(BrokerAPI):
         Executes a 100% headless automated login using User ID, Password, TOTP,
         API Key, and API Secret via Flattrade's auth API.
         """
+        self._ensure_credentials()
         user_id = (kwargs.get("user_id") or self.user_id).strip().upper()
         password = kwargs.get("password") or self._password
         totp_secret = kwargs.get("totp_secret") or self._totp_secret
@@ -390,6 +486,11 @@ class FlattradeAPI(BrokerAPI):
         body.setdefault("uid", self.user_id)
         raw_body = f"jData={json.dumps(body, separators=(',', ':'))}"
         if authenticated:
+            if not self._token:
+                if not self._load_token():
+                    raise PermissionError(
+                        f"[Flattrade] Broker unauthenticated for {endpoint}. Please log in."
+                    )
             raw_body += f"&jKey={self._token}"
 
         # Rate Governor pacing
@@ -456,6 +557,39 @@ class FlattradeAPI(BrokerAPI):
             message = result.get("emsg") or result.get("error") or "unknown broker error"
             if "session" in str(message).lower() or "invalid session" in str(message).lower():
                 self._token = ""
+                if (
+                    authenticated
+                    and self.user_id
+                    and self._password
+                    and self._totp_secret
+                    and self._api_key
+                    and self._api_secret
+                ):
+                    try:
+                        log.info(
+                            f"[Flattrade] Session expired during {endpoint}. Auto-reauthenticating and retrying once..."
+                        )
+                        self.complete_login()
+                        body["uid"] = self.user_id
+                        retry_raw = (
+                            f"jData={json.dumps(body, separators=(',', ':'))}&jKey={self._token}"
+                        )
+                        r2 = self._client.post(
+                            f"{self.api_url}{endpoint}",
+                            content=retry_raw,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        )
+                        r2.raise_for_status()
+                        res2 = r2.json()
+                        if isinstance(res2, dict) and str(res2.get("stat", "")).lower() in (
+                            "ok",
+                            "success",
+                        ):
+                            return res2
+                    except Exception as e_retry:
+                        log.warning(
+                            f"[Flattrade] Auto-retry after re-auth failed for {endpoint}: {e_retry}"
+                        )
             raise RuntimeError(f"Flattrade {endpoint} failed: {message}")
         return result
 
@@ -569,7 +703,12 @@ class FlattradeAPI(BrokerAPI):
         key = f"{exchange.upper()}:{symbol.upper()}"
         with _CACHE_LOCK:
             if key in _FLATTRADE_RESOLVED_CACHE:
-                return _FLATTRADE_RESOLVED_CACHE[key]
+                cached = _FLATTRADE_RESOLVED_CACHE[key]
+                if cached is None:
+                    raise RuntimeError(
+                        f"Flattrade could not resolve instrument {instrument} (cached negative)"
+                    )
+                return cached
         if key in self._instrument_cache:
             with _CACHE_LOCK:
                 _FLATTRADE_RESOLVED_CACHE[key] = self._instrument_cache[key]
@@ -587,15 +726,37 @@ class FlattradeAPI(BrokerAPI):
             self._instrument_cache[key] = resolved
             return resolved
 
+        # Derivative Contract resolution: route NSE/BSE options and futures to NFO/BFO
+        req_exch = exchange.upper()
+        try:
+            from market.instruments import parse_derivative_contract
+
+            deriv = parse_derivative_contract(symbol)
+            if deriv and (deriv.is_option or deriv.is_future):
+                if req_exch in ("NSE", "NFO"):
+                    req_exch = "NFO"
+                elif req_exch in ("BSE", "BFO"):
+                    req_exch = "BFO"
+                elif req_exch == "MCX":
+                    req_exch = "MCX"
+                elif req_exch == "CDS":
+                    req_exch = "CDS"
+            else:
+                req_exch = _EXCHANGE_MAP.get(req_exch, req_exch)
+        except Exception:
+            req_exch = _EXCHANGE_MAP.get(req_exch, req_exch)
+
         result = self._post(
             "SearchScrip",
             {
-                "exch": _EXCHANGE_MAP.get(exchange.upper(), exchange.upper()),
+                "exch": req_exch,
                 "stext": symbol.upper(),
             },
         )
         values = result.get("values") or []
         if not values:
+            with _CACHE_LOCK:
+                _FLATTRADE_RESOLVED_CACHE[key] = None
             raise RuntimeError(f"Flattrade could not resolve instrument {instrument}")
 
         exact = next(
@@ -628,6 +789,8 @@ class FlattradeAPI(BrokerAPI):
             "tsym": str(exact.get("tsym") or symbol.upper()),
         }
         if not resolved["token"]:
+            with _CACHE_LOCK:
+                _FLATTRADE_RESOLVED_CACHE[key] = None
             raise RuntimeError(f"Flattrade instrument lookup omitted token for {instrument}")
 
         with _CACHE_LOCK:
@@ -1141,9 +1304,14 @@ class FlattradeAPI(BrokerAPI):
             if close_status_code == 1008:
                 log.warning(
                     "[Flattrade] WebSocket closed with code 1008 (policy violation / auth expired). "
-                    "Halting reconnect loop until re-authentication."
+                    "Invalidating session token and purging expired token from disk."
                 )
-                self._ws_stop.set()
+                self._token = ""
+                self._token_date = ""
+                try:
+                    self.token_file.unlink(missing_ok=True)
+                except Exception as e_del:
+                    logger.debug(f"[brokers.flattrade] Token unlink error: {e_del}")
 
         def _on_open(ws):
             auth_msg = {
@@ -1160,8 +1328,32 @@ class FlattradeAPI(BrokerAPI):
             backoff = 3.0
             while not self._ws_stop.is_set():
                 if not self.is_authenticated():
-                    log.info("[Flattrade] WebSocket stopping: broker not authenticated.")
-                    break
+                    self._ensure_credentials()
+                    has_headless = bool(
+                        self.user_id
+                        and self._password
+                        and self._totp_secret
+                        and self._api_key
+                        and self._api_secret
+                    )
+                    if not has_headless:
+                        log.warning(
+                            "[Flattrade] WebSocket paused: session unauthenticated and headless auto-login credentials not configured. "
+                            "Awaiting interactive login before resuming streaming."
+                        )
+                        if self._ws_stop.wait(timeout=300.0):
+                            break
+                        continue
+
+                    log.info(
+                        f"[Flattrade] WebSocket waiting for authentication to recover (backoff={backoff:.1f}s)..."
+                    )
+                    if self._ws_stop.wait(timeout=backoff):
+                        break
+                    backoff = min(backoff * 1.5, 30.0)
+                    if not self.is_authenticated():
+                        continue
+                backoff = 3.0
                 try:
                     self._ws = websocket.WebSocketApp(
                         self.ws_url,
@@ -1174,7 +1366,8 @@ class FlattradeAPI(BrokerAPI):
                 except Exception as e_ws:
                     logger.debug(f"[Flattrade] WebSocket loop notice: {e_ws}")
                 if not self._ws_stop.is_set():
-                    time.sleep(backoff)
+                    if self._ws_stop.wait(timeout=backoff):
+                        break
                     backoff = min(backoff * 1.5, 30.0)
 
         self._ws_stop.clear()

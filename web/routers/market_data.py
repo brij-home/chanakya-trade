@@ -1839,6 +1839,37 @@ async def prime_daily_levels_endpoint(payload: Optional[dict] = None):
     }
 
 
+@router.get("/api/market/indicators", tags=["Quantitative Indicators"])
+@router.get("/api/market/indicators/{symbol}", tags=["Quantitative Indicators"])
+async def get_indicator_snapshot_endpoint(
+    symbol: Optional[str] = "NIFTY",
+    exchange: Optional[str] = "NSE",
+    time_horizon: Optional[str] = "INTRADAY",
+    force_refresh: bool = False,
+):
+    """
+    Single Source of Truth (SSOT) Institutional Indicator Snapshot Endpoint.
+    Aggregates ATR, ADX, ROC, Greeks, PDH/PDL/PDC, CMP, CPR, and Index Futures Volume
+    with strict per-field provenance tagging (REAL_LIVE, DEGRADED_CACHED, COMPUTED_ESTIMATE, UNAVAILABLE).
+    """
+    from engine.indicator_snapshot import get_indicator_snapshot
+
+    clean = (symbol or "NIFTY").upper().strip()
+    snap = await asyncio.to_thread(
+        get_indicator_snapshot,
+        symbol=clean,
+        exchange=exchange or "NSE",
+        time_horizon=time_horizon or "INTRADAY",
+        force_refresh=force_refresh,
+    )
+    return {
+        "status": "ok",
+        "symbol": clean,
+        "indicators": snap.to_flat_dict(),
+        "snapshot": snap.to_dict(),
+    }
+
+
 @router.get("/api/market/depth-radar", tags=["Market Data", "Market Intelligence"])
 async def get_depth_radar_endpoint(
     segment: Optional[str] = "ALL",

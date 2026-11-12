@@ -59,10 +59,23 @@ def detect_defined_risk_neutral(
         candles = ctx.candles_daily
 
     adx_val = compute_adx(candles) if candles is not None else None
+    if adx_val is not None and adx_val >= 28.0:
+        logger.info(
+            f"[DefinedRiskNeutral] Vetoed neutral spread for {symbol}: "
+            f"ADX({adx_val:.1f}) >= 28.0 indicates active directional trend. Selling neutral credit spreads strictly vetoed."
+        )
+        return None
     is_low_adx = adx_val is not None and adx_val < 25.0
 
     # 2. Intraday price movement check (consolidating within narrow range)
     day_chg = abs(ctx.day_change_pct)
+    max_neutral_chg = 0.90 if getattr(ctx, "is_index", False) else 1.50
+    if day_chg > max_neutral_chg:
+        logger.info(
+            f"[DefinedRiskNeutral] Vetoed neutral spread for {symbol}: "
+            f"Day change |{ctx.day_change_pct:.2f}%| > {max_neutral_chg:.2f}% indicates directional expansion."
+        )
+        return None
     is_narrow_day = day_chg <= 0.85
 
     # 3. Open interest flanking walls check
