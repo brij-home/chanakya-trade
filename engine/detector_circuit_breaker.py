@@ -104,6 +104,7 @@ class DetectorMetrics:
     status: DetectorStatus
     confidence_multiplier: float
     last_updated: str
+    today_consecutive_losses: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -345,6 +346,7 @@ class DetectorCircuitBreaker:
             multiplier = 0.0
         elif (
             consecutive_losses >= 3
+            or today_consecutive_losses >= 2
             or expectancy < 0.0
             or (has_verified_performance_provenance and kelly <= 0.0)
             or (expectancy < -0.60 and today_consecutive_losses < 3)
@@ -372,6 +374,7 @@ class DetectorCircuitBreaker:
             status=status,
             confidence_multiplier=round(multiplier, 2),
             last_updated=now_str,
+            today_consecutive_losses=today_consecutive_losses,
         )
 
     def evaluate_alert_allowed(self, alert_type: str) -> tuple[bool, float, str]:
@@ -388,10 +391,15 @@ class DetectorCircuitBreaker:
                 f"Detector '{alert_type}' circuit tripped (E={metrics.expectancy:.2f}, {metrics.consecutive_losses} consecutive losses). Generation halted.",
             )
         if metrics.status == "PROBATION":
+            reason_detail = (
+                f"{metrics.today_consecutive_losses} intraday consecutive losses today"
+                if metrics.today_consecutive_losses >= 2
+                else f"E={metrics.expectancy:.2f}"
+            )
             return (
                 True,
                 0.75,
-                f"Detector '{alert_type}' in probation (E={metrics.expectancy:.2f}). 25% confidence discount applied.",
+                f"Detector '{alert_type}' in probation ({reason_detail}). 25% confidence discount applied.",
             )
         if metrics.status == "HEALTHY":
             return (
