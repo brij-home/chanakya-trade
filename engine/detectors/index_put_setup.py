@@ -1263,11 +1263,26 @@ def detect_index_put_setup(
             )
             return []
 
+    # ── Higher Timeframe (15m MTF) Trend Alignment & Climax Guard ─
+    is_15m_bull_trend = False
+    tf_15m_trend_label = "NEUTRAL"
+    if active_ohlcv is not None and len(active_ohlcv) >= 15:
+        try:
+            from analysis.market_structure import compute_mtf_alignment
+
+            mtf_res = compute_mtf_alignment(df_5m=active_ohlcv, direction="BEARISH")
+            tf_15m_trend_label = mtf_res.get("tf_15m_trend", "NEUTRAL")
+            if tf_15m_trend_label == "BULLISH":
+                is_15m_bull_trend = True
+        except Exception as e_mtf:
+            logger.debug(f"[IndexPutSetup] MTF trend evaluation bypassed: {e_mtf}")
+
     # ── Structural Signal Detection ───────────────────────────────
     signals: list[str] = []
     signal_tags: dict[str, Any] = {
         "roc_momentum": roc_metric.to_dict(),
         "oi_roc": cand_pe_oi_roc,
+        "tf_15m_trend": tf_15m_trend_label,
     }
     if is_long_unwinding_flush:
         signals.append("LONG_UNWINDING_FLUSH")
@@ -2061,6 +2076,11 @@ def detect_index_put_setup(
                 logger.info(
                     f"[IndexPutSetup] Suppressed DAY_LOW_BREAKDOWN on {clean_sym}: {smt_res.rationale}"
                 )
+            elif is_15m_bull_trend and not (is_explosive_momentum or is_long_unwinding_flush):
+                logger.info(
+                    f"[IndexPutSetup] Suppressed DAY_LOW_BREAKDOWN on {clean_sym}: 15m HTF trend is BULLISH "
+                    f"(Disallow breakdown selling fighting higher-timeframe markup / Bear Trap Avoidance)."
+                )
             elif not has_absorption_wick and (
                 is_breakdown_momentum
                 or (active_ohlcv is not None and len(active_ohlcv) >= 3 and cand_pe_pchange >= -2.0)
@@ -2207,8 +2227,14 @@ def detect_index_put_setup(
                 and is_at_or_below_dl
                 and (is_breakdown_momentum or cand_pe_pchange >= 12.0)
             ):
-                is_institutional_thrust = True
-                signals.append("INSTITUTIONAL_EXPANSION_BREAKDOWN")
+                if is_15m_bull_trend and not (is_explosive_momentum or is_long_unwinding_flush):
+                    logger.info(
+                        f"[IndexPutSetup] Suppressed INSTITUTIONAL_EXPANSION_BREAKDOWN on {clean_sym}: "
+                        f"15m HTF trend is BULLISH (disallow expansion short into macro uptrend)."
+                    )
+                else:
+                    is_institutional_thrust = True
+                    signals.append("INSTITUTIONAL_EXPANSION_BREAKDOWN")
                 thrust_details = {
                     "range_atr_ratio": rng_atr_ratio,
                     "vol_ratio": vol_ratio,
@@ -3482,10 +3508,10 @@ def detect_index_put_setup(
         except Exception as e_snip:
             logger.debug(f"[IndexPutSetup] Sniper plan error: {e_snip}")
 
-    entry_min = round(max(0.5, opt_ltp * 0.95), 1) if opt_ltp > 0 else spot
+    entry_min = round(max(0.5, opt_ltp * 0.96), 1) if opt_ltp > 0 else spot
     entry_max = round(opt_ltp * 1.015, 1) if opt_ltp > 0 else spot
     entry_range_str = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
-    no_chase_lvl = round(opt_ltp * 1.045, 1) if opt_ltp > 0 else round(spot * 0.996, 1)
+    no_chase_lvl = round(opt_ltp * 1.035, 1) if opt_ltp > 0 else round(spot * 0.997, 1)
 
     is_breakdown_type = bool(
         is_explosive_momentum

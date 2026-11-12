@@ -1264,11 +1264,26 @@ def detect_index_call_setup(
             )
             return []
 
+    # ── Higher Timeframe (15m MTF) Trend Alignment & Climax Guard ─
+    is_15m_bear_trend = False
+    tf_15m_trend_label = "NEUTRAL"
+    if active_ohlcv is not None and len(active_ohlcv) >= 15:
+        try:
+            from analysis.market_structure import compute_mtf_alignment
+
+            mtf_res = compute_mtf_alignment(df_5m=active_ohlcv, direction="BULLISH")
+            tf_15m_trend_label = mtf_res.get("tf_15m_trend", "NEUTRAL")
+            if tf_15m_trend_label == "BEARISH":
+                is_15m_bear_trend = True
+        except Exception as e_mtf:
+            logger.debug(f"[IndexCallSetup] MTF trend evaluation bypassed: {e_mtf}")
+
     # ── Structural Signal Detection ───────────────────────────────
     signals: list[str] = []
     signal_tags: dict[str, Any] = {
         "roc_momentum": roc_metric.to_dict(),
         "oi_roc": cand_ce_oi_roc,
+        "tf_15m_trend": tf_15m_trend_label,
     }
 
     if is_short_squeeze_unwind:
@@ -2218,6 +2233,11 @@ def detect_index_call_setup(
                 logger.info(
                     f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: {smt_res.rationale}"
                 )
+            elif is_15m_bear_trend and not (is_explosive_momentum or is_short_squeeze_unwind):
+                logger.info(
+                    f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: 15m HTF trend is BEARISH "
+                    f"(Disallow breakout buying fighting higher-timeframe markdown / Bull Trap Avoidance)."
+                )
             elif is_breakout_momentum or (active_ohlcv is not None and len(active_ohlcv) >= 3):
                 signals.append("DAY_HIGH_BREAKOUT")
                 signal_tags["day_high_breakout"] = {
@@ -2368,8 +2388,14 @@ def detect_index_call_setup(
                 and is_at_or_above_dh
                 and (is_breakout_momentum or cand_ce_pchange >= 12.0)
             ):
-                is_institutional_thrust = True
-                signals.append("INSTITUTIONAL_EXPANSION_THRUST")
+                if is_15m_bear_trend and not (is_explosive_momentum or is_short_squeeze_unwind):
+                    logger.info(
+                        f"[IndexCallSetup] Suppressed INSTITUTIONAL_EXPANSION_THRUST on {clean_sym}: "
+                        f"15m HTF trend is BEARISH (disallow expansion buy into macro downtrend)."
+                    )
+                else:
+                    is_institutional_thrust = True
+                    signals.append("INSTITUTIONAL_EXPANSION_THRUST")
                 thrust_details = {
                     "range_atr_ratio": rng_atr_ratio,
                     "vol_ratio": vol_ratio,
@@ -3647,10 +3673,10 @@ def detect_index_call_setup(
         except Exception as e_snip:
             logger.debug(f"[IndexCallSetup] Sniper plan error: {e_snip}")
 
-    entry_min = round(max(0.5, opt_ltp * 0.95), 1) if opt_ltp > 0 else spot
+    entry_min = round(max(0.5, opt_ltp * 0.96), 1) if opt_ltp > 0 else spot
     entry_max = round(opt_ltp * 1.015, 1) if opt_ltp > 0 else spot
     entry_range_str = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
-    no_chase_lvl = round(opt_ltp * 1.045, 1) if opt_ltp > 0 else round(spot * 1.004, 1)
+    no_chase_lvl = round(opt_ltp * 1.035, 1) if opt_ltp > 0 else round(spot * 1.003, 1)
 
     if is_spread_mandated:
         annotated_hl = f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
