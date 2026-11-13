@@ -15511,7 +15511,7 @@ class AutoAlertEngine:
         if not stagger_rotate:
             return list(targets[:max_targets])
 
-        target_cap = min(max_targets, 15)
+        target_cap = max_targets if max_targets is not None else 15
 
         lock = getattr(self, "_prioritized_targets_lock", None)
         if lock is None:
@@ -15869,7 +15869,11 @@ class AutoAlertEngine:
         elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
         else:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = []
+            if fno_index_allowed:
+                targets.extend(list(self._watched_indices))
+            if fno_stock_allowed:
+                targets.extend(list(self.watched_equities))
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -16322,7 +16326,7 @@ class AutoAlertEngine:
         found: list[AutoAlert] = []
 
         if targets is None:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = self._get_prioritized_targets(max_targets=25)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -16707,6 +16711,13 @@ class AutoAlertEngine:
                         ltp = float(q.last_price)
 
                 df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=250)
+                    except Exception:
+                        df = None
                 if df is None or len(df) < 20:
                     df = get_ohlcv(sym, exchange="NSE", interval="day", days=250)
 
@@ -17875,6 +17886,13 @@ class AutoAlertEngine:
                 clean_sym = canonical_alert_symbol(sym)
 
                 df = eod_cache.get(clean_sym) or eod_cache.get(sym)
+                if df is None or len(df) < 25:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean_sym, days=60)
+                    except Exception:
+                        df = None
                 if df is None or len(df) < 25:
                     df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
 
@@ -19347,7 +19365,11 @@ class AutoAlertEngine:
         elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
         else:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = []
+            if fno_index_allowed:
+                targets.extend(list(self._watched_indices))
+            if fno_stock_allowed:
+                targets.extend(list(self.watched_equities))
 
         if not targets:
             return []
@@ -19421,8 +19443,8 @@ class AutoAlertEngine:
                 )
 
                 # Pre-filter: Spot must be near Day High or Day Low (within 0.40%) or breaking out
-
-                if day_high_val > 0 and day_low_val > 0:
+                # Benchmark indices are exempt from proximity filter so they are always evaluated
+                if not is_sym_index and day_high_val > 0 and day_low_val > 0:
                     dist_h = (day_high_val - ltp) / ltp * 100
 
                     dist_l = (ltp - day_low_val) / ltp * 100
@@ -19438,6 +19460,18 @@ class AutoAlertEngine:
                 logger.debug(
                     f"[AutoAlertEngine] Afternoon thrust pre-filter error for {sym}: {e_pre}"
                 )
+
+        if eval_thrust_targets:
+            # Sort prioritized by indices first, then highest absolute intraday % move
+            def _thrust_prio(item):
+                _, _, ltp_val, _, _, _, p_close, is_idx = item
+                pct_m = (
+                    abs((ltp_val - p_close) / p_close * 100.0) if (p_close and p_close > 0) else 0.0
+                )
+                return (1 if is_idx else 0, pct_m)
+
+            eval_thrust_targets.sort(key=_thrust_prio, reverse=True)
+            eval_thrust_targets = eval_thrust_targets[:30]
 
         def _eval_thrust_sym(item):
 
@@ -19895,7 +19929,7 @@ class AutoAlertEngine:
         found: list[AutoAlert] = []
 
         if targets is None:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = self._get_prioritized_targets(max_targets=25)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -22136,9 +22170,7 @@ class AutoAlertEngine:
             ("circuits", lambda: self.scan_circuits(quotes_map=quotes_map)),
             (
                 "afternoon_thrusts",
-                lambda: self.scan_afternoon_thrusts(
-                    quotes_map=quotes_map, targets=active_cycle_targets
-                ),
+                lambda: self.scan_afternoon_thrusts(quotes_map=quotes_map, targets=None),
             ),
             ("order_book_thrusts", lambda: self.scan_order_book_thrusts(quotes_map=quotes_map)),
         ]
@@ -22147,9 +22179,7 @@ class AutoAlertEngine:
             tasks.append(
                 (
                     "squeeze",
-                    lambda: self.scan_squeeze_breakouts(
-                        quotes_map=quotes_map, targets=active_cycle_targets
-                    ),
+                    lambda: self.scan_squeeze_breakouts(quotes_map=quotes_map, targets=None),
                 )
             )
 

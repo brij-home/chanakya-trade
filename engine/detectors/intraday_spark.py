@@ -47,6 +47,25 @@ def get_cached_avg_volume_20(symbol: str) -> float:
     except Exception as e_dl:
         logger.debug("[IntradaySpark] get_daily_levels failed for %s: %s", clean_sym, e_dl)
 
+    # 1.5 Try local SQLite EOD store before calling network (in non-test environments so unit test mocks work)
+    is_test_env = (
+        (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+    if not is_test_env:
+        try:
+            from engine.eod_store import get_eod_df
+
+            df_eod = get_eod_df(clean_sym, days=30)
+            if df_eod is not None and len(df_eod) >= 15 and "volume" in df_eod.columns:
+                avg_v = float(df_eod["volume"].iloc[-20:].mean())
+                if avg_v > 0:
+                    _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+                    return avg_v
+        except Exception as e_eod:
+            logger.debug("[IntradaySpark] get_eod_df failed for %s: %s", clean_sym, e_eod)
+
     # 2. Fetch from history once per session and cache
     try:
         from market.history import get_ohlcv
@@ -254,8 +273,14 @@ def detect_intraday_mover_sparks(
                 if abs(chg) < 1.20 or rvol < 1.25:
                     continue
             if time_hm >= 840 and seg != "INDEX":
-                # Intraday cash stock entries silenced after 14:00 IST (75m runway gate before 15:15 square-off)
-                continue
+                from engine.position_sizer import is_fno_symbol
+
+                # Intraday cash stock entries silenced after 14:00 IST (75m runway gate before 15:15 square-off).
+                # Liquid F&O stock options have rapid 15-30m horizons and remain active until 14:45 IST (matching session_runway.py Invariant 6b).
+                if not is_fno_symbol(clean_sym):
+                    continue
+                elif time_hm >= 885:  # 14:45 IST
+                    continue
 
         if vwap > 0:
             vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0

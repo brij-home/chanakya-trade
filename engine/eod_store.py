@@ -409,6 +409,10 @@ def get_cached_ohlcv(symbol: str, days: int = 504) -> Optional[pd.DataFrame]:
     return df
 
 
+# Alias for backwards compatibility across detector modules
+get_eod_df = get_cached_ohlcv
+
+
 def get_cached_ohlcv_batch(
     symbols: list[str], days: int = 504, copy: bool = False
 ) -> dict[str, pd.DataFrame]:

@@ -219,6 +219,54 @@ async def _background_code_staleness_sentinel():
             logger.debug(f"[web.api] Code staleness sentinel exception: {e_suppressed}")
 
 
+async def _background_broker_health_sentinel():
+    """
+    Background sentinel monitoring configured headless broker connectivity and circuit breaker recovery.
+    Runs every 60s.
+    - If a headless broker (e.g. Fyers) is configured but unauthenticated, attempts automatic session restoration
+      as soon as rate-limit / OTP backoff elapses.
+    - If the Fyers circuit breaker has transitioned to HALF_OPEN, actively dispatches a lightweight live probe
+      (funds check) to verify gateway connectivity and reset the circuit to CLOSED.
+    """
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
+
+    await asyncio.sleep(45)  # Grace window after boot
+    while True:
+        try:
+            await asyncio.sleep(60)
+            cb = get_fyers_circuit_breaker()
+            fyers_brk = get_registered_brokers().get("fyers")
+            is_fyers_auth = bool(fyers_brk and fyers_brk.is_authenticated())
+
+            # 1. Headless auto-restore when unauthenticated and backoff elapsed
+            if _has_fyers() and not is_fyers_auth:
+                try:
+                    from brokers.fyers import _get_auth_backoff_remaining
+
+                    if _get_auth_backoff_remaining() == 0:
+                        logger.info(
+                            "[BrokerHealthSentinel] Fyers unauthenticated with backoff cleared; attempting auto-restore..."
+                        )
+                        await asyncio.to_thread(_auto_restore_brokers_sync)
+                except Exception as e_restore:
+                    logger.debug(f"[BrokerHealthSentinel] Auto-restore attempt note: {e_restore}")
+
+            # 2. Active probe if circuit breaker is HALF_OPEN and broker authenticated
+            if cb.state == CircuitState.HALF_OPEN and fyers_brk and fyers_brk.is_authenticated():
+                try:
+                    await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+                    logger.info(
+                        "[BrokerHealthSentinel] Proactive probe succeeded; circuit breaker returned to CLOSED"
+                    )
+                except Exception as e_probe:
+                    logger.warning(f"[BrokerHealthSentinel] Proactive probe failed: {e_probe}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e_suppressed:
+            logger.debug(f"[BrokerHealthSentinel] Sentinel loop note: {e_suppressed}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -281,6 +329,7 @@ async def lifespan(app: FastAPI):
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     staleness_task = asyncio.create_task(_background_code_staleness_sentinel())
+    broker_health_task = asyncio.create_task(_background_broker_health_sentinel())
 
     # Start the autonomous periodic data synchronization engine
     try:
@@ -320,6 +369,7 @@ async def lifespan(app: FastAPI):
     warmer_task.cancel()
     maintenance_task.cancel()
     staleness_task.cancel()
+    broker_health_task.cancel()
     try:
         from engine.recovery_worker import stop_recovery_worker
 
@@ -1694,15 +1744,38 @@ async def reset_circuit_breaker_endpoint():
 
 @app.post("/api/maintenance/circuit-breaker/probe", tags=["Maintenance", "Operations"])
 async def probe_circuit_breaker_endpoint():
-    """Manually transition the Fyers API circuit breaker to HALF_OPEN to permit immediate probe call."""
-    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    """Manually transition the Fyers API circuit breaker to HALF_OPEN and immediately dispatch an active probe."""
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
 
     cb = get_fyers_circuit_breaker()
     cb.probe()
+
+    msg = "Circuit breaker set to HALF_OPEN for probing"
+    fyers_brk = get_registered_brokers().get("fyers")
+    if fyers_brk and fyers_brk.is_authenticated():
+        try:
+            await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+            msg = "Live probe succeeded: funds verified and circuit breaker reset to CLOSED"
+        except Exception as exc:
+            msg = f"Live probe call failed: {exc}"
+            logger.warning("[probe_circuit_breaker] Live probe failed: %s", exc)
+    elif _has_fyers():
+        try:
+            await asyncio.to_thread(_auto_restore_brokers_sync)
+            b2 = get_registered_brokers().get("fyers")
+            if b2 and b2.is_authenticated():
+                cb.record_auth_success()
+                msg = "Fyers session auto-restored successfully and circuit breaker reset to CLOSED"
+            else:
+                msg = "Fyers unauthenticated: auto-restore attempted but session could not be established"
+        except Exception as exc:
+            msg = f"Auto-restore failed: {exc}"
+
     return JSONResponse(
         {
-            "status": "SUCCESS",
-            "message": "Circuit breaker set to HALF_OPEN for probing",
+            "status": "SUCCESS" if cb.state == CircuitState.CLOSED else "HALF_OPEN",
+            "message": msg,
             "diagnostics": cb.get_diagnostics(),
         }
     )

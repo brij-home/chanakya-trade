@@ -45,3 +45,17 @@ def test_run_preflight():
         if "KEY" in key or "SECRET" in key:
             assert not val.startswith("sk-live")
             assert not (len(val) > 10 and "*" not in val)
+
+
+def test_run_preflight_db_integrity_caching():
+    import engine.preflight as pf
+
+    # Initialize cache with known value
+    pf._last_db_integrity_check = (pf.time.time(), ["cached_mock_issue.db: corrupt"])
+    rep = pf.run_preflight(verbose=False, force_db_check=False)
+    db_check = next((c for c in rep.checks if c.name == "Database Integrity"), None)
+    assert db_check is not None
+    assert "cached_mock_issue.db" in db_check.message
+
+    # Reset cache to valid state
+    pf._last_db_integrity_check = (0.0, [])

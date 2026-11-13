@@ -1664,8 +1664,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                     <div className="grid grid-cols-2 gap-2 my-3 text-xs font-mono">
                       <div className="p-2 rounded bg-surface/70 border border-border/40">
                         <span className="text-[10px] text-muted block">Role Assignment</span>
-                        <span className="font-bold text-sapphire">
-                          {brokers.fyers?.role ? brokers.fyers.role.toUpperCase() : 'DATA & EXECUTION'}
+                        <span className={`font-bold ${brokers.fyers?.authenticated ? 'text-sapphire' : 'text-muted'}`}>
+                          {brokers.fyers?.role ? brokers.fyers.role.toUpperCase() : brokers.fyers?.authenticated ? 'DATA & EXECUTION' : 'UNASSIGNED'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-surface/70 border border-border/40">
@@ -1691,7 +1691,20 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
 
                   <div className="pt-2 border-t border-border/40 space-y-2">
                     <div className="flex items-center justify-between text-[10px] font-mono text-muted">
-                      <span>Circuit Breaker: <strong className={cb.state === 'CLOSED' ? 'text-emerald' : 'text-rose'}>{cb.state || 'CLOSED'}</strong></span>
+                      <div className="flex items-center gap-1.5">
+                        <span>Circuit Breaker: <strong className={cb.state === 'CLOSED' ? 'text-emerald' : cb.state === 'HALF_OPEN' ? 'text-gold' : 'text-rose'}>{cb.state || 'CLOSED'}</strong></span>
+                        {cb.state && cb.state !== 'CLOSED' && (
+                          <button
+                            type="button"
+                            onClick={cb.state === 'HALF_OPEN' ? handleResetBreaker : handleProbeBreaker}
+                            disabled={actionInProgress === 'reset_cb' || actionInProgress === 'probe_cb'}
+                            className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-panel hover:bg-highlight border border-border text-gold hover:text-text cursor-pointer transition-colors"
+                            title="Reset circuit breaker to CLOSED"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-panel text-muted border border-border">
                         Full Greeks • ATP • VWAP
                       </span>
