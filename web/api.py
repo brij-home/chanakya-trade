@@ -157,10 +157,16 @@ async def _background_cache_warmer():
 
 
 async def _background_maintenance_scheduler():
-    """Background task to run periodic storage maintenance and purge every 6 hours."""
+    """Runs storage maintenance shortly after boot, then every 6 hours.
+
+    The first pass must not wait the full period: with frequent restarts a
+    sleep-first loop would never execute retention or compaction at all.
+    """
+    delay_s = 60.0
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 hours
+            await asyncio.sleep(delay_s)
+            delay_s = 21600.0  # 6 hours between subsequent passes
             from engine.maintenance import run_maintenance_purge
 
             await asyncio.to_thread(run_maintenance_purge)
@@ -299,6 +305,14 @@ async def lifespan(app: FastAPI):
         start_recovery_worker(interval_seconds=30.0)
     except Exception as e_rec:
         logger.warning(f"[lifespan] Failed starting RecoveryWorker: {e_rec}")
+
+    # Bootstrap MarketMatrix intraday indicators for key index symbols (non-blocking background threads)
+    try:
+        from engine.indicator_snapshot import bootstrap_all_index_symbols
+
+        bootstrap_all_index_symbols()
+    except Exception as e_bs:
+        logger.warning(f"[lifespan] Failed starting indicator bootstrap: {e_bs}")
 
     yield
     if not broker_restore_task.done():
@@ -493,6 +507,7 @@ async def global_exception_middleware(request: _Request, call_next):
             return Response(status_code=204)
 
         try:
+            import traceback
             from engine.telemetry import record_exception
 
             clean_headers = {
@@ -507,6 +522,10 @@ async def global_exception_middleware(request: _Request, call_next):
                 "client": request.client.host if request.client else "unknown",
                 "headers": clean_headers,
             }
+            logger.error(
+                f"[web.api] Unhandled exception on {request.method} {request.url.path}: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
             incident = record_exception(
                 component="web.api",
                 error=exc,
@@ -902,19 +921,30 @@ def _auto_restore_brokers_sync() -> None:
     # Flattrade (Pi Connect)
     if _has_flattrade():
         try:
-            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
+            from brokers.flattrade import FlattradeAPI
 
-            if _FT_FLAT.exists():
-                b = FlattradeAPI()
-                if b.is_authenticated():
-                    register_broker("flattrade", b)
-                    try:
-                        from brokers.session import _start_websocket
+            b = FlattradeAPI()
+            if (
+                not b.is_authenticated()
+                and b._password
+                and b._totp_secret
+                and b._api_key
+                and b._api_secret
+            ):
+                try:
+                    b.complete_login()
+                except Exception as e_login:
+                    logging.warning("[startup] Flattrade headless auto-login failed: %s", e_login)
 
-                        _start_websocket(b)
-                    except Exception as e_suppressed:
-                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-                    logging.info("[startup] Flattrade session active & registered")
+            if b.is_authenticated():
+                register_broker("flattrade", b)
+                try:
+                    from brokers.session import _start_websocket
+
+                    _start_websocket(b)
+                except Exception as e_suppressed:
+                    logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+                logging.info("[startup] Flattrade session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore Flattrade: %s", exc)
 
@@ -1207,6 +1237,34 @@ async def api_market_subscriptions_revolve(drift_pct: float = 1.0):
     return JSONResponse(res)
 
 
+@app.get("/api/market/dynamics", tags=["Market"])
+async def api_market_dynamics(symbol: Optional[str] = None):
+    """
+    Unified Market Dynamics & Context-Adaptive Calibration Telemetry API.
+    Returns:
+      - Current Intraday Session Phase (IST timeline)
+      - Volatility Regime (India VIX tier)
+      - Active Governor Telemetry & Cache status
+      - Dynamic Calibration for a requested symbol (defaults to NIFTY)
+    """
+
+    def _do():
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        gov = get_market_dynamics_governor()
+        diag = gov.get_diagnostics()
+        target_sym = symbol or "NIFTY"
+        calib = gov.get_calibration(target_sym)
+        return {
+            **diag,
+            "target_symbol": target_sym,
+            "calibration": calib.to_dict(),
+        }
+
+    res = await asyncio.to_thread(_do)
+    return JSONResponse(res)
+
+
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
 
 
@@ -1325,14 +1383,30 @@ async def set_mode(payload: dict[str, Any]):
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
+    from config.discovery_policy import get_discovery_policy
+
     return JSONResponse(
         {
             "status": "SUCCESS",
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
             "description": mode_info.description,
+            "discovery_policy": get_discovery_policy().to_dict(),
         }
     )
+
+
+@app.post("/api/discovery-policy", tags=["System"])
+async def api_set_discovery_policy(payload: dict[str, Any]):
+    """Set discovery policy profile (FNO_ONLY, FNO_PRIORITY, BALANCED)."""
+    from config.discovery_policy import set_discovery_policy
+
+    profile = str(payload.get("profile") or payload.get("focus_mode") or "").strip().upper()
+    try:
+        policy = set_discovery_policy(profile)
+        return JSONResponse({"status": "SUCCESS", "discovery_policy": policy.to_dict()})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/slo", tags=["Observability"])
@@ -1413,11 +1487,23 @@ async def get_system_health_hub(
     from market.fyers_tbt_manager import fyers_tbt_manager
     from engine.code_provenance import get_code_provenance
 
+    import time
+
+    _t_hh = time.time()
+    logger.info("[HealthHub] Starting health-hub data aggregation")
+
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
     ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
+    logger.info(f"[HealthHub] cb/ws/rg collected in {time.time() - _t_hh:.3f}s")
     tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    logger.info(f"[HealthHub] tbt collected in {time.time() - _t_hh:.3f}s")
+    from engine.market_dynamics_governor import get_market_dynamics_governor
+
+    market_dynamics_diag = await asyncio.to_thread(get_market_dynamics_governor().get_diagnostics)
+    logger.info(f"[HealthHub] market_dynamics collected in {time.time() - _t_hh:.3f}s")
     broker_statuses = await asyncio.to_thread(_compute_status)
+    logger.info(f"[HealthHub] broker_statuses collected in {time.time() - _t_hh:.3f}s")
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
@@ -1433,6 +1519,36 @@ async def get_system_health_hub(
     )
     mem_status = get_memory_status().to_dict()
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
+
+    from market.streaming import market_streams
+    from brokers.session import get_registered_brokers, get_broker_role
+    from market.flattrade_rate_gate import get_flattrade_rate_gate
+
+    all_brks = get_registered_brokers()
+    flat_brk = all_brks.get("flattrade")
+    flat_ws = getattr(flat_brk, "_ws", None)
+    flat_sock = getattr(flat_ws, "sock", None) if flat_ws else None
+    flat_ws_conn = bool(flat_sock and getattr(flat_sock, "connected", False))
+    flat_stream = market_streams.status("flattrade")
+    flat_subs = list(getattr(flat_brk, "_subscriptions", set())) if flat_brk else []
+    flat_rg_diag = get_flattrade_rate_gate().get_diagnostics()
+
+    flattrade_diag = {
+        "configured": _has_flattrade(),
+        "authenticated": _flattrade_auth(),
+        "role": get_broker_role("flattrade"),
+        "user_id": getattr(flat_brk, "user_id", "") if flat_brk else "",
+        "account_id": getattr(flat_brk, "account_id", "") if flat_brk else "",
+        "rate_gate": flat_rg_diag,
+        "websocket": {
+            "connected": flat_ws_conn,
+            "state": flat_stream.state,
+            "subscriptions_count": len(flat_subs),
+            "subscriptions": flat_subs[:60],
+            "last_event_at": flat_stream.last_event_at,
+            "dropped_events": flat_stream.dropped_events,
+        },
+    }
 
     # If runtime in-memory bytecode is stale compared to disk, inject P3 advisory note (maintenance, not operational impairment)
     if code_prov.is_stale_in_memory:
@@ -1490,8 +1606,10 @@ async def get_system_health_hub(
         "circuit_breaker": cb_diag,
         "rate_gate": rate_gate_diag,
         "tbt": tbt_diag,
+        "market_dynamics": market_dynamics_diag,
         "websocket": ws_diag,
         "brokers": broker_statuses,
+        "flattrade": flattrade_diag,
         "provider_health": provider_health,
         "slo_report": slo_report,
         "telemetry_summary": telem_summary,
@@ -1501,10 +1619,15 @@ async def get_system_health_hub(
         "code_provenance": code_prov_dict,
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
+    body_bytes = json.dumps(payload, default=str).encode("utf-8")
+    logger.info(
+        f"[HealthHub] Completed and serialized {len(body_bytes)} bytes in {time.time() - _t_hh:.3f}s"
+    )
     return Response(
-        content=json.dumps(payload, default=str),
+        content=body_bytes,
         media_type="application/json",
         status_code=200,
+        headers={"content-length": str(len(body_bytes))},
     )
 
 
@@ -2138,19 +2261,18 @@ def _fyers_auth() -> bool:
             from brokers.session import get_registered_brokers
 
             registered = get_registered_brokers().get("fyers")
-            if registered and registered.is_authenticated():
-                profile = registered.get_profile()
-                if profile and getattr(profile, "user_id", ""):
-                    return True
+            if registered and registered.is_authenticated(headless_retry=False):
+                return True
 
             from brokers.fyers import FyersAPI
 
             b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
-            if not b.is_authenticated():
+            if not b.is_authenticated(headless_retry=False):
                 return False
-            profile = b.get_profile()
-            if not profile or not getattr(profile, "user_id", ""):
-                return False
+            from brokers.session import register_broker
+
+            if "fyers" not in get_registered_brokers():
+                register_broker("fyers", b, primary=True, role="both")
             return True
         except Exception:
             return False
@@ -2266,10 +2388,16 @@ def _flattrade_auth() -> bool:
         try:
             if not _has_flattrade():
                 return False
+            from brokers.session import get_registered_brokers
+
+            registered = get_registered_brokers().get("flattrade")
+            if registered and registered.is_authenticated(headless_retry=False):
+                return True
+
             from brokers.flattrade import FlattradeAPI
 
             b = FlattradeAPI()
-            return b.is_authenticated()
+            return b.is_authenticated(headless_retry=False)
         except Exception:
             return False
 
@@ -3353,13 +3481,18 @@ async def api_status(request: Request):
 
 
 @app.get("/api/reports/eod")
-async def api_get_eod_report(date: Optional[str] = None):
-    """Fetch structured EOD report for specified date (default today)."""
+async def api_get_eod_report(date: Optional[str] = None, refresh: bool = False):
+    """Fetch structured EOD report for specified date (default today). Checks disk cache first for sub-10ms response."""
     try:
         from engine.eod_report_generator import EODReportGenerator
 
         gen = EODReportGenerator()
-        rep = gen.generate(target_date=date)
+        if not refresh:
+            cached = gen.load_from_disk(target_date=date)
+            if cached:
+                return cached
+
+        rep = gen.generate(target_date=date, use_ai=False)
         _, md_p = gen.save_to_disk(rep)
         return {
             "status": "ok",
@@ -3381,7 +3514,7 @@ async def api_generate_eod_report(
         from engine.eod_report_generator import EODReportGenerator
 
         gen = EODReportGenerator()
-        rep = gen.generate(target_date=date)
+        rep = gen.generate(target_date=date, use_ai=dispatch_telegram)
         _, md_p = gen.save_to_disk(rep)
         dispatched = False
         if dispatch_telegram:
@@ -3857,8 +3990,33 @@ async def set_broker_role_endpoint(req: BrokerRoleRequest, request: Request):
         "fyers": "fyers",
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
+        "mstock": "mstock",
+        "kotak": "kotak",
+        "flattrade": "flattrade",
     }
     session_key = _API_TO_SESSION.get(req.broker, req.broker)
+
+    if session_key not in get_all_brokers():
+        from brokers.session import register_broker
+
+        if session_key == "fyers" and _has_fyers():
+            try:
+                from brokers.fyers import FyersAPI
+
+                b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
+                if b.is_authenticated():
+                    register_broker("fyers", b, primary=True, role=req.role)
+            except Exception as e_reg:
+                logger.debug(f"[web.api] JIT broker registration failed for fyers: {e_reg}")
+        elif session_key == "flattrade" and _has_flattrade():
+            try:
+                from brokers.flattrade import FlattradeAPI
+
+                b = FlattradeAPI()
+                if b.is_authenticated():
+                    register_broker("flattrade", b, role=req.role)
+            except Exception as e_reg:
+                logger.debug(f"[web.api] JIT broker registration failed for flattrade: {e_reg}")
 
     if session_key not in get_all_brokers():
         from fastapi import HTTPException
@@ -5112,29 +5270,50 @@ if os.path.isdir(_static_dir):
         "Expires": "0",
     }
 
+    _vite_probe_at = 0.0
+    _vite_probe_up = False
+    _VITE_PROBE_TTL = 2.0
+
     async def _check_vite_running() -> bool:
-        """Probe if Vite dev server is running on port 5173 with low latency."""
+        """Probe whether Vite is running on 5173, IPv4-first, cached and bounded.
+
+        Vite binds IPv4 only in this project. Probing localhost first can stall on
+        ::1 before falling back, and a per-request probe adds that latency to every
+        request. Cache the answer briefly and bound the whole probe so it can never
+        hang a request.
+        """
+        global _vite_probe_at, _vite_probe_up
+        now = _time.monotonic()
+        if now - _vite_probe_at < _VITE_PROBE_TTL:
+            return _vite_probe_up
+        up = False
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=0.35) as client:
-                for target in ("http://localhost:5173/", "http://127.0.0.1:5173/"):
-                    try:
-                        res = await client.get(target)
-                        if res.status_code == 200:
-                            return True
-                    except Exception:
-                        continue
-            return False
+            async def _probe() -> bool:
+                async with httpx.AsyncClient(timeout=0.35) as client:
+                    for target in ("http://127.0.0.1:5173/", "http://localhost:5173/"):
+                        try:
+                            res = await client.get(target)
+                            if res.status_code == 200:
+                                return True
+                        except Exception:
+                            continue
+                return False
+
+            up = await asyncio.wait_for(_probe(), timeout=0.8)
         except Exception:
-            return False
+            up = False
+        _vite_probe_at = now
+        _vite_probe_up = up
+        return up
 
     @app.get("/app")
     @app.get("/app/{rest_of_path:path}")
     async def serve_spa(request: Request, rest_of_path: str = ""):
         """Serve React SPA for all /app/* routes. In dev mode with Vite active, routes to 5173 for live HMR."""
         if request.query_params.get("static") != "true" and await _check_vite_running():
-            return RedirectResponse("http://localhost:5173/")
+            return RedirectResponse("http://127.0.0.1:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
             return FileResponse(index, headers=_NO_CACHE_HEADERS)
@@ -5145,7 +5324,7 @@ if os.path.isdir(_static_dir):
         """Serve React SPA terminal at root URL /.
         If Vite dev server is active on 5173, seamlessly redirects there for instant Hot Module Replacement."""
         if request.query_params.get("static") != "true" and await _check_vite_running():
-            return RedirectResponse("http://localhost:5173/")
+            return RedirectResponse("http://127.0.0.1:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
             return FileResponse(index, headers=_NO_CACHE_HEADERS)

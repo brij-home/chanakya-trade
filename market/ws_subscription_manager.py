@@ -97,14 +97,29 @@ CORE_BASE_SYMBOLS: list[str] = [
     "NSE:HEROMOTOCO-EQ",
 ]
 
-# Dynamically populate liquid taxonomy equities and benchmarks
+# Dynamically populate liquid taxonomy equities, official F&O universe, and benchmarks
 try:
+    from config.market_universes import FNO_EQUITY_SYMBOLS, FNO_INDEX_SYMBOLS
     from analysis.universe import SECTOR_TAXONOMY
     from market.instruments import resolve_corporate_alias
     from market.symbol_master import resolve_fyers_equity_symbol
+    from market.indices import INDEX_INSTRUMENTS
     import json
     from pathlib import Path
 
+    # 1. Authoritative F&O Single-Stock Equities & Benchmarks
+    for _s in sorted(FNO_EQUITY_SYMBOLS):
+        _clean = resolve_corporate_alias(_s)
+        _eq_sym = resolve_fyers_equity_symbol(_clean, exch="NSE")
+        if _eq_sym and _eq_sym not in CORE_BASE_SYMBOLS:
+            CORE_BASE_SYMBOLS.append(_eq_sym)
+
+    for _idx in sorted(FNO_INDEX_SYMBOLS):
+        _mapped = INDEX_INSTRUMENTS.get(_idx)
+        if _mapped and _mapped not in CORE_BASE_SYMBOLS:
+            CORE_BASE_SYMBOLS.append(_mapped)
+
+    # 2. Sectoral Taxonomies
     for _sec_info in SECTOR_TAXONOMY.values():
         for _s in _sec_info.get("symbols", []):
             _clean = resolve_corporate_alias(_s)
@@ -278,16 +293,83 @@ def get_active_index_options_grid(
     return list(dict.fromkeys(grid))
 
 
-def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
-    """
-    Generate active MCX Commodity and Currency CDS futures and near ATM options.
-    """
-    from datetime import datetime, timedelta
+def get_active_stock_options_grid(
+    stocks: Optional[list[str]] = None,
+    num_strikes_per_side: int = 2,
+    max_expiries: int = 1,
+    ref_time: Optional[datetime] = None,
+) -> list[str]:
+    """Return actual listed CE/PE pairs around fresh spot prices for top liquid F&O stocks.
 
-    now = ref_time or datetime.now()
-    # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
-    c_dt = now if now.day <= 15 else now + timedelta(days=20)
-    c_suffix = c_dt.strftime("%y%b").upper()
+    Pre-seeds ATM +- 2 strikes into WebSocket subscriptions to guarantee sub-millisecond
+    in-memory quote hits for high-velocity stock option setups with zero REST latency.
+    """
+    from config.constants import IST
+    from config.discovery_policy import get_discovery_policy
+    from market.contract_selection import fresh_underlying_price, get_subscription_option_grid
+    from market.quotes import get_quote
+
+    if not get_discovery_policy().allows("FNO_STOCK"):
+        return []
+
+    now = ref_time or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+
+    if stocks is None:
+        from market.universe_depth_radar import LIQUID_FNO_LEADERS, TOP_FNO_STOCKS
+
+        plan = os.environ.get("FYERS_PLAN", "PRIME").upper()
+        limit = 60 if plan == "PRIME" else 25
+        target_stocks = TOP_FNO_STOCKS[:limit] if TOP_FNO_STOCKS else LIQUID_FNO_LEADERS[:limit]
+    else:
+        target_stocks = stocks
+
+    if not target_stocks:
+        return []
+
+    # Batch quote resolution for all target stocks in 1 single call to avoid sequential latency
+    instruments = [f"NSE:{s}-EQ" for s in target_stocks]
+    try:
+        quotes_map = get_quote(instruments, ws_only=True)
+    except Exception as exc:
+        logger.debug(f"[WsSubManager] WS batch quote fetch for stock options grid: {exc}")
+        quotes_map = {}
+
+    grid: list[str] = []
+    for underlying in target_stocks:
+        clean = underlying.upper().replace("NSE:", "").replace("-EQ", "").strip()
+        instrument = f"NSE:{clean}-EQ"
+        quote = quotes_map.get(instrument) or quotes_map.get(clean)
+        spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=300.0) if quote else None
+
+        sub_grid = get_subscription_option_grid(
+            clean,
+            strikes_per_side=num_strikes_per_side,
+            max_expiries=max_expiries,
+            as_of=now if ref_time is not None else None,
+            spot=spot,
+        )
+        grid.extend(sub_grid)
+
+    return list(dict.fromkeys(grid))
+
+
+def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
+    """Active MCX/CDS futures plus master-listed near-ATM commodity options.
+
+    Option symbols are never assembled from a calendar suffix or a default price.
+    A grid is emitted only when the published master lists both sides of a strike
+    and a fresh front-month quote anchors it. Historical/simulated reference times
+    cannot be served from today's master, so they return futures only.
+    """
+    from datetime import datetime
+
+    from config.constants import IST
+
+    now = ref_time or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
 
     from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
@@ -302,72 +384,42 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
         _resolve_currency_contract("EURINR"),
     ]
 
-    crude_atm = 6500
-    try:
-        from market.quotes import get_ltp
-
-        cl = get_ltp("MCX:CRUDEOIL") or 6500.0
-        crude_atm = int(round(cl / 50.0) * 50)
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
-        )
-
-    crude_step = 50.0
-    try:
-        from market.symbol_master import get_strike_step
-
-        crude_step = get_strike_step("CRUDEOIL", spot=cl)
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Crude step resolution non-fatal: {e_suppressed}"
-        )
-
-    for offset in (-2, -1, 0, 1, 2):
-        stk = int(round(crude_atm + (offset * crude_step)))
-        comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}CE")
-        comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}PE")
-
-    # Authoritative Pre-Subscription Filter: validate commodity/CDS contracts when running live (ref_time is None)
     if ref_time is None:
-        try:
-            from market.symbol_master import load_master
+        from market.contract_selection import get_commodity_option_grid
 
-            mcx_data = None
+        comm_symbols.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=2, as_of=now))
+
+    # Authoritative pre-subscription filter: drop symbols the published master does
+    # not list. A degraded snapshot may hide a newly listed contract, so it only
+    # prunes futures; it never invents a replacement symbol.
+    if ref_time is None:
+        from market.symbol_master import load_master
+
+        masters: dict[str, dict | None] = {}
+        for name in ("MCX_COM", "NSE_CD"):
             try:
-                mcx_data = load_master("MCX_COM", offline_fallback=True)
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[market.ws_subscription_manager] MCX_COM master load non-fatal: {e_suppressed}"
-                )
-
-            cd_data = None
-            try:
-                cd_data = load_master("NSE_CD", offline_fallback=True)
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[market.ws_subscription_manager] NSE_CD master load non-fatal: {e_suppressed}"
-                )
-
-            filtered_comm = []
-            for s in comm_symbols:
-                if s.startswith("MCX:") and mcx_data is not None:
-                    if s in mcx_data:
-                        filtered_comm.append(s)
-                elif s.startswith("NSE:") and cd_data is not None:
-                    if s in cd_data:
-                        filtered_comm.append(s)
-                else:
-                    filtered_comm.append(s)
-
-            pruned = len(comm_symbols) - len(filtered_comm)
-            if pruned > 0:
-                logger.info(
-                    f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} invalid commodity/CDS contracts before broker dispatch."
-                )
-            comm_symbols = filtered_comm
-        except Exception as e_comm_flt:
-            logger.debug(f"[ws_sub_manager] Non-fatal commodity grid filter: {e_comm_flt}")
+                masters[name] = load_master(name, offline_fallback=False)
+            except Exception as exc:
+                logger.warning(f"[ws_sub_manager] {name} master unavailable for pruning: {exc}")
+                masters[name] = None
+        kept = []
+        for symbol in comm_symbols:
+            if symbol.startswith("MCX:"):
+                master = masters["MCX_COM"]
+            elif symbol.startswith("NSE:"):
+                master = masters["NSE_CD"]
+            else:
+                master = None
+            # An unavailable master cannot prove a symbol unlisted; keep it rather
+            # than dropping possibly valid exposure or discovery contracts.
+            if master is None or symbol in master:
+                kept.append(symbol)
+        pruned = len(comm_symbols) - len(kept)
+        if pruned > 0:
+            logger.info(
+                f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} unlisted commodity/CDS contracts before broker dispatch."
+            )
+        comm_symbols = kept
 
     return comm_symbols
 
@@ -394,15 +446,20 @@ class WsSubscriptionManager:
 
     def seed_active_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
         """
-        Pre-seed active Index Options grid (NIFTY, BANKNIFTY, FINNIFTY, SENSEX)
-        and MCX Commodities into the persistent WebSocket subscription registry.
+        Pre-seed active Index Options grid (NIFTY, BANKNIFTY, FINNIFTY, SENSEX),
+        top Liquid Stock Options grid, and MCX Commodities into the persistent WebSocket subscription registry.
         Leverages Fyers Prime 5,000 capacity to ensure 100% in-memory quote hits.
         """
         options_grid = get_active_index_options_grid()
+        stock_options_grid = (
+            get_active_stock_options_grid() if get_discovery_policy().allows("FNO_STOCK") else []
+        )
         commodity_grid = (
             get_active_commodity_grid() if get_discovery_policy().allows("COMMODITY") else []
         )
-        to_add = [s for s in (options_grid + commodity_grid) if is_valid_ws_symbol(s)]
+        to_add = [
+            s for s in (options_grid + stock_options_grid + commodity_grid) if is_valid_ws_symbol(s)
+        ]
 
         with self._lock:
             new_syms = [s for s in to_add if s not in self._core_symbols]
@@ -411,7 +468,7 @@ class WsSubscriptionManager:
         if new_syms:
             self._save_to_disk()
             logger.info(
-                f"[WsSubManager] Pre-seeded {len(to_add)} active derivatives (Options={len(options_grid)}, Comm={len(commodity_grid)})"
+                f"[WsSubManager] Pre-seeded {len(to_add)} active derivatives (IndexOptions={len(options_grid)}, StockOptions={len(stock_options_grid)}, Comm={len(commodity_grid)})"
             )
 
         if ws_client and to_add:
@@ -435,6 +492,8 @@ class WsSubscriptionManager:
         if not path.exists():
             return
         try:
+            from market.websocket import _to_ws_symbol
+
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             loaded_dynamic = data.get("dynamic", [])
@@ -443,21 +502,29 @@ class WsSubscriptionManager:
             sanitized_needed = False
 
             with self._lock:
-                for sym in loaded_dynamic:
-                    if not is_valid_ws_symbol(sym) or is_contract_expired(sym):
+                for raw_sym in loaded_dynamic:
+                    sym = _to_ws_symbol(raw_sym)
+                    if not sym or not is_valid_ws_symbol(sym) or is_contract_expired(sym):
                         sanitized_needed = True
                         continue
+                    if sym != raw_sym:
+                        sanitized_needed = True
                     if sym not in self._core_symbols:
                         self._dynamic_symbols[sym] = now
 
                 # Also cleanse expired from loaded core (preserve CORE_BASE_SYMBOLS)
-                for sym in loaded_core:
+                for raw_sym in loaded_core:
+                    sym = _to_ws_symbol(raw_sym)
+                    if sym != raw_sym:
+                        sanitized_needed = True
                     if sym not in CORE_BASE_SYMBOLS:
-                        if is_contract_expired(sym) or not is_valid_ws_symbol(sym):
+                        if not sym or is_contract_expired(sym) or not is_valid_ws_symbol(sym):
                             sanitized_needed = True
-                            self._core_symbols.discard(sym)
+                            self._core_symbols.discard(raw_sym)
                         else:
                             self._core_symbols.add(sym)
+                    else:
+                        self._core_symbols.add(sym)
 
             if sanitized_needed:
                 self._save_to_disk()

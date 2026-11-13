@@ -71,6 +71,7 @@ class ResolvedOptionPlan:
     bid_ask_spread_pct: Optional[float] = None
     delta: Optional[float] = None
     iv: Optional[float] = None
+    is_next_month_routed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -101,6 +102,7 @@ class ResolvedOptionPlan:
             "bid_ask_spread_pct": self.bid_ask_spread_pct,
             "delta": round(self.delta, 4) if self.delta is not None else None,
             "iv": round(self.iv, 2) if self.iv is not None else None,
+            "is_next_month_routed": self.is_next_month_routed,
         }
         if self.spread_details:
             d["hedged_spread"] = self.spread_details
@@ -279,25 +281,65 @@ def resolve_option_contract(
     contracts: list[Any] = []
     step = get_strike_step(clean_sym, spot=spot)
 
+    # SEBI Physical Settlement Expiry Week Check for Single-Stock Options:
+    # During monthly expiry week (DTE <= 4), route single-stock options to next-month contract
+    is_next_month = False
+    recommended_expiry_str: Optional[str] = None
+    if not is_idx:
+        try:
+            from engine.alert_expiry import (
+                is_monthly_physical_expiry_week,
+                resolve_recommended_derivative_expiry,
+            )
+            from market.options import get_expiries
+
+            if is_monthly_physical_expiry_week(symbol=clean_sym):
+                avail_exps = get_expiries(clean_sym)
+                exp_res = resolve_recommended_derivative_expiry(
+                    symbol=clean_sym,
+                    instrument_type="OPTION",
+                    available_expiries=avail_exps,
+                )
+                if exp_res.get("is_next_month_routed"):
+                    is_next_month = True
+                    recommended_expiry_str = exp_res.get("recommended_expiry")
+        except Exception as e_exp_res:
+            logger.debug(
+                f"[OptionResolver] Expiry recommendation check for {clean_sym}: {e_exp_res}"
+            )
+
     try:
         if contracts_override is not None:
             raw_chain = contracts_override
+            if recommended_expiry_str:
+                exp_matches = [
+                    c
+                    for c in raw_chain
+                    if str(getattr(c, "expiry", "") or "").strip() == recommended_expiry_str
+                ]
+                if exp_matches:
+                    raw_chain = exp_matches
         else:
             from market.options import get_options_chain
 
-            raw_chain = get_options_chain(clean_sym)
+            if recommended_expiry_str:
+                raw_chain = get_options_chain(clean_sym, expiry=recommended_expiry_str)
+            else:
+                raw_chain = get_options_chain(clean_sym)
         contracts = (
             raw_chain.contracts
             if hasattr(raw_chain, "contracts")
             else (raw_chain if isinstance(raw_chain, list) else [])
         )
         if contracts:
+            max_strike_dist_pct = 0.025 if is_idx else max(0.045, (step * 3.5) / max(1.0, spot))
             matching = [
                 c
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
                 and float(getattr(c, "last_price", 0.0) or 0.0) >= (1.0 if is_idx else 0.50)
-                and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= 0.025
+                and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot))
+                <= max_strike_dist_pct
             ]
             # Liquidity & Bid-Ask Spread Guard:
             # If live top-of-book bid/ask are present, enforce spread <= 3.5% (index) or <= 6.0% (stock)
@@ -857,4 +899,5 @@ def resolve_option_contract(
         bid_ask_spread_pct=spread_pct_val,
         delta=contract_delta if contract_delta > 0 else None,
         iv=contract_iv if contract_iv > 0 else None,
+        is_next_month_routed=is_next_month,
     )

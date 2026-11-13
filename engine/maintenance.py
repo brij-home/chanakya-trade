@@ -17,10 +17,11 @@ import logging
 import os
 import shutil
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from config.paths import app_data_dir, app_data_path
 
@@ -93,22 +94,38 @@ class MaintenanceReport:
 
 def _file_or_dir_size_bytes(path: Path) -> int:
     """Return total bytes for a file or directory tree."""
-    if not path.exists():
+    try:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
         return 0
-    if path.is_file():
-        return path.stat().st_size
     total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += Path(root, f).stat().st_size
-            except Exception as e_suppressed:
-                logger.debug(f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        for root, _, files in os.walk(path):
+            for f in files:
+                try:
+                    total += Path(root, f).stat().st_size
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+    except OSError as e_os:
+        logger.debug(f"[engine.maintenance] Storage walk OSError suppressed: {e_os}")
     return total
 
 
-def get_storage_breakdown() -> StorageBreakdown:
-    """Analyze current storage allocation across tiers and SSD free space."""
+_last_storage_breakdown: Optional[tuple[float, StorageBreakdown]] = None
+
+
+def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
+    """Analyze current storage allocation across tiers and SSD free space with 60s caching."""
+    global _last_storage_breakdown
+    now = time.time()
+    if not force and _last_storage_breakdown and (now - _last_storage_breakdown[0] < 60.0):
+        return _last_storage_breakdown[1]
+
     root = app_data_dir()
 
     # Business files
@@ -156,7 +173,7 @@ def get_storage_breakdown() -> StorageBreakdown:
     wal_files = list(root.glob("*.db-wal")) + list(Path("data").glob("*.db-wal"))
     wal_bytes = sum(_file_or_dir_size_bytes(f) for f in wal_files)
 
-    return StorageBreakdown(
+    res = StorageBreakdown(
         business_data_mb=b_bytes / (1024 * 1024),
         market_data_mb=m_bytes / (1024 * 1024),
         analysis_cache_mb=ac_bytes / (1024 * 1024),
@@ -167,6 +184,8 @@ def get_storage_breakdown() -> StorageBreakdown:
         total_ssd_gb=total_ssd_gb,
         wal_mb=wal_bytes / (1024 * 1024),
     )
+    _last_storage_breakdown = (now, res)
+    return res
 
 
 def run_maintenance_purge(
@@ -197,6 +216,42 @@ def run_maintenance_purge(
             items_deleted += deleted_ticks
     except Exception as e:
         logger.warning(f"Error pruning market ticks: {e}")
+
+    # 1b. Tier D: Enforce Parquet tick warehouse retention + compact segments.
+    # Without this the 30-day retention is advisory only and segment directories
+    # would grow without bound (previously reachable via API only).
+    try:
+        from engine.tick_warehouse import get_tick_warehouse
+
+        warehouse = get_tick_warehouse()
+        purged_partitions = warehouse.purge_expired_partitions(
+            retention_days=raw_tick_retention_days
+        )
+        if purged_partitions > 0:
+            actions.append(
+                f"Purged {purged_partitions} expired tick warehouse partitions "
+                f"older than {raw_tick_retention_days} days."
+            )
+            items_deleted += purged_partitions
+        absorbed_segments = warehouse.compact_all_symbols()
+        if absorbed_segments > 0:
+            actions.append(
+                f"Compacted {absorbed_segments} tick warehouse segments into merged generations."
+            )
+    except Exception as e:
+        logger.warning(f"Error maintaining tick warehouse: {e}")
+
+    # 1c. Tier D: Compact the historical bar warehouse (append-only segments).
+    try:
+        from engine.historical_warehouse import historical_warehouse
+
+        absorbed_bars = historical_warehouse.compact_all()
+        if absorbed_bars > 0:
+            actions.append(
+                f"Compacted {absorbed_bars} historical bar segments into merged datasets."
+            )
+    except Exception as e:
+        logger.warning(f"Error compacting historical warehouse: {e}")
 
     # 2. Tier D: Prune JSON disk cache files
     try:

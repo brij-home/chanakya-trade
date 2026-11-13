@@ -149,6 +149,7 @@ class PositionSizeResult:
     status: str = "CALCULATED"
     capital_basis: str = "EXPLICIT_BUDGET"
     reason: Optional[str] = None
+    recommended_structure: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         d = {
@@ -169,6 +170,7 @@ class PositionSizeResult:
             "status": self.status,
             "capital_basis": self.capital_basis,
             "reason": self.reason,
+            "recommended_structure": self.recommended_structure,
         }
         if self.market_impact:
             d["market_impact"] = self.market_impact.as_dict()
@@ -417,7 +419,8 @@ def get_lot_size(symbol: str) -> int:
             # If this is an exact dated derivative contract, enforce fail-closed zero
             from market.instruments import parse_derivative_contract
 
-            if parse_derivative_contract(raw):
+            parsed = parse_derivative_contract(raw)
+            if parsed and parsed.expiry_date is not None:
                 logger.warning(
                     "[engine.position_sizer] Exact contract has no valid active listed master lot: %s (%s)",
                     raw,
@@ -953,6 +956,35 @@ def calculate_position_size(
         status = "ZERO_QUANTITY_RISK_BUDGET"
         reason = f"Risk budget ₹{risk_budget:,.2f} insufficient for 1 share"
 
+    # 5. Market Dynamics Governor: Adaptive Volatility & Strategy Vehicle Alignment
+    recommended_structure = None
+    try:
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        calib = get_market_dynamics_governor().get_calibration(clean_sym, vix_override=vix)
+        recommended_structure = calib.preferred_vehicle
+
+        if calib.stock_options_quarantined and (is_fno or lot_size > 1):
+            recommended_structure = "FUTURES_OR_FAR_MONTH"
+            notes += " [DELIVERY_QUARANTINE: SEBI physical settlement risk; stock options quarantined to Futures/Far-Month]"
+
+        if (
+            (calib.volatility_regime == "CRISIS_VIX" or calib.mandate == "FADE_SPRING")
+            and (is_fno or lot_size > 1)
+            and lots > 1
+        ):
+            haircut_lots = max(1, int(lots * 0.50))
+            if haircut_lots < lots:
+                notes += f" [MARKET_GOVERNOR: {calib.volatility_regime} 50% lot haircut applied ({lots} -> {haircut_lots} lots)]"
+                lots = haircut_lots
+                shares = lots * lot_size if lot_size > 1 else lots
+                capital_allocated = shares * entry_price
+                capital_pct = (capital_allocated / capital) * 100.0 if capital > 0 else 0.0
+                actual_risk = shares * stop_distance
+                actual_risk_pct = (actual_risk / capital) * 100.0 if capital > 0 else 0.0
+    except Exception as e_gov:
+        logger.debug(f"[position_sizer] Market Dynamics Governor query suppressed: {e_gov}")
+
     return PositionSizeResult(
         symbol=clean_sym,
         shares=shares,
@@ -972,6 +1004,7 @@ def calculate_position_size(
         status=status,
         capital_basis=capital_basis,
         reason=reason,
+        recommended_structure=recommended_structure,
     )
 
 
@@ -1148,6 +1181,7 @@ _CONVICTION_TIER_LOT_MULTIPLIERS: dict[str, float] = {
     "HIGH_CONVICTION": 1.0,  # Baseline institutional sizing (80-89% conviction)
     "DEFINED_RISK_ONLY": 0.65,  # -35% risk compression for tier-3 defined-risk setups (70-79% conviction)
     "LOW_CONVICTION": 0.50,  # Damped sizing for marginal setups (<70%)
+    "REJECTED": 0.0,  # Disqualified setup -> zero size
 }
 
 _CHEETAH_MANDATE_MULTIPLIERS: dict[str, float] = {
@@ -1332,6 +1366,11 @@ def calculate_position_size_for_alert(
         r_multiple=base.r_multiple,
         sizing_model=base.sizing_model,
         notes=adjusted_notes,
+        market_impact=base.market_impact,
+        status=base.status,
+        capital_basis=base.capital_basis,
+        reason=base.reason,
+        recommended_structure=base.recommended_structure,
     )
 
 

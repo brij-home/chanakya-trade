@@ -151,3 +151,9 @@ ignore = [
     "E702",   # multiple statements on one line (semicolon) — intentional style
     "E741",   # ambiguous variable name `l` — widespread in financial loop code
 ]
+
+# ── Type checking (DSH / CI) ──────────────────────────
+[tool.pyright]
+# Large, mostly-untyped codebase: strict mode would bury real errors.
+typeCheckingMode = "basic"
+exclude = [".venv", "**/__pycache__", "dist", "build", "node_modules", ".pytest_trading_platform*"]

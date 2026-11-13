@@ -295,6 +295,7 @@ STANDARD_LOT_SIZES: dict[str, int] = {
 CORPORATE_ALIASES: dict[str, str] = {
     # Commercial & Colloquial Aliases to Official Exchange Tickers
     "INFOSYS": "INFY",  # Infosys Ltd
+    "BANK": "BANKNIFTY",  # Nifty Bank colloquially referred to as BANK in indices/sector snapshots
     "BAJAJFINANCE": "BAJFINANCE",  # Bajaj Finance Ltd
     "BAJAJFINSERV": "BAJFINSV",  # Bajaj Finserv Ltd
     "HUL": "HINDUNILVR",  # Hindustan Unilever Ltd
@@ -307,6 +308,7 @@ CORPORATE_ALIASES: dict[str, str] = {
     "HERO": "HEROMOTOCO",  # Hero MotoCorp Ltd
     "HEROHONDA": "HEROMOTOCO",
     "ASIANPAINTS": "ASIANPAINT",  # Asian Paints Ltd
+    "BOSCH": "BOSCHLTD",  # Bosch Ltd (official NSE ticker is BOSCHLTD)
     "DRREDDYS": "DRREDDY",  # Dr. Reddy's Laboratories
     "APOLLOHOSPITALS": "APOLLOHOSP",  # Apollo Hospitals Enterprise
     "TATACONSUMER": "TATACONSUM",  # Tata Consumer Products
@@ -918,10 +920,10 @@ def resolve_canonical_instrument(query: str, price: Optional[float] = None) -> C
 
     Examples:
         "RELIANCE"       → NSE:RELIANCE:EQUITY (Lot: 1, Tick: 0.05)
-        "NIFTY"          → NSE:NIFTY:INDEX (Lot: 25, Tick: 0.05)
-        "MCX:GOLD"       → MCX:GOLD:COMMODITY (Lot: 1, Tick: 0.05)
+        "NIFTY"          → NSE:NIFTY:INDEX (Lot: 65, Tick: 0.05)
+        "MCX:GOLD"       → MCX:GOLD:COMMODITY (Lot: 100, Tick: 0.05)
         "USDINR"         → CDS:USDINR:CURRENCY (Lot: 1000, Tick: 0.0025)
-        "SENSEX"         → BSE:SENSEX:INDEX (Lot: 10, Tick: 0.05)
+        "SENSEX"         → BSE:SENSEX:INDEX (Lot: 20, Tick: 0.05)
     """
     raw = (query or "NIFTY").strip().upper()
 

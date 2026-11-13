@@ -877,10 +877,12 @@ def test_dynamic_runway_level_anchored_width():
     assert plan["sell_strike"] >= 24750.0
 
 
-def test_regime_verdict_naked_vs_hedge():
+def test_regime_verdict_naked_vs_hedge(monkeypatch):
     """Verify regime_verdict distinguishes MARKET_FAVORS_NAKED from HEDGE_RECOMMENDED."""
     from engine.options_hedging import build_defined_risk_hedge_plan
     from datetime import datetime
+
+    monkeypatch.setattr("market.sentiment.get_market_breadth", lambda *a, **kw: None)
 
     # High velocity (vel_score=85), low VIX (13.5), morning hour (10:00 AM) -> MARKET_FAVORS_NAKED
     dt_morning = datetime(2026, 10, 30, 10, 0)

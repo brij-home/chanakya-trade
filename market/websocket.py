@@ -45,21 +45,17 @@ logger = logging.getLogger(__name__)
 
 
 # ── Default symbols to subscribe ─────────────────────────────
-
-try:
-    from market.ws_subscription_manager import CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS
-except Exception:
-    DEFAULT_SYMBOLS = [
-        "NSE:NIFTY50-INDEX",
-        "NSE:NIFTYBANK-INDEX",
-        "NSE:MIDCPNIFTY-INDEX",
-        "BSE:SENSEX-INDEX",
-        "NSE:INDIAVIX-INDEX",
-        "MCX:CRUDEOIL",
-        "MCX:NATURALGAS",
-        "MCX:GOLD",
-        "MCX:SILVER",
-    ]
+DEFAULT_SYMBOLS: list[str] = [
+    "NSE:NIFTY50-INDEX",
+    "NSE:NIFTYBANK-INDEX",
+    "NSE:MIDCPNIFTY-INDEX",
+    "BSE:SENSEX-INDEX",
+    "NSE:INDIAVIX-INDEX",
+    "MCX:CRUDEOIL",
+    "MCX:NATURALGAS",
+    "MCX:GOLD",
+    "MCX:SILVER",
+]
 
 # Map our instrument format to Fyers WebSocket format
 _SYMBOL_MAP = {
@@ -187,11 +183,29 @@ def _to_ws_symbol(instrument: str) -> str:
         exch_upper = exch.upper().strip()
         sym_upper = sym.upper().strip()
 
-        # Fix known malformed index formats
-        if sym_upper == "NIFTY-INDEX":
-            return "NSE:NIFTY50-INDEX"
-        if sym_upper == "BANKNIFTY-INDEX":
-            return "NSE:NIFTYBANK-INDEX"
+        # Fix known malformed index formats and pseudo-equity sector tokens
+        _MALFORMED_INDEX_MAP = {
+            "NIFTY-INDEX": "NSE:NIFTY50-INDEX",
+            "NIFTY": "NSE:NIFTY50-INDEX",
+            "BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
+            "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+            "BANK-EQ": "NSE:NIFTYBANK-INDEX",
+            "BANK": "NSE:NIFTYBANK-INDEX",
+            "IT-EQ": "NSE:NIFTYIT-INDEX",
+            "INFRA-EQ": "NSE:NIFTYINFRA-INDEX",
+            "ENERGY-EQ": "NSE:NIFTYENERGY-INDEX",
+            "METAL-EQ": "NSE:NIFTYMETAL-INDEX",
+            "PHARMA-EQ": "NSE:NIFTYPHARMA-INDEX",
+            "AUTO-EQ": "NSE:NIFTYAUTO-INDEX",
+            "FMCG-EQ": "NSE:NIFTYFMCG-INDEX",
+            "REALTY-EQ": "NSE:NIFTYREALTY-INDEX",
+            "MEDIA-EQ": "NSE:NIFTYMEDIA-INDEX",
+            "PSE-EQ": "NSE:NIFTYPSE-INDEX",
+            "COMMODITIES-EQ": "NSE:NIFTYCOMMODITIES-INDEX",
+            "CPSE-EQ": "NSE:NIFTYCPSE-INDEX",
+        }
+        if sym_upper in _MALFORMED_INDEX_MAP:
+            return _MALFORMED_INDEX_MAP[sym_upper]
 
         # Already in Fyers format (has -EQ, -INDEX, FUT, options, etc.)
         if sym_upper.endswith(
@@ -228,7 +242,13 @@ def _to_ws_symbol(instrument: str) -> str:
     return f"NSE:{s}-EQ"
 
 
-from market.ws_subscription_manager import is_valid_ws_symbol
+try:
+    from market.ws_subscription_manager import (
+        is_valid_ws_symbol,
+        CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS,
+    )
+except Exception:
+    from market.ws_subscription_manager import is_valid_ws_symbol
 
 
 @dataclass
@@ -602,6 +622,9 @@ class WebSocketManager:
         try:
             CHUNK_SIZE = 50
             for i in range(0, len(new_symbols), CHUNK_SIZE):
+                if not self._ws or not self._connected:
+                    logger.debug("[WebSocket] Disconnected during batch subscription dispatch")
+                    break
                 batch = new_symbols[i : i + CHUNK_SIZE]
                 self._ws.subscribe(batch)
                 self._subscribed.update(batch)
@@ -727,6 +750,12 @@ class WebSocketManager:
                 on_error=self._on_error,
                 on_message=self._on_message,
             )
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[WebSocket] SDK log rotation unavailable: {exc}")
             self._ws.connect()
         except ImportError:
             logger.error("fyers-apiv3 not installed — WebSocket unavailable")
@@ -909,7 +938,17 @@ class WebSocketManager:
                     )
 
             err_str = str(err).lower()
-            if "token is expired" in err_str or "code': -99" in err_str or 'code": -99' in err_str:
+            is_token_expired = (
+                "token is expired" in err_str
+                or "token expired" in err_str
+                or "invalid token" in err_str
+                or (
+                    ("code': -99" in err_str or 'code": -99' in err_str)
+                    and "5000" not in err_str
+                    and ("token" in err_str or "auth" in err_str)
+                )
+            )
+            if is_token_expired:
                 logger.warning(
                     "[WebSocket] Fyers WebSocket token expired (-99). Triggering broker re-authentication..."
                 )
@@ -917,7 +956,16 @@ class WebSocketManager:
 
     def _on_message(self, message) -> None:
         """Process incoming tick data."""
-        self._last_packet_at = time.time()
+        now_ts = time.time()
+        self._last_packet_at = now_ts
+        if now_ts - getattr(self, "_last_provider_success_at", 0.0) > 10.0:
+            self._last_provider_success_at = now_ts
+            try:
+                from engine.observability import get_registry
+
+                get_registry().record_provider_success("fyers")
+            except Exception as e_reg:
+                logger.debug(f"[market.websocket] Provider success record error: {e_reg}")
         try:
             if isinstance(message, str):
                 data_list = json.loads(message)

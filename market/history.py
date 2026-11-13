@@ -266,8 +266,33 @@ def get_ohlcv(
     if not as_of:
         try:
             from engine.historical_warehouse import historical_warehouse
+            from market.calendar import is_market_open
+            from config.constants import IST
 
-            if historical_warehouse.has_bars(clean_sym, interval=kite_interval, min_bars=5):
+            now_ist_check = datetime.now(IST)
+            is_active_mkt = is_market_open(exchange, ref_dt=now_ist_check)
+            bars_possible = 5
+            if is_active_mkt and days <= 1:
+                m_since_open = max(
+                    1, (now_ist_check.hour * 60 + now_ist_check.minute) - (9 * 60 + 15)
+                )
+                if "1m" in str(kite_interval) or "minute" in str(kite_interval):
+                    bars_possible = max(1, m_since_open)
+                elif "3m" in str(kite_interval):
+                    bars_possible = max(1, m_since_open // 3)
+                elif "5m" in str(kite_interval):
+                    bars_possible = max(1, m_since_open // 5)
+                elif "15m" in str(kite_interval):
+                    bars_possible = max(1, m_since_open // 15)
+                else:
+                    bars_possible = max(1, m_since_open // 30)
+                min_wh_bars = min(5, bars_possible)
+            else:
+                min_wh_bars = 5
+
+            if historical_warehouse.has_bars(
+                clean_sym, interval=kite_interval, min_bars=min_wh_bars
+            ):
                 wh_df = historical_warehouse.load_bars(
                     clean_sym,
                     interval=kite_interval,
@@ -278,13 +303,25 @@ def get_ohlcv(
                 if kite_interval == "day":
                     min_expected = max(5, int(days * 0.5)) if days > 1 else 1
                 elif "15m" in kite_interval or "15minute" in kite_interval:
-                    min_expected = max(5, int(days * 12)) if days > 1 else 3
+                    min_expected = (
+                        max(5, int(days * 12))
+                        if days > 1
+                        else (min(3, bars_possible) if is_active_mkt and days <= 1 else 3)
+                    )
                 elif "5m" in kite_interval or "5minute" in kite_interval:
-                    min_expected = max(10, int(days * 35)) if days > 1 else 5
+                    min_expected = (
+                        max(10, int(days * 35))
+                        if days > 1
+                        else (min(5, bars_possible) if is_active_mkt and days <= 1 else 5)
+                    )
                 elif "60m" in kite_interval or "60minute" in kite_interval or "1h" in kite_interval:
                     min_expected = max(3, int(days * 3)) if days > 1 else 1
                 else:
-                    min_expected = max(5, int(days * 10)) if days > 1 else 3
+                    min_expected = (
+                        max(5, int(days * 10))
+                        if days > 1
+                        else (min(3, bars_possible) if is_active_mkt and days <= 1 else 3)
+                    )
 
                 # Date coverage guard: Check if warehouse covers the requested historical start horizon
                 req_start = from_date or (to_date - timedelta(days=days))
@@ -488,7 +525,8 @@ def get_ohlcv(
                 mm_df = get_market_matrix().get_candles_df(
                     clean_sym, timeframe=tf, limit=max(30, days * 75)
                 )
-                if mm_df is not None and len(mm_df) >= 3:
+                min_mm_bars = 1 if days <= 1 else 3
+                if mm_df is not None and len(mm_df) >= min_mm_bars:
                     with _df_memory_cache_lock:
                         while len(_df_memory_cache) >= MAX_MEMORY_DFS:
                             _df_memory_cache.popitem(last=False)
@@ -496,6 +534,59 @@ def get_ohlcv(
                     return mm_df.copy()
         except Exception as e_mm:
             logger.debug(f"[market.history] MarketMatrix check non-fatal: {e_mm}")
+
+    # Tier 2.95: In-RAM Real-Time Quote Candle Synthesizer (<0.01ms)
+    # During active market sessions for today's intraday bars (days <= 1), synthesize from streaming WebSocket Quote
+    if not raw and not as_of and kite_interval != "day" and days <= 1 and not is_crypto:
+        try:
+            from market.calendar import is_market_open
+            from config.constants import IST
+
+            now_ist_synth = datetime.now(IST)
+            if is_market_open(exchange, ref_dt=now_ist_synth):
+                from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+                cached_entry = None
+                with _quote_cache_lock:
+                    for k in (clean_sym, f"{exchange}:{clean_sym}", f"{clean_sym}.NS"):
+                        if k in _QUOTE_CACHE:
+                            cached_entry = _QUOTE_CACHE[k]
+                            break
+                if cached_entry:
+                    _, q = cached_entry
+                    o = float(getattr(q, "open", 0.0) or 0.0)
+                    c = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+                    if o > 0 and c > 0:
+                        h = float(getattr(q, "high", max(o, c)) or max(o, c))
+                        l = float(getattr(q, "low", min(o, c)) or min(o, c))
+                        v = float(getattr(q, "volume", 0) or 1000)
+                        now_bar_dt = now_ist_synth.replace(second=0, microsecond=0)
+                        synth_df = pd.DataFrame(
+                            [
+                                {
+                                    "date": now_bar_dt,
+                                    "open": o,
+                                    "high": h,
+                                    "low": l,
+                                    "close": c,
+                                    "volume": v,
+                                }
+                            ]
+                        ).set_index("date")
+                        synth_df.attrs["provenance"] = {
+                            "data_source": "WS_QUOTE_SYNTHESIS",
+                            "provider": getattr(q, "provider", "websocket"),
+                            "as_of": to_date.isoformat(),
+                            "snapshot_id": None,
+                            "reproducible": False,
+                        }
+                        with _df_memory_cache_lock:
+                            while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                                _df_memory_cache.popitem(last=False)
+                            _df_memory_cache[cache_key] = (now_ts, synth_df.copy())
+                        return synth_df
+        except Exception as e_synth:
+            logger.debug(f"[market.history] Quote candle synthesis non-fatal: {e_synth}")
 
     # Tier 3: explicit data-provider API → yfinance → disk cache with in-flight coalescing.
     # CRITICAL: Indian equity brokers (Fyers, Zerodha, etc.) do not host crypto assets.
@@ -524,20 +615,54 @@ def get_ohlcv(
                     provider_name = box[1] or "broker_coalesced"
         else:
             try:
-                from brokers.session import get_data_broker, get_data_broker_key
+                from brokers.session import get_data_broker, get_data_broker_key, get_all_brokers
 
                 broker = get_data_broker()
+                pri_key = get_data_broker_key() or "broker"
                 # Only use broker for real data — skip if it's the mock broker
                 if not getattr(broker, "_is_mock", False):
-                    raw = broker.get_historical_data(
-                        symbol=symbol,
-                        exchange=exchange,
-                        interval=kite_interval,
-                        from_date=from_date,
-                        to_date=to_date,
-                    )
-                    provider_name = get_data_broker_key() or broker.__class__.__name__.lower()
-                else:
+                    try:
+                        raw = broker.get_historical_data(
+                            symbol=symbol,
+                            exchange=exchange,
+                            interval=kite_interval,
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                        if raw:
+                            provider_name = pri_key
+                    except Exception as e_pri_hist:
+                        logger.debug(
+                            f"[market.history] Primary broker ({pri_key}) history failed: {e_pri_hist}"
+                        )
+
+                # Secondary broker failover (e.g. Flattrade) before falling back to yfinance
+                if not raw and not getattr(broker, "_is_mock", False):
+                    all_connected = get_all_brokers()
+                    for sec_key, sec_broker in all_connected.items():
+                        if sec_key == pri_key or getattr(sec_broker, "_is_mock", False):
+                            continue
+                        if hasattr(sec_broker, "get_historical_data"):
+                            try:
+                                sec_raw = sec_broker.get_historical_data(
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    interval=kite_interval,
+                                    from_date=from_date,
+                                    to_date=to_date,
+                                )
+                                if sec_raw:
+                                    raw = sec_raw
+                                    provider_name = sec_key
+                                    logger.info(
+                                        f"[market.history] 🔄 Secondary broker failover ({sec_key}) succeeded for {symbol} ({len(raw)} bars)"
+                                    )
+                                    break
+                            except Exception as e_sec_hist:
+                                logger.debug(
+                                    f"[market.history] Secondary broker ({sec_key}) history failed: {e_sec_hist}"
+                                )
+                elif getattr(broker, "_is_mock", False):
                     # Mock broker: use yfinance
                     raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
                     provider_name = "yfinance"

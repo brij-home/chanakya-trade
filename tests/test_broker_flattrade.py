@@ -24,6 +24,12 @@ class _Response:
         return self._payload
 
 
+@pytest.fixture(autouse=True)
+def _isolate_flattrade_token(tmp_path, monkeypatch):
+    test_token_file = tmp_path / "flattrade.json"
+    monkeypatch.setattr(flattrade, "TOKEN_FILE", test_token_file)
+
+
 def test_missing_credentials_fails_closed(monkeypatch):
     for key in (
         "FLATTRADE_USER_ID",
@@ -212,3 +218,98 @@ def test_get_quote_and_positions_normalization(monkeypatch):
     funds = broker.get_funds()
     assert funds.available_cash == 100000.00
     assert funds.used_margin == 25000.00
+
+
+def test_normalize_flattrade_tick():
+    from market.streaming import normalize_flattrade_tick
+
+    raw_tick = {
+        "e": "NSE",
+        "tk": "26000",
+        "ts": "Nifty 50",
+        "lp": "25010.50",
+        "bp1": "25010.00",
+        "sp1": "25011.00",
+        "v": "1250000",
+        "oi": "450000",
+    }
+    event = normalize_flattrade_tick(raw_tick)
+    assert event is not None
+    assert event.provider == "flattrade"
+    assert event.provider_symbol == "Nifty 50"
+    assert event.last_price == 25010.50
+    assert event.bid == 25010.00
+    assert event.ask == 25011.00
+    assert event.volume == 1250000
+    assert event.oi == 450000
+    assert event.data_state == "LIVE"
+    assert event.source == "STREAM"
+
+
+def test_normalize_flattrade_tick_with_atp():
+    from market.streaming import normalize_flattrade_tick
+
+    raw_tick = {
+        "e": "NSE",
+        "tk": "26000",
+        "ts": "Nifty 50",
+        "lp": "25010.50",
+        "ap": "25005.20",
+        "v": "100",
+    }
+    event = normalize_flattrade_tick(raw_tick)
+    assert event is not None
+    assert event.atp == 25005.20
+
+
+def test_flattrade_websocket_subscription_batching(monkeypatch):
+    broker = FlattradeAPI(user_id="FT100", api_key="AK", api_secret="AS")
+    sent_payloads = []
+
+    class DummyWS:
+        def send(self, payload):
+            sent_payloads.append(json.loads(payload))
+
+    dummy_ws = DummyWS()
+    # 60 tokens should be split into 3 chunks: 25, 25, 10
+    tokens = [f"NSE|{i}" for i in range(1, 61)]
+    broker._send_subscription_batches(dummy_ws, tokens, task="t", batch_size=25)
+
+    assert len(sent_payloads) == 3
+    assert sent_payloads[0]["t"] == "t"
+    assert len(sent_payloads[0]["k"].split("#")) == 25
+    assert len(sent_payloads[1]["k"].split("#")) == 25
+    assert len(sent_payloads[2]["k"].split("#")) == 10
+
+
+def test_ws_quotes_flattrade_stream_resolution(monkeypatch):
+    """Verify market.quotes._ws_quotes resolves quotes directly from the Flattrade stream."""
+    from market.data_events import MarketDataEvent
+    from market.quotes import _ws_quotes
+    from market.streaming import market_streams
+
+    test_event = MarketDataEvent(
+        canonical_instrument_id="NSE:RELIANCE",
+        provider="flattrade",
+        provider_symbol="RELIANCE",
+        source="STREAM",
+        data_state="LIVE",
+        last_price=2520.50,
+        volume=850000,
+        bid=2520.00,
+        ask=2521.00,
+        atp=2515.00,
+    )
+    market_streams.publish(test_event)
+
+    monkeypatch.setattr("market.quotes.get_data_broker_key", lambda: "flattrade")
+
+    quotes = _ws_quotes(["NSE:RELIANCE"], correlation_id="cid-ft-test")
+    assert "NSE:RELIANCE" in quotes
+    q = quotes["NSE:RELIANCE"]
+    assert q.last_price == 2520.50
+    assert q.volume == 850000
+    assert q.bid == 2520.00
+    assert q.ask == 2521.00
+    assert q.vwap == 2515.00
+    assert getattr(q, "provider", "") == "flattrade"

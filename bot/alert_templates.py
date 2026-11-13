@@ -1191,6 +1191,10 @@ def build_signal_ref(
     return f"#SIG_{clean_sym}_{ts_tag}"
 
 
+# Canonical alias ensuring zero import failures across all engines and workers
+generate_signal_ref = build_signal_ref
+
+
 def escape_tg(text: Any) -> str:
     """Safely escape text for Telegram HTML mode."""
     if text is None:
@@ -2903,7 +2907,11 @@ def render_fno_alert(
         price_bar = f" · {opt_cmp_part}"
     else:
         price_bar = ""
-    sig_ref = build_signal_ref(symbol=d.underlying or d.contract, contract=d.contract)
+    sig_ref = (
+        getattr(d, "signal_ref", None)
+        or (d.get("signal_ref") if isinstance(d, dict) else None)
+        or build_signal_ref(symbol=d.underlying or d.contract, contract=d.contract)
+    )
 
     try:
         rr_match = re.search(r"[\d.]+$", str(d.risk_reward))
@@ -3062,7 +3070,11 @@ def render_equity_alert(data: EquityAlertData | dict[str, Any], in_market: bool 
     )
     cat_str = " · ".join(d.catalysts[:2]) if d.catalysts else "Confirmed Institutional Structure"
 
-    sig_ref = build_signal_ref(symbol=d.symbol)
+    sig_ref = (
+        getattr(d, "signal_ref", None)
+        or (d.get("signal_ref") if isinstance(d, dict) else None)
+        or build_signal_ref(symbol=d.symbol, alert_id=getattr(d, "alert_id", "") or "")
+    )
 
     lot_sz = getattr(d, "lot_size", None)
     if not lot_sz:
@@ -3151,7 +3163,15 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         )
     )
     cmp_label = "Opt CMP" if is_opt else "Spot CMP"
-    sig_ref = build_signal_ref(symbol=sym)
+    sig_ref = (
+        data.get("signal_ref")
+        or (data.get("metrics") or {}).get("signal_ref")
+        or build_signal_ref(
+            symbol=sym,
+            alert_id=data.get("alert_id", "") or "",
+            created_at=data.get("created_at", "") or "",
+        )
+    )
 
     lot_sz = data.get("lot_size") or (data.get("actionable_plan") or {}).get("lot_size")
     if not lot_sz and seg == "FNO":
@@ -3455,7 +3475,15 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
 
     # Asymmetric alerts are Spot setups: label is always "Spot CMP"
     cmp_label = "Spot CMP"
-    sig_ref = build_signal_ref(symbol=sym)
+    sig_ref = (
+        data.get("signal_ref")
+        or (data.get("metrics") or {}).get("signal_ref")
+        or build_signal_ref(
+            symbol=sym,
+            alert_id=data.get("alert_id", "") or "",
+            created_at=data.get("created_at", "") or "",
+        )
+    )
 
     # ── Lot Size ──────────────────────────────────────────────────────────────
     lot_sz = data.get("lot_size") or metrics.get("lot_size") or act_plan.get("lot_size")
@@ -3775,12 +3803,36 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
         )
     else:
+        base_struct = (
+            act_plan.get("base_structure")
+            or metrics.get("base_structure")
+            or data.get("base_structure")
+            or ""
+        )
+        is_ext = bool(
+            act_plan.get("is_extended") or metrics.get("is_extended") or data.get("is_extended")
+        )
+        ext_pct = float(
+            act_plan.get("extension_pct")
+            or metrics.get("extension_pct")
+            or data.get("extension_pct")
+            or 0.0
+        )
+        struct_tag = f" [{base_struct.replace('_', ' ')}]" if base_struct else ""
+        ext_warning = (
+            f"⚠️ <i>CMP is extended from base (+{ext_pct:.1f}%). Place Limit Order in entry zone — Do NOT Market Buy.</i>\n"
+            if is_ext
+            else ""
+        )
+        act_verb_disp = "BUY (Limit Retest)" if is_ext else "BUY"
+
         msg = (
             f"{header_line}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{spot_ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
             f"{exp_line}"
-            f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code>{lot_beside_p}\n"
+            f"🎯 <b>Action: {act_verb_disp}</b> @ <code>{entry_range}</code>{lot_beside_p}{struct_tag}\n"
+            f"{ext_warning}"
             f"• <b>SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(spot_ltp - sl):,.2f})\n"
             f"• <b>T1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
             f"• <b>T2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"

@@ -12,6 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
       - run: pip install -e '.[dev]'
       - run: python -m pytest tests/test_verified_market_safety.py tests/test_sebi_expiry_mandate_invariants.py tests/test_charges.py tests/test_options.py tests/test_options_iv_provenance.py tests/test_event_volatility.py -q
         env:

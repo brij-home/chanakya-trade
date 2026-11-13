@@ -1804,7 +1804,7 @@ class EODReportGenerator:
         try:
             from market.indices import get_market_snapshot
 
-            snap = get_market_snapshot()
+            snap = get_market_snapshot(extended=False)
             if snap and hasattr(snap, "nifty") and snap.nifty and snap.nifty.ltp > 0:
                 ctx["nifty_ltp"] = snap.nifty.ltp
                 ctx["nifty_change_pct"] = snap.nifty.change_pct
@@ -1873,6 +1873,7 @@ class EODReportGenerator:
         stopped_setups: list[TradeOutcomeSummary],
         tomorrow_day_name: str,
         tomorrow_expiry_index: Optional[str],
+        use_ai: bool = False,
     ) -> Optional[str]:
         """
         Synthesize institutional CIO Executive Debrief using Fast-LLM / Cascading provider.
@@ -1901,7 +1902,7 @@ class EODReportGenerator:
             f"⚡ <b>Tomorrow Blueprint:</b> Focus on relative strength leaders and decoupled sector momentum for {tomorrow_day_name} ({tomorrow_expiry_index or 'Regular'} weekly settlement)."
         )
 
-        if os.environ.get("CHANAKYA_TESTING") == "1":
+        if not use_ai or os.environ.get("CHANAKYA_TESTING") == "1":
             return deterministic_fallback
 
         try:
@@ -1949,7 +1950,7 @@ class EODReportGenerator:
 
         return deterministic_fallback
 
-    def generate(self, target_date: Optional[str] = None) -> EODReport:
+    def generate(self, target_date: Optional[str] = None, use_ai: bool = False) -> EODReport:
         """
         Generate complete institutional EOD report for specified date (default today in IST).
         """
@@ -3155,6 +3156,7 @@ class EODReportGenerator:
             stopped_setups=stopped_setups,
             tomorrow_day_name=tomorrow_day_name,
             tomorrow_expiry_index=tomorrow_expiry_index,
+            use_ai=use_ai,
         )
 
         return EODReport(
@@ -3260,6 +3262,26 @@ class EODReportGenerator:
             logger.error(f"[EODReportGenerator] Failed to save report to disk: {e}")
 
         return json_path, md_path
+
+    def load_from_disk(self, target_date: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """Load pre-generated EOD report JSON and Markdown from disk if available (sub-10ms response)."""
+        now_ist = datetime.now(IST)
+        date_str = target_date or now_ist.strftime("%Y-%m-%d")
+        reports_dir = get_reports_dir()
+        json_path = reports_dir / f"eod_{date_str}.json"
+        md_path = reports_dir / f"eod_{date_str}.md"
+        if json_path.exists():
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {
+                        "status": "ok",
+                        "data": data,
+                        "markdown_path": str(md_path) if md_path.exists() else "",
+                    }
+            except Exception as e:
+                logger.warning(f"[EODReportGenerator] Error reading cached report {json_path}: {e}")
+        return None
 
     def dispatch_to_telegram(
         self,

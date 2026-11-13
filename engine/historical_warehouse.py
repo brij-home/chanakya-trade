@@ -3,16 +3,26 @@ engine/historical_warehouse.py
 ──────────────────────────────
 High-Performance Local Parquet Historical Market Warehouse.
 
-Provides persistent, microsecond-latency local columnar caching for:
-  1. Intraday historical OHLCV bars (1m, 5m, 15m, 60m).
-  2. Daily historical OHLCV bars.
-  3. Historical derivative and expired F&O contract candles.
+Storage model (append-only, bar-keyed):
+  1. Writes are IMMUTABLE SEGMENTS: save_bars() appends a new
+     part-<seq>-p<pid>.parquet under <interval>/<SYMBOL>/. Existing history is
+     never read and rewritten, so the classic read-modify-write lost-update and
+     WinError 32 failure modes do not exist. The write path takes no file lock.
+  2. Compaction merges segments into merged-<gen>.parquet where gen is the
+     highest segment sequence it covers. Readers take the newest merged
+     generation plus only the segments with seq > gen, so a crash between
+     "write merged" and "delete covered segments" cannot double count.
+  3. Legacy single-file layout <interval>/<SYMBOL>.parquet is still read as a
+     read-only base and is never modified.
+
+Durability: every segment is written to a temp file, fsynced and atomically
+renamed, so a reader never observes a partial file.
 
 Architecture:
-  - Columnar Apache Parquet storage with Snappy compression for maximum compression & vectorized I/O.
-  - Delta synchronization: merges new candles with existing bars, deduplicates on timestamp, sorts chronologically.
+  - Columnar Apache Parquet storage with Snappy compression.
+  - Delta synchronization: bars dedupe on the datetime index, newest wins.
   - Timezone Normalization: enforces timezone-naive DatetimeIndex (Invariant 13).
-  - Multi-threaded batch ingestion from active broker (Fyers/AngelOne/Zerodha).
+  - Multi-threaded batch ingestion from the active broker.
 """
 
 from __future__ import annotations
@@ -23,16 +33,24 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any, Optional
 
 import pandas as pd
 
 from config.paths import app_data_path
+from engine.file_lock import file_lock
 
 logger = logging.getLogger("chanakya.historical_warehouse")
 
-# Thread lock for concurrent file operations per symbol/interval
+# Thread lock for concurrent compaction per process.
 _warehouse_lock = threading.Lock()
+
+# Segments per dataset that trigger opportunistic compaction.
+_SEGMENT_COMPACT_THRESHOLD = 3
+
+_BAR_COLUMNS = ["open", "high", "low", "close", "volume"]
+_DAILY_INTERVALS = ("day", "1d", "d", "week", "1w", "month", "1mo", "1m_month")
 
 
 def get_warehouse_dir() -> Path:
@@ -49,51 +67,168 @@ def get_warehouse_dir() -> Path:
     return p
 
 
+def _clean_symbol(symbol: str) -> str:
+    return (
+        symbol.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .replace("/", "_")
+        .strip()
+    )
+
+
 class HistoricalWarehouse:
-    """
-    Local Columnar Parquet Market Warehouse for high-speed quant backtesting & scanning.
-    """
+    """Append-only columnar bar warehouse with generation-based compaction."""
 
     def __init__(self, base_dir: Optional[Path] = None):
         self.base_dir = base_dir or get_warehouse_dir()
+        self._seq_lock = threading.Lock()
+        self._last_seq = 0
+
+    # ── Paths ────────────────────────────────────────────────────────────────
+    def _interval_key(self, interval: str) -> str:
+        return str(interval).lower().replace("minute", "m")
+
+    def _legacy_path(self, symbol: str, interval: str) -> Path:
+        """Legacy single-file location (read-only base for pre-segment data)."""
+        folder = self.base_dir / self._interval_key(interval)
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"{_clean_symbol(symbol)}.parquet"
 
     def _get_file_path(self, symbol: str, interval: str) -> Path:
-        clean_sym = (
-            symbol.upper()
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("NFO:", "")
-            .replace("MCX:", "")
-            .replace("/", "_")
-            .strip()
+        """Backwards-compatible alias for the legacy base path."""
+        return self._legacy_path(symbol, interval)
+
+    def _dataset_dir(self, symbol: str, interval: str) -> Path:
+        """Directory holding immutable segments for one symbol/interval."""
+        return self.base_dir / self._interval_key(interval) / _clean_symbol(symbol)
+
+    # ── Segment sequencing ───────────────────────────────────────────────────
+    def _next_seq(self, min_exclusive: int = 0) -> int:
+        """Strictly increasing sequence that always clears the given watermark.
+
+        Readers only see segments with seq > merged generation, so a segment
+        stamped below the watermark (clock rollback) would be invisible forever.
+        """
+        with self._seq_lock:
+            seq = max(time.time_ns(), self._last_seq + 1, min_exclusive + 1)
+            self._last_seq = seq
+            return seq
+
+    @staticmethod
+    def _parse_seq(path: Path) -> int:
+        stem = path.name[: -len(".parquet")]
+        try:
+            head = stem.split("-", 1)[1]
+            return int(head.split("-", 1)[0])
+        except (IndexError, ValueError):
+            return -1
+
+    def _latest_merged(self, dataset_dir: Path) -> tuple[int, Optional[Path]]:
+        if not dataset_dir.exists():
+            return 0, None
+        best_gen, best_path = 0, None
+        for p in dataset_dir.glob("merged-*.parquet"):
+            gen = self._parse_seq(p)
+            if gen > best_gen:
+                best_gen, best_path = gen, p
+        return best_gen, best_path
+
+    def _visible_segments(self, dataset_dir: Path, merged_gen: int) -> list[Path]:
+        if not dataset_dir.exists():
+            return []
+        return sorted(
+            (p for p in dataset_dir.glob("part-*.parquet") if self._parse_seq(p) > merged_gen),
+            key=self._parse_seq,
         )
-        norm_inv = interval.lower().replace("minute", "m")
-        folder = self.base_dir / norm_inv
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder / f"{clean_sym}.parquet"
 
-    def save_bars(
-        self,
-        symbol: str,
-        interval: str,
-        df: pd.DataFrame,
-        provider: str = "fyers",
-    ) -> int:
+    # ── Durable IO ───────────────────────────────────────────────────────────
+    def _write_frame_atomic(self, df: pd.DataFrame, target: Path) -> None:
+        """Write a dataframe durably: temp file -> fsync -> atomic rename."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            with open(temp, "wb") as fh:
+                df.to_parquet(fh, compression="snappy")
+                fh.flush()
+                os.fsync(fh.fileno())
+            for attempt in range(5):
+                try:
+                    os.replace(temp, target)
+                    break
+                except (PermissionError, OSError) as e_replace:
+                    if attempt == 4:
+                        logger.error(
+                            f"[HistoricalWarehouse] Atomic replace failed for {target}: {e_replace}"
+                        )
+                        raise
+                    time.sleep(0.05 * (2**attempt))
+        finally:
+            if temp.exists():
+                try:
+                    temp.unlink()
+                except OSError as e_cleanup:
+                    logger.debug(
+                        f"[HistoricalWarehouse] Temp cleanup deferred for {temp.name}: {e_cleanup}"
+                    )
+
+    def _read_parquet_with_retry(
+        self, file_path: Path, max_retries: int = 5
+    ) -> Optional[pd.DataFrame]:
+        """Reads a parquet file with retry for Windows sharing violations.
+
+        A transient external lock (antivirus, indexer, another reader) raises
+        PermissionError/OSError on Windows; those are retried with backoff and
+        then re-raised so callers never mistake a lock for corruption.
+        If the file was removed/absorbed concurrently by compaction, returns None.
         """
-        Saves or merges OHLCV bars into the local parquet warehouse.
-        Deduplicates on datetime index, sorts ascending, and writes atomically.
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            if not file_path.exists():
+                return None
+            try:
+                return pd.read_parquet(file_path)
+            except FileNotFoundError:
+                # Concurrently unlinked by compaction
+                return None
+            except (PermissionError, OSError) as e:
+                # If file disappeared during the read attempt, treat as unlinked
+                if not file_path.exists():
+                    return None
+                last_error = e
+                if attempt < max_retries - 1:
+                    time.sleep(0.05 * (2**attempt))
+                    continue
+                logger.warning(
+                    f"[HistoricalWarehouse] File locked beyond retry budget: {file_path} ({e})"
+                )
+                raise
+        raise last_error if last_error else RuntimeError("unreachable")
 
-        Returns:
-            int: Total count of bars persisted in the warehouse file.
-        """
-        if df is None or df.empty:
-            return 0
+    def _read_safely(self, file_path: Path) -> Optional[pd.DataFrame]:
+        """Best-effort read for the query path: returns None and logs on failure."""
+        if not file_path.exists():
+            return None
+        try:
+            return self._read_parquet_with_retry(file_path)
+        except FileNotFoundError:
+            return None
+        except Exception as e_read:
+            # If the file was unlinked while attempting to read, it was superseded by compaction
+            if not file_path.exists():
+                return None
+            logger.warning(
+                f"[HistoricalWarehouse] Skipping unreadable file {file_path.name}: {e_read}"
+            )
+            return None
 
-        # Normalize column names to lowercase
+    # ── Normalization ────────────────────────────────────────────────────────
+    def _normalize(self, df: pd.DataFrame, interval: str) -> pd.DataFrame:
         norm_df = df.copy()
         norm_df.columns = [str(c).lower() for c in norm_df.columns]
 
-        # Ensure datetime index
         if "date" in norm_df.columns and not isinstance(norm_df.index, pd.DatetimeIndex):
             norm_df["date"] = pd.to_datetime(norm_df["date"])
             norm_df = norm_df.set_index("date")
@@ -101,66 +236,206 @@ class HistoricalWarehouse:
         if not isinstance(norm_df.index, pd.DatetimeIndex):
             norm_df.index = pd.to_datetime(norm_df.index)
 
-        # Enforce timezone-naive index per Invariant 13: normalize to Asia/Kolkata first if tz-aware
         if norm_df.index.tz is not None:
             norm_df.index = norm_df.index.tz_convert("Asia/Kolkata").tz_localize(None)
 
-        # Conditionally heal any unshifted UTC bars (hour < 9) to Asia/Kolkata (+5:30)
         norm_inv = str(interval).lower()
-        if norm_inv not in ("day", "1d", "d", "week", "1w", "month", "1mo") and not norm_df.empty:
+        if norm_inv not in _DAILY_INTERVALS and not norm_df.empty:
             mask = norm_df.index.hour < 9
             if mask.any():
                 norm_df.index = norm_df.index.where(
                     ~mask, norm_df.index + pd.Timedelta(hours=5, minutes=30)
                 )
 
-        # Required columns
         for req in ("open", "high", "low", "close"):
             if req not in norm_df.columns:
                 raise ValueError(f"Missing required OHLCV column '{req}' in dataframe")
         if "volume" not in norm_df.columns:
             norm_df["volume"] = 0
 
-        keep_cols = [c for c in ("open", "high", "low", "close", "volume") if c in norm_df.columns]
-        norm_df = norm_df[keep_cols]
+        return norm_df[_BAR_COLUMNS]
 
-        file_path = self._get_file_path(symbol, interval)
+    # ── Read model ───────────────────────────────────────────────────────────
+    def _frame(self, symbol: str, interval: str) -> pd.DataFrame:
+        """Assembles legacy base + newest merged generation + live segments."""
+        dataset_dir = self._dataset_dir(symbol, interval)
+        merged_gen, merged_path = self._latest_merged(dataset_dir)
+
+        frames: list[pd.DataFrame] = []
+
+        legacy = self._read_safely(self._legacy_path(symbol, interval))
+        if legacy is not None and not legacy.empty:
+            frames.append(legacy)
+
+        if merged_path is not None:
+            merged = self._read_safely(merged_path)
+            if merged is not None and not merged.empty:
+                frames.append(merged)
+
+        for part in self._visible_segments(dataset_dir, merged_gen):
+            segment = self._read_safely(part)
+            if segment is not None and not segment.empty:
+                frames.append(segment)
+
+        if not frames:
+            return pd.DataFrame()
+
+        combined = frames[0] if len(frames) == 1 else pd.concat(frames)
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined = combined[[c for c in _BAR_COLUMNS if c in combined.columns]]
+        return combined.sort_index()
+
+    # ── Write path ───────────────────────────────────────────────────────────
+    def save_bars(
+        self,
+        symbol: str,
+        interval: str,
+        df: pd.DataFrame,
+        provider: str = "fyers",
+    ) -> int:
+        """Appends bars as an immutable segment and returns the dataset row count."""
+        if df is None or df.empty:
+            return 0
+
+        norm_df = self._normalize(df, interval)
+        norm_df = norm_df[~norm_df.index.duplicated(keep="last")].sort_index()
+        if norm_df.empty:
+            return 0
+
+        dataset_dir = self._dataset_dir(symbol, interval)
+        merged_gen, _ = self._latest_merged(dataset_dir)
+        seq = self._next_seq(merged_gen)
+        target = dataset_dir / f"part-{seq:020d}-p{os.getpid()}.parquet"
+        self._write_frame_atomic(norm_df, target)
+
+        if self._count_segments(symbol, interval) >= _SEGMENT_COMPACT_THRESHOLD:
+            try:
+                self.compact(symbol, interval, lock_timeout_s=0.5)
+            except Exception as e_compact:
+                logger.warning(
+                    f"[HistoricalWarehouse] Opportunistic compaction failed for "
+                    f"{symbol} {interval}: {e_compact}"
+                )
+
+        # The segment is already durable. Row counting is best-effort: a locked
+        # or unreadable file must never turn a successful write into an error.
+        try:
+            total = len(self._frame(symbol, interval))
+        except Exception as e_count:
+            logger.warning(
+                f"[HistoricalWarehouse] Row count unavailable for {symbol} "
+                f"{interval} (write succeeded): {e_count}"
+            )
+            total = 0
+        # When history cannot be read right now, report what this call wrote.
+        return total if total > 0 else len(norm_df)
+
+    # ── Compaction ───────────────────────────────────────────────────────────
+    def _count_segments(self, symbol: str, interval: str) -> int:
+        dataset_dir = self._dataset_dir(symbol, interval)
+        merged_gen, _ = self._latest_merged(dataset_dir)
+        return len(self._visible_segments(dataset_dir, merged_gen))
+
+    def compact(self, symbol: str, interval: str, lock_timeout_s: float = 2.0) -> int:
+        """Merges visible segments into merged-<gen>.parquet. Returns count absorbed."""
+        dataset_dir = self._dataset_dir(symbol, interval)
+        if not dataset_dir.exists():
+            return 0
 
         with _warehouse_lock:
-            if file_path.exists():
-                try:
-                    existing_df = pd.read_parquet(file_path)
-                    if existing_df.index.tz is not None:
-                        existing_df.index = existing_df.index.tz_convert(
-                            "Asia/Kolkata"
-                        ).tz_localize(None)
-                    if (
-                        norm_inv not in ("day", "1d", "d", "week", "1w", "month", "1mo")
-                        and not existing_df.empty
-                    ):
-                        e_mask = existing_df.index.hour < 9
-                        if e_mask.any():
-                            existing_df.index = existing_df.index.where(
-                                ~e_mask, existing_df.index + pd.Timedelta(hours=5, minutes=30)
-                            )
-                    # Combine existing and new bars, deduplicating on timestamp (preferring new data)
-                    combined = pd.concat([existing_df, norm_df])
-                    combined = combined[~combined.index.duplicated(keep="last")]
-                    combined.sort_index(inplace=True)
-                except Exception as e:
+            with file_lock(
+                dataset_dir / "compact",
+                timeout_s=lock_timeout_s,
+                raise_on_timeout=False,
+            ) as got:
+                if not got:
                     logger.warning(
-                        f"[HistoricalWarehouse] Corrupted parquet read for {symbol}, overwriting: {e}"
+                        f"[HistoricalWarehouse] Compaction skipped for {symbol} "
+                        f"{interval}: lock busy"
                     )
-                    combined = norm_df[~norm_df.index.duplicated(keep="last")].sort_index()
-            else:
-                combined = norm_df[~norm_df.index.duplicated(keep="last")].sort_index()
+                    return 0
 
-            # Atomic write via temp file
-            temp_path = file_path.with_suffix(".tmp.parquet")
-            combined.to_parquet(temp_path, compression="snappy")
-            temp_path.replace(file_path)
-            return len(combined)
+                merged_gen, merged_path = self._latest_merged(dataset_dir)
+                segments = self._visible_segments(dataset_dir, merged_gen)
+                if not segments and merged_path is None:
+                    return 0
 
+                frames: list[pd.DataFrame] = []
+                absorbed: list[Path] = []
+                if merged_path is not None:
+                    current = self._read_safely(merged_path)
+                    if current is None:
+                        logger.warning(
+                            f"[HistoricalWarehouse] Compaction skipped for {symbol} "
+                            f"{interval}: merged generation unreadable"
+                        )
+                        return 0
+                    frames.append(current)
+
+                # Watermark invariant: merged-<gen> holds every segment with
+                # seq <= gen, so only a contiguous ascending prefix may absorb.
+                new_gen = merged_gen
+                for segment in segments:
+                    frame = self._read_safely(segment)
+                    if frame is None:
+                        logger.warning(
+                            f"[HistoricalWarehouse] Compaction stopped before "
+                            f"{segment.name} (unreadable); it stays visible"
+                        )
+                        break
+                    frames.append(frame)
+                    absorbed.append(segment)
+                    new_gen = self._parse_seq(segment)
+
+                if not absorbed:
+                    return 0
+
+                combined = frames[0] if len(frames) == 1 else pd.concat(frames)
+                combined = combined[~combined.index.duplicated(keep="last")]
+                combined = combined[[c for c in _BAR_COLUMNS if c in combined.columns]]
+                combined = combined.sort_index()
+
+                out_path = dataset_dir / f"merged-{new_gen:020d}.parquet"
+                self._write_frame_atomic(combined, out_path)
+
+                removed = 0
+                for segment in absorbed:
+                    try:
+                        segment.unlink(missing_ok=True)
+                        removed += 1
+                    except OSError as e_unlink:
+                        logger.warning(
+                            f"[HistoricalWarehouse] Could not delete merged segment "
+                            f"{segment.name}: {e_unlink}"
+                        )
+                if merged_path is not None and merged_path != out_path:
+                    try:
+                        merged_path.unlink(missing_ok=True)
+                    except OSError as e_unlink:
+                        logger.warning(
+                            f"[HistoricalWarehouse] Could not delete superseded merged "
+                            f"generation {merged_path.name}: {e_unlink}"
+                        )
+                return removed
+
+    def compact_all(self) -> int:
+        """Compacts every dataset with pending segments. Returns segments absorbed."""
+        total = 0
+        for symbol_dir in sorted(self.base_dir.glob("*/*")):
+            if not symbol_dir.is_dir():
+                continue
+            interval = symbol_dir.parent.name
+            try:
+                if self._count_segments(symbol_dir.name, interval) >= 2:
+                    total += self.compact(symbol_dir.name, interval, lock_timeout_s=0.5)
+            except Exception as e_compact:
+                logger.warning(
+                    f"[HistoricalWarehouse] Compact-all skipped "
+                    f"{symbol_dir.name}/{interval}: {e_compact}"
+                )
+        return total
+
+    # ── Query path ───────────────────────────────────────────────────────────
     def load_bars(
         self,
         symbol: str,
@@ -169,22 +444,18 @@ class HistoricalWarehouse:
         to_date: Optional[datetime] = None,
         days: Optional[int] = None,
     ) -> pd.DataFrame:
-        """
-        Loads OHLCV bars from local parquet warehouse in < 5ms.
+        """Loads OHLCV bars from the local warehouse.
 
         Returns:
-            pd.DataFrame: Sliced dataframe with timezone-naive DatetimeIndex, or empty DataFrame.
+            pd.DataFrame: Sliced dataframe with timezone-naive DatetimeIndex, or empty.
         """
-        file_path = self._get_file_path(symbol, interval)
-        if not file_path.exists():
+        try:
+            df = self._frame(symbol, interval)
+        except Exception as e_frame:
+            logger.warning(
+                f"[HistoricalWarehouse] Frame assembly failed for {symbol} {interval}: {e_frame}"
+            )
             return pd.DataFrame()
-
-        with _warehouse_lock:
-            try:
-                df = pd.read_parquet(file_path)
-            except Exception as e:
-                logger.debug(f"[HistoricalWarehouse] Error loading {file_path}: {e}")
-                return pd.DataFrame()
 
         if df.empty:
             return df
@@ -192,17 +463,12 @@ class HistoricalWarehouse:
         if df.index.tz is not None:
             df.index = df.index.tz_convert("Asia/Kolkata").tz_localize(None)
 
-        # Conditionally auto-heal legacy parquet files where intraday bars were written with raw UTC hours (< 9)
         norm_inv = str(interval).lower()
-        if (
-            norm_inv not in ("day", "1d", "d", "week", "1w", "month", "1mo", "1m_month")
-            and not df.empty
-        ):
+        if norm_inv not in _DAILY_INTERVALS and not df.empty:
             mask = df.index.hour < 9
             if mask.any():
                 df.index = df.index.where(~mask, df.index + pd.Timedelta(hours=5, minutes=30))
 
-        # Apply slicing
         if from_date or to_date:
             start = from_date.replace(tzinfo=None) if from_date else df.index[0]
             end = to_date.replace(tzinfo=None) if to_date else df.index[-1]
@@ -215,10 +481,9 @@ class HistoricalWarehouse:
             sliced = df.loc[cutoff:]
             if not sliced.empty:
                 return sliced.copy()
-            # If dates don't align (e.g. historical data slice requested by days), return tail bars
             bars_to_take = min(
                 len(df),
-                max(10, days * (75 if interval.lower() not in ("day", "1d", "d") else 1)),
+                max(10, days * (75 if norm_inv not in _DAILY_INTERVALS else 1)),
             )
             return df.iloc[-bars_to_take:].copy()
 
@@ -226,13 +491,12 @@ class HistoricalWarehouse:
 
     def has_bars(self, symbol: str, interval: str = "day", min_bars: int = 10) -> bool:
         """Checks if a valid dataset exists locally for the given symbol and interval."""
-        file_path = self._get_file_path(symbol, interval)
-        if not file_path.exists():
-            return False
         try:
-            df = self.load_bars(symbol, interval=interval)
-            return len(df) >= min_bars
-        except Exception:
+            return len(self.load_bars(symbol, interval=interval)) >= min_bars
+        except Exception as e_check:
+            logger.debug(
+                f"[HistoricalWarehouse] has_bars check failed for {symbol} {interval}: {e_check}"
+            )
             return False
 
     def sync_symbol_from_broker(
@@ -244,9 +508,7 @@ class HistoricalWarehouse:
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
     ) -> int:
-        """
-        Synchronizes historical candles from the active data broker into the local warehouse.
-        """
+        """Synchronizes historical candles from the active data broker."""
         try:
             from brokers.session import get_data_broker, get_data_broker_key
 
@@ -290,7 +552,7 @@ class HistoricalWarehouse:
         days: int = 10,
         max_workers: int = 4,
     ) -> dict[str, int]:
-        """Concurrently syncs an entire list of symbols into the local warehouse."""
+        """Concurrently syncs a list of symbols into the local warehouse."""
         results: dict[str, int] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sym = {
@@ -306,8 +568,7 @@ class HistoricalWarehouse:
             for future in concurrent.futures.as_completed(future_to_sym):
                 sym = future_to_sym[future]
                 try:
-                    count = future.result()
-                    results[sym] = count
+                    results[sym] = future.result()
                 except Exception as e:
                     logger.debug(f"[HistoricalWarehouse] Error in sync task for {sym}: {e}")
                     results[sym] = 0
@@ -315,10 +576,11 @@ class HistoricalWarehouse:
 
     def get_warehouse_stats(self) -> dict[str, Any]:
         """Returns storage metrics and inventory of the local warehouse."""
-        stats = {
+        stats: dict[str, Any] = {
             "total_files": 0,
             "total_size_mb": 0.0,
             "intervals": {},
+            "storage_model": "append_only_segments",
         }
         if not self.base_dir.exists():
             return stats
@@ -326,9 +588,11 @@ class HistoricalWarehouse:
         total_bytes = 0
         for p in self.base_dir.rglob("*.parquet"):
             stats["total_files"] += 1
-            sz = p.stat().st_size
-            total_bytes += sz
-            inv = p.parent.name
+            total_bytes += p.stat().st_size
+            try:
+                inv = p.relative_to(self.base_dir).parts[0]
+            except ValueError:
+                inv = p.parent.name
             stats["intervals"][inv] = stats["intervals"].get(inv, 0) + 1
 
         stats["total_size_mb"] = round(total_bytes / (1024 * 1024), 2)

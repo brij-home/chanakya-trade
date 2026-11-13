@@ -140,6 +140,7 @@ def evaluate_institutional_quality_gate(
     direction = str(getattr(alert, "direction", "BULLISH") or "BULLISH").upper()
     is_bullish = direction not in ("BEARISH", "SHORT", "SELL")
     c_sym = str(getattr(alert, "contract_symbol", "") or "").upper()
+    deriv_type = str(getattr(alert, "derivative_type", "") or "").upper()
     is_opt = bool(
         (getattr(alert, "option_type", None) in ("CE", "PE"))
         or getattr(alert, "strike", None)
@@ -148,6 +149,17 @@ def evaluate_institutional_quality_gate(
     )
     act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
     is_opt_sell = is_opt and any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+    plan_dict = getattr(alert, "actionable_plan", {}) or {}
+    metrics_d = getattr(alert, "metrics", {}) or {}
+
+    is_spread = bool(
+        deriv_type in ("SPREAD", "MULTI_LEG", "IRON_CONDOR", "CREDIT_SPREAD")
+        or direction == "NEUTRAL"
+        or getattr(alert, "alert_type", "") in ("DEFINED_RISK_NEUTRAL", "IRON_CONDOR")
+        or bool(getattr(alert, "hedged_spread", None))
+        or bool(plan_dict.get("hedged_spread"))
+        or plan_dict.get("preferred_vehicle") in ("DEFINED_RISK_SPREAD", "SPREAD")
+    )
 
     if ref_dt is None:
         try:
@@ -219,26 +231,88 @@ def evaluate_institutional_quality_gate(
                 target2 = None
 
     # ── 2. Check 1: Headroom & Structural R:R Floor (R:R >= 1:2.0 Floor) ───────
-    # If alert has underlying spot/stop/target metrics (e.g. from an enriched option setup),
-    # evaluate underlying structural R:R first to enforce institutional headroom integrity.
-    metrics_d = getattr(alert, "metrics", {}) or {}
-    if isinstance(metrics_d, dict):
-        u_spot = float(metrics_d.get("underlying_spot") or 0.0)
-        u_sl = float(metrics_d.get("underlying_sl") or 0.0)
-        u_t1 = float(metrics_d.get("underlying_target") or 0.0)
-        u_t2_raw = metrics_d.get("underlying_target_2")
-        if u_spot > 0 and u_sl > 0 and (u_t1 > 0 or u_t2_raw):
-            u_stop_dist = abs(u_spot - u_sl)
-            if u_stop_dist > 0:
-                u_t1_dist = abs(u_t1 - u_spot) if u_t1 > 0 else 0.0
-                u_t2_dist = abs(float(u_t2_raw) - u_spot) if u_t2_raw else (u_t1_dist * 2.0)
-                u_rr_t2 = round(u_t2_dist / u_stop_dist, 2)
-                if u_rr_t2 < 1.8:
-                    verdict_metrics["rr_t1"] = round(u_t1_dist / u_stop_dist, 2)
-                    verdict_metrics["rr_t2"] = u_rr_t2
+    if is_spread:
+        # For hedged multi-leg spreads (e.g. Iron Condors, Credit Spreads, Neutral Harvesters),
+        # risk-reward is governed by net credit vs max wing risk, not directional spot breakout distance.
+        spread_rr = float(
+            (metrics_d.get("risk_reward_ratio") if isinstance(metrics_d, dict) else None)
+            or (
+                ((getattr(alert, "actionable_plan", {}) or {}).get("hedged_spread") or {}).get(
+                    "risk_reward_ratio"
+                )
+            )
+            or 0.0
+        )
+        if spread_rr <= 0 and isinstance(metrics_d, dict):
+            max_p = float(metrics_d.get("max_profit") or 0.0)
+            max_l = float(metrics_d.get("max_loss") or 0.0)
+            if max_l > 0:
+                spread_rr = round(max_p / max_l, 2)
+            elif max_p > 0:
+                spread_rr = 2.0
+
+        if spread_rr > 0 and spread_rr < 0.60:
+            verdict_metrics["spread_rr"] = spread_rr
+            return VetoVerdict(
+                is_vetoed=True,
+                veto_reason=f"Poor Spread R:R: Risk/Reward ratio {spread_rr:.2f} is below 0.60 floor for defined-risk multi-leg spread.",
+                execution_mandate="VETOED",
+                conviction_tier="REJECTED",
+                metrics=verdict_metrics,
+                coaching_notes=[
+                    "Multi-leg wing spacing or net credit is insufficient relative to capital at risk.",
+                    "Widen short strikes or select higher implied volatility contracts.",
+                ],
+            )
+        eff_rr = spread_rr if spread_rr > 0 else 1.8
+        verdict_metrics["spread_rr"] = eff_rr
+        verdict_metrics["rr_t1"] = eff_rr
+        verdict_metrics["rr_t2"] = eff_rr
+    else:
+        # If alert has underlying spot/stop/target metrics (e.g. from an enriched option setup),
+        # evaluate underlying structural R:R first to enforce institutional headroom integrity.
+        if isinstance(metrics_d, dict):
+            u_spot = float(metrics_d.get("underlying_spot") or 0.0)
+            u_sl = float(metrics_d.get("underlying_sl") or 0.0)
+            u_t1 = float(metrics_d.get("underlying_target") or 0.0)
+            u_t2_raw = metrics_d.get("underlying_target_2")
+            if u_spot > 0 and u_sl > 0 and (u_t1 > 0 or u_t2_raw):
+                u_stop_dist = abs(u_spot - u_sl)
+                if u_stop_dist > 0:
+                    u_t1_dist = abs(u_t1 - u_spot) if u_t1 > 0 else 0.0
+                    u_t2_dist = abs(float(u_t2_raw) - u_spot) if u_t2_raw else (u_t1_dist * 2.0)
+                    u_rr_t2 = round(u_t2_dist / u_stop_dist, 2)
+                    if u_rr_t2 < 1.8:
+                        verdict_metrics["rr_t1"] = round(u_t1_dist / u_stop_dist, 2)
+                        verdict_metrics["rr_t2"] = u_rr_t2
+                        return VetoVerdict(
+                            is_vetoed=True,
+                            veto_reason=f"Poor Structural R:R: Target 2 provides only {u_rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {u_stop_dist:,.1f} pts.",
+                            execution_mandate="VETOED",
+                            conviction_tier="REJECTED",
+                            metrics=verdict_metrics,
+                            coaching_notes=[
+                                "Overhead resistance is too close relative to required stop distance.",
+                                "Skip setup or restructure as defined-risk credit spread.",
+                            ],
+                        )
+
+        if entry and stop and target1 and entry > 0 and stop > 0 and target1 > 0:
+            stop_dist = abs(entry - stop)
+            t1_dist = abs(target1 - entry)
+            t2_dist = abs(target2 - entry) if target2 and target2 > 0 else (t1_dist * 2.0)
+
+            if stop_dist > 0:
+                rr_t1 = round(t1_dist / stop_dist, 2)
+                rr_t2 = round(t2_dist / stop_dist, 2)
+                verdict_metrics["rr_t1"] = rr_t1
+                verdict_metrics["rr_t2"] = rr_t2
+
+                # Hard Veto: If primary target provides < 1.0R and T2 provides < 1.8R, R:R is unviable
+                if rr_t2 < 1.8:
                     return VetoVerdict(
                         is_vetoed=True,
-                        veto_reason=f"Poor Structural R:R: Target 2 provides only {u_rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {u_stop_dist:,.1f} pts.",
+                        veto_reason=f"Poor Structural R:R: Target 2 provides only {rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {stop_dist:,.1f} pts.",
                         execution_mandate="VETOED",
                         conviction_tier="REJECTED",
                         metrics=verdict_metrics,
@@ -248,36 +322,11 @@ def evaluate_institutional_quality_gate(
                         ],
                     )
 
-    if entry and stop and target1 and entry > 0 and stop > 0 and target1 > 0:
-        stop_dist = abs(entry - stop)
-        t1_dist = abs(target1 - entry)
-        t2_dist = abs(target2 - entry) if target2 and target2 > 0 else (t1_dist * 2.0)
-
-        if stop_dist > 0:
-            rr_t1 = round(t1_dist / stop_dist, 2)
-            rr_t2 = round(t2_dist / stop_dist, 2)
-            verdict_metrics["rr_t1"] = rr_t1
-            verdict_metrics["rr_t2"] = rr_t2
-
-            # Hard Veto: If primary target provides < 1.0R and T2 provides < 1.8R, R:R is unviable
-            if rr_t2 < 1.8:
-                return VetoVerdict(
-                    is_vetoed=True,
-                    veto_reason=f"Poor Structural R:R: Target 2 provides only {rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {stop_dist:,.1f} pts.",
-                    execution_mandate="VETOED",
-                    conviction_tier="REJECTED",
-                    metrics=verdict_metrics,
-                    coaching_notes=[
-                        "Overhead resistance is too close relative to required stop distance.",
-                        "Skip setup or restructure as defined-risk credit spread.",
-                    ],
-                )
-
-            # Barrier Proximity Warning: T1 provides modest headroom (< 1.5R) -> Mandate spread
-            if rr_t1 < 1.5 and is_opt and not is_opt_sell:
-                notes.append(
-                    f"Overhead barrier proximity: Target 1 headroom is {rr_t1:.1f}R (< 1.5R). Defined-risk spread mandated to monetize resistance."
-                )
+                # Barrier Proximity Warning: T1 provides modest headroom (< 1.5R) -> Mandate spread
+                if rr_t1 < 1.5 and is_opt and not is_opt_sell:
+                    notes.append(
+                        f"Overhead barrier proximity: Target 1 headroom is {rr_t1:.1f}R (< 1.5R). Defined-risk spread mandated to monetize resistance."
+                    )
 
     # ── 3. Check 2: Time-of-Day Theta Trap & EOD Filters ─────────────────────
     exch_str = str(getattr(alert, "exchange", "NSE") or "NSE").upper()

@@ -193,13 +193,13 @@
    - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_HOME`, and multi-environment portability.
 
 31. **Stale Assumption Elimination & Market Master Authority (October 2026 Mandate)**:
-   - System components, detectors, risk planners, and backtest engines MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot size 50/25, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Oct 2024 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
+   - System components, detectors, risk planners, backtest engines, and AI conversational explanations MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot sizes 75/50/25, legacy Sensex lot size 10, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Oct 2024 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
    - All instrument specifications, lot sizes, tick sizes, expiry structures, statutory charges, and circuit boundaries MUST resolve exclusively from canonical SSOT modules:
-     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES`
+     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES` (Active: NIFTY 65, BANKNIFTY 30, FINNIFTY 60, MIDCPNIFTY 120, SENSEX 20, BANKEX 30)
      - Expiry architecture & single-weekly index rule: `engine.alert_expiry.classify_expiry_type`
      - Nominal price tiers & dynamic risk clamping: `engine.dynamic_risk.resolve_price_tier` and `clamp_dynamic_risk`
      - Statutory taxes & STT schedule: `engine.charges.calculate_charges`
-   - Zero ad-hoc local guesswork or legacy pre-2024 heuristics permitted anywhere in code or AI agent logic.
+   - Zero ad-hoc local guesswork or legacy pre-2024 heuristics permitted anywhere in code, tests, docstrings, or AI conversational examples.
 
 32. **Timeframe-Agnostic & Adaptive Risk Invariant**:
    - All risk calculations, stop-loss floors, volatility buffers, and target expansions MUST be strictly timeframe-agnostic and adapt dynamically to the intended trade horizon:
@@ -306,14 +306,41 @@
     - Once price has penetrated to the opposite side of VWAP, the mean-reversion setup is complete; entering there is chasing an extended move at the worst possible level (buying puts at the bottom or calls at the top).
     - Reversals must be caught early ($0.08\% \le \text{retreat} \le 0.35\%$ off the extreme). If price has already retreated $> 0.35\%$ (e.g. $> 80$ pts on Nifty), the entry is late and must be rejected to prevent immediate stop-loss whipsaw.
 
-48. **Fyers Prime Level-3 TBT Pinned Channel Partitioning & 15-Slot Utilization**:
-    - Fyers Level-3 Tick-by-Tick (TBT) 50-depth WebSocket supports up to 15 concurrent symbols under Fyers Prime, partitioned strictly across 3 physical connections/workers (max 5 symbols per connection).
-    - The TBT manager (`market/fyers_tbt_manager.py`) must enforce deterministic Slot-to-Worker Pinned Partitioning:
-      - Slots 0..4 $\implies$ Worker 0 (In-Flight Guardians + Anchor Futures: NIFTY, BANKNIFTY, MIDCPNIFTY)
-      - Slots 5..9 $\implies$ Worker 1 (Core Grid, Revolving ATM Options & Primary Sector Scouts)
-      - Slots 10..14 $\implies$ Worker 2 (Secondary Sector Scouts & JIT Alert Candidates)
-    - **Prime Invariant & Zero-Throttling Contract**: Under `FYERS_PLAN=PRIME`, all 3 workers must be active during derivative market sessions (`workers_active == 3`, `active_total == 15`). NEVER set `FYERS_TBT_WORKERS=1` in `.env` or operational configurations on a Prime account.
-    - **Self-Healing Entitlement & Dynamic Recovery**: Transient broker 429 rate-limits must use bounded probation (e.g. 15m), NEVER permanently downgrading a Prime account to single-socket mode. The connection pool sentinel and `rebalance_grid_now()` must continuously probe and recover quiescent workers.
+48. **Verified Broker Data Realities & Zero Hallucinated Infrastructure Contract**:
+    - **Fyers Prime Tier Capabilities (`FYERS_PLAN=PRIME`)**:
+      - **Data Socket Capacity**: Up to **5,000 concurrent streaming symbols** (standard tier is capped at 100 symbols). This enables subscribing to the entire 180+ F&O stock universe, benchmark indices, and ATM options chain simultaneously.
+      - **Bulk Quotes API**: Up to **1,000 symbols per REST request** (standard tier is capped at 50) and 500,000 requests/day (10 req/s, 500 req/min).
+      - **Level-3 50-Depth TBT Socket**: Strictly supports up to **15 concurrent symbols** partitioned across 3 physical connections/workers (5 symbols per socket). Supported on **NSE CM & NFO only**; does NOT support BSE (SENSEX/BANKEX) or MCX.
+    - **Banned Broker Assumptions**:
+      - NEVER assume Fyers or Flattrade provides dedicated real-time Market Breadth, Sector Heatmap, or Pre-Calculated Sentiment APIs. Neither broker calculates these server-side.
+      - NEVER assume Fyers TBT 50-depth extends to the entire universe or covers BSE/MCX. Core trade decisions, stop-loss calculations, and alert filtering must operate robustly on standard streaming ticks and never hard-block if TBT is unavailable on non-NSE symbols.
+    - **Mandatory In-RAM Computation Invariant**:
+      - All market breadth (% above/below VWAP, advances/declines, AD ratio) and sector heatmaps MUST be computed strictly in-memory by `MarketMatrix` (`engine/market_matrix.py`), leveraged by Fyers Prime's 5,000-symbol streaming capacity.
+      - When Flattrade WebSocket is active, consume `ap` (session VWAP), `tbq` (total buy qty), `tsq` (total sell qty), `lp`, and `v` directly into `MarketMatrix.on_tick()`.
+    - **Zero-Tolerance for Theoretical Features**: Real capital is at risk. Always distinguish between what is physically active on your subscription vs theoretical marketing brochures. If a data point is not verified in live ticks or exchange masters, fall back to fail-closed deterministic quantitative models.
+
+49. **Institutional Quantitative Metric Hierarchy & Anti-Oversimplification Protocol**:
+    - **No Crude "rvol" Assumptions**: Never use unadjusted full-day cumulative volume (`vol / avg_20d`) for intraday session gates before 14:00 IST. At 09:30 AM, cumulative volume is naturally only ~15% of daily volume; using raw unadjusted RVOL guarantees catastrophic false negative rejections.
+    - **The 4 Explicit Volume Domains & Their Mandatory Applications**:
+      1. **Time-of-Day RVOL (`tod_rvol`)**: Computes `current_vol / (avg_daily_vol * expected_volume_fraction(t))` via `compute_time_of_day_rvol()`. Mandatory for session time gates (Morning Reversal Zone 10:15–11:00, Midday Lull 11:30–13:15, and radar screening).
+      2. **Bar Impulse RVOL (`bar_rvol`)**: Computes `max(candle_v / ma_5, candle_v / ma_20)` on 5m/15m OHLCV via `compute_institutional_volume_profile()`. Mandatory for breakout thrust candles, liquidity sweeps, SFP retests, and sudden volatility expansions. A $3.0\times$ 5-bar impulse surge MUST NOT be vetoed merely because session-cumulative TOD-RVOL is still warming up.
+      3. **Hybrid RVOL (`hybrid_rvol`)**: `0.60 * bar_rvol + 0.40 * tod_rvol`. Blends localized candle thrust with session pace for robust conviction scoring.
+      4. **Option Contract Microstructure (Contract Turnover & Vol/OI Ratio)**: All options setups (`OPTIONS_MOMENTUM`, `GAMMA_BLAST`, `INDEX_CALL_SETUP`, `INDEX_PUT_SETUP`) MUST evaluate the contract itself (Turnover $\ge ₹2\text{ Cr}$, Vol/OI $\ge 1.0\times$ or $1.2\times$). Never substitute underlying stock volume as a proxy for option contract liquidity.
+    - **CVD & Flow Absorption Protection**: Never approve a bullish breakout if 5m Cumulative Volume Delta shows `BEARISH_EXHAUSTION` (passive limit selling absorbing aggressive market orders), or a bearish breakdown with `BULLISH_EXHAUSTION`.
+    - **Directional VWAP Harmony**: Never enter counter-trend fades or knife-catches when spot is trending on the adverse side of VWAP with negative/positive momentum. All mean-reversion setups require structural exhaustion and location edge.
+
+50. **Canonical Active Exchange Lot Sizes & Instrument Master Authority (Zero Obsolete Figures)**:
+    - **Single Source of Truth**: All lot sizes, tick sizes, freeze limits, and multipliers MUST resolve strictly from `market.instruments.STANDARD_LOT_SIZES` and `market.instruments.get_fno_lot_size(symbol)`.
+    - **Active Official Contract Multipliers**:
+      - `NIFTY`: **65** (NSE/FAOP/70616; strictly 65, never legacy 75, 50, or 25)
+      - `BANKNIFTY`: **30** (strictly 30, never legacy 35, 25, or 15)
+      - `FINNIFTY`: **60** (strictly 60, never legacy 65, 40, or 25)
+      - `MIDCPNIFTY`: **120** (strictly 120, never legacy 140, 75, or 50)
+      - `SENSEX`: **20** (for active Nov/Dec 2026 expiries) / **25** (for Jan 2027+ expiries per BSE Notice 20260930-58; strictly never legacy 10 or indecisive "10/20")
+      - `BANKEX`: **30** (strictly 30, never legacy 15)
+    - **Zero-Tolerance for Obsolete Citing in AI Explanations or Code**:
+      - AI agents, models, and developers are strictly forbidden from citing or using legacy numbers in prose, chat explanations, test fixtures, docstrings, or mathematical examples (e.g., reciting "NIFTY 1 lot (75 qty)" or "SENSEX 10").
+      - Every calculation of contract turnover, premium risk, portfolio exposure, margin, or order size MUST strictly utilize the canonical active lot size from `STANDARD_LOT_SIZES`.
 
 ---
 

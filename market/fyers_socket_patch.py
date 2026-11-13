@@ -94,6 +94,131 @@ def patch_fyers_websocket_daemon_threads() -> None:
 
         data_ws.FyersDataSocket.__init__ = _patched_data_init
 
+        # Patch FyersDataSocket subscribe & unsubscribe:
+        # SDK Bugs fixed:
+        # 1. unsubscribe crashes with AttributeError: 'NoneType' object has no attribute 'keys' when __symbol_conversion returns None
+        # 2. unsubscribe fails to remove unneeded symbols/tokens from self.symbol_token and self.scrips_per_channel,
+        #    causing active registered token counts to leak and grow monotonically across reconnections/rotations.
+        # 3. subscribe fails to deduplicate symbols in self.scrips_per_channel, falsely tripping the 5000 symbol cap.
+        def _patched_data_unsubscribe(
+            self, symbols: list, data_type: str = "SymbolUpdate", channel: int = 11
+        ):
+            try:
+                if getattr(self, "_FyersDataSocket__valid_token", False):
+                    self.data_type = data_type
+                    self.symbols = symbols
+                    self.channel_num = channel
+                    if hasattr(self, "_FyersDataSocket__channel_resume_pause"):
+                        self._FyersDataSocket__channel_resume_pause()
+                    conv_fn = getattr(self, "_FyersDataSocket__symbol_conversion", None)
+                    self.channel_symbol = conv_fn(symbols) if conv_fn else None
+                    if not self.channel_symbol or not isinstance(self.channel_symbol, dict):
+                        return
+                    self.unsub_symbol = list(self.channel_symbol.keys())
+                    if hasattr(self, "scrips_count") and self.channel_num in self.scrips_count:
+                        self.unsub_symbol = [
+                            symb
+                            for symb in self.unsub_symbol
+                            if symb in self.scrips_count[self.channel_num]
+                        ]
+
+                    # Prune from internal state
+                    for symb_token in list(self.channel_symbol.keys()):
+                        self.symbol_token.pop(symb_token, None)
+                    if hasattr(self, "scrips_count") and self.channel_num in self.scrips_count:
+                        unsub_set = set(self.unsub_symbol)
+                        self.scrips_count[self.channel_num] = [
+                            s for s in self.scrips_count[self.channel_num] if s not in unsub_set
+                        ]
+                    if (
+                        hasattr(self, "scrips_per_channel")
+                        and self.channel_num in self.scrips_per_channel
+                    ):
+                        rem_set = set(symbols)
+                        self.scrips_per_channel[self.channel_num] = [
+                            s for s in self.scrips_per_channel[self.channel_num] if s not in rem_set
+                        ]
+
+                    if len(self.unsub_symbol) != 0:
+                        total_symbols = len(self.unsub_symbol)
+                        symbol_chunks = [
+                            self.unsub_symbol[i : i + 1500] for i in range(0, total_symbols, 1500)
+                        ]
+                        unsub_msg_fn = getattr(self, "_FyersDataSocket__unsubscription_msg", None)
+                        if unsub_msg_fn:
+                            for chk_syms in symbol_chunks:
+                                message = unsub_msg_fn(chk_syms)
+                                self.add_message(message)
+            except Exception as e_unsub:
+                if hasattr(self, "data_logger") and self.data_logger:
+                    self.data_logger.exception(e_unsub)
+
+        def _patched_data_subscribe(
+            self, symbols: list, data_type: str = "SymbolUpdate", channel: int = 11
+        ):
+            try:
+                if getattr(self, "_FyersDataSocket__valid_token", False):
+                    self.data_type = data_type
+                    self.symbols = symbols
+                    self.channel_num = channel
+                    if hasattr(self, "_FyersDataSocket__channel_resume_pause"):
+                        self._FyersDataSocket__channel_resume_pause()
+                    conv_fn = getattr(self, "_FyersDataSocket__symbol_conversion", None)
+                    self.channel_symbol = conv_fn(symbols) if conv_fn else None
+                    if not self.channel_symbol or not isinstance(self.channel_symbol, dict):
+                        return
+
+                    # Only count truly new tokens not yet in symbol_token
+                    new_tokens_count = sum(
+                        1 for k in self.channel_symbol.keys() if k not in self.symbol_token
+                    )
+                    limit = getattr(self, "symbol_limit", 5000)
+                    if len(self.symbol_token) + new_tokens_count > limit:
+                        from fyers_apiv3.FyersWebsocket import defines
+
+                        self.On_error(
+                            {
+                                "code": defines.LIMIT_EXCEED_CODE,
+                                "message": defines.LIMIT_EXCEED_MSG_5000,
+                                "s": defines.ERROR,
+                            }
+                        )
+                        return
+
+                    self.symbol_token.update(self.channel_symbol)
+                    curr_scrips = (
+                        self.scrips_count.get(self.channel_num, [])
+                        if hasattr(self, "scrips_count")
+                        else []
+                    )
+                    self.scrips_count[self.channel_num] = list(
+                        dict.fromkeys(curr_scrips + list(self.channel_symbol.keys()))
+                    )
+                    if (
+                        hasattr(self, "scrips_per_channel")
+                        and self.channel_num in self.scrips_per_channel
+                    ):
+                        self.scrips_per_channel[self.channel_num] = list(
+                            dict.fromkeys(self.scrips_per_channel[self.channel_num] + symbols)
+                        )
+
+                    to_dispatch = list(self.channel_symbol.keys())
+                    total_symbols = len(to_dispatch)
+                    symbol_chunks = [
+                        to_dispatch[i : i + 1500] for i in range(0, total_symbols, 1500)
+                    ]
+                    sub_msg_fn = getattr(self, "_FyersDataSocket__subscription_msg", None)
+                    if sub_msg_fn:
+                        for chk_syms in symbol_chunks:
+                            message = sub_msg_fn(chk_syms)
+                            self.add_message(message)
+            except Exception as e_sub:
+                if hasattr(self, "data_logger") and self.data_logger:
+                    self.data_logger.exception(e_sub)
+
+        data_ws.FyersDataSocket.unsubscribe = _patched_data_unsubscribe
+        data_ws.FyersDataSocket.subscribe = _patched_data_subscribe
+
         # Patch FyersTbtSocket to fix official SDK bugs:
         # 1. SDK clobbers self.onopen = on_connect with self.onopen = on_open (where on_open defaults to None)
         # 2. SDK hardcodes self.background_flag = False which forces self.t.daemon = False
@@ -204,6 +329,26 @@ def patch_fyers_websocket_daemon_threads() -> None:
                 _orig_tbt_error(self, message)
 
             tbt_ws.FyersTbtSocket.On_error = _patched_tbt_error
+
+        # 7. Patch websocket.WebSocketApp.run_forever to enforce RFC 6455 Ping/Pong Heartbeats (20s)
+        # Prevents Fyers server from terminating idle/heartbeatless connections after 120s.
+        try:
+            import websocket
+
+            _orig_run_forever = websocket.WebSocketApp.run_forever
+
+            def _patched_run_forever(self, *args, **kwargs):
+                if kwargs.get("ping_interval", 0) == 0:
+                    kwargs["ping_interval"] = 20
+                if kwargs.get("ping_timeout") is None:
+                    kwargs["ping_timeout"] = 10
+                return _orig_run_forever(self, *args, **kwargs)
+
+            websocket.WebSocketApp.run_forever = _patched_run_forever
+        except Exception as e_ws_patch:
+            logger.debug(
+                f"[FyersSocketPatch] WebSocketApp heartbeat patch suppressed: {e_ws_patch}"
+            )
 
         _PATCHED = True
         logger.debug(

@@ -212,8 +212,8 @@ def _enrich_quote(
             exch = "BSE" if instrument.startswith("BSE:") else "NSE"
             vwap_val = _compute_raw_vwap(clean_sym, exchange=exch)
             if vwap_val and vwap_val > 0:
-                cache.set(clean_sym, vwap_val)
-                cache.set(canonical_sym, vwap_val)
+                cache.put(clean_sym, vwap_val)
+                cache.put(canonical_sym, vwap_val)
             else:
                 # 4. Fallback proxy from today's open/high/low/ltp if available
                 q_o = float(getattr(quote, "open", 0.0) or 0.0)
@@ -262,6 +262,12 @@ _INDEX_WS_ALIAS_MAP: dict[str, str] = {
     "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "NSE:MIDCPNIFTY-INDEX": "NSE:MIDCPNIFTY-INDEX",
+    "NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+    "NIFTY NEXT 50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTY NEXT 50": "NSE:NIFTYNXT50-INDEX",
+    "NSE:NIFTYNXT50-INDEX": "NSE:NIFTYNXT50-INDEX",
+    "NEXT50": "NSE:NIFTYNXT50-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
     "BSE:SENSEX": "BSE:SENSEX-INDEX",
     "BSE:SENSEX-INDEX": "BSE:SENSEX-INDEX",
@@ -386,7 +392,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                 if missing:
                     ws_manager.subscribe(missing)
 
-                return result
+                if len(result) >= len(instruments):
+                    return result
 
         # 2. m.Stock WebSocket
         if broker_key == "mstock":
@@ -407,8 +414,6 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                     clean = inst.split(":")[-1].strip().upper()
                     tick = mstock_ws.get_tick(inst) or mstock_ws.get_tick(clean)
                     if tick and market_active and getattr(tick, "timestamp", 0) > 0:
-                        import time
-
                         if (time.time() - tick.timestamp) > 30.0:
                             tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
@@ -469,7 +474,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                 if missing and getattr(mstock_ws, "is_connected", False):
                     mstock_ws.subscribe(missing)
 
-                return result
+                if len(result) >= len(instruments):
+                    return result
             except Exception:
                 return {}
 
@@ -492,8 +498,6 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                     clean = inst.split(":")[-1].strip().upper()
                     tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
                     if tick and market_active and getattr(tick, "timestamp", 0) > 0:
-                        import time
-
                         if (time.time() - tick.timestamp) > 30.0:
                             tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
@@ -553,12 +557,132 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                 if missing and getattr(kotak_ws, "is_connected", lambda: False)():
                     kotak_ws.subscribe(missing)
 
-                return result
+                if len(result) >= len(instruments):
+                    return result
             except Exception:
                 return {}
 
+        # 4. Flattrade WebSocket (Zero-brokerage institutional secondary feed)
+        if broker_key == "flattrade":
+            try:
+                from engine.market_matrix import get_market_matrix
+                from market.streaming import market_streams
+
+                missing = []
+                for inst in instruments:
+                    clean = inst.split(":")[-1].split("-")[0].strip().upper()
+                    event = market_streams.latest(inst) or market_streams.latest(clean)
+                    if not event:
+                        stats = get_market_matrix().get_quant_stats(clean)
+                        if stats and stats.get("ltp", 0.0) > 0:
+                            enriched = _enrich_quote(
+                                Quote(
+                                    symbol=clean,
+                                    last_price=float(stats["ltp"]),
+                                    volume=int(stats.get("volume", 0) or 0),
+                                    vwap=float(
+                                        stats.get("vwap", 0.0) or stats.get("atp", 0.0) or 0.0
+                                    )
+                                    or None,
+                                    change=0.0,
+                                    change_pct=0.0,
+                                ),
+                                instrument=inst,
+                                provider="flattrade",
+                                source="STREAM",
+                                correlation_id=correlation_id,
+                            )
+                            result[inst] = enriched
+                            if clean not in result:
+                                result[clean] = enriched
+                            continue
+
+                    if event and event.last_price > 0:
+                        enriched = _enrich_quote(
+                            Quote(
+                                symbol=clean,
+                                last_price=event.last_price,
+                                volume=int(event.volume or 0),
+                                bid=event.bid,
+                                ask=event.ask,
+                                vwap=event.atp,
+                                exchange_timestamp=event.exchange_timestamp,
+                            ),
+                            instrument=inst,
+                            provider="flattrade",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                        result[inst] = enriched
+                        if clean not in result:
+                            result[clean] = enriched
+                    else:
+                        missing.append(inst)
+
+                if missing:
+                    try:
+                        from brokers.session import get_broker
+
+                        b = get_broker()
+                        if getattr(b, "name", "").lower() == "flattrade" and hasattr(
+                            b, "subscribe_websocket"
+                        ):
+                            b.subscribe_websocket(missing)
+                    except Exception as e_sub:
+                        logger.debug(f"[Quotes] Flattrade ws subscribe fallback notice: {e_sub}")
+
+                if len(result) >= len(instruments):
+                    return result
+            except Exception as e_ft:
+                logger.debug(f"[Quotes] Flattrade stream check: {e_ft}")
+
+        # Check in-memory MarketMatrix for any symbols still unresolved across active broker streams
+        unresolved = [inst for inst in instruments if inst not in result]
+        if unresolved:
+            try:
+                from engine.market_matrix import get_market_matrix
+
+                mm = get_market_matrix()
+                for inst in unresolved:
+                    clean = inst.split(":")[-1].split("-")[0].strip().upper()
+                    stats = mm.get_quant_stats(clean)
+                    ltp = stats.get("ltp", 0.0)
+                    ts = stats.get("timestamp", 0.0)
+                    if ltp and ltp > 0:
+                        exch = inst.split(":")[0] if ":" in inst else "NSE"
+                        try:
+                            from market.calendar import is_market_open
+
+                            market_active = is_market_open(exch)
+                        except Exception:
+                            market_active = True
+                        if market_active and ts > 0 and (time.time() - ts) > 60.0:
+                            continue  # stale tick
+                        q = Quote(
+                            symbol=clean,
+                            last_price=float(ltp),
+                            volume=int(stats.get("volume", 0) or 0),
+                            vwap=float(stats.get("vwap", 0.0) or stats.get("atp", 0.0) or 0.0)
+                            or None,
+                            change=0.0,
+                            change_pct=0.0,
+                        )
+                        enriched = _enrich_quote(
+                            q,
+                            instrument=inst,
+                            provider=stats.get("provider", "market_matrix"),
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                        result[inst] = enriched
+                        if clean not in result:
+                            result[clean] = enriched
+            except Exception as e_mm:
+                logger.debug(f"[Quotes] MarketMatrix fallback check: {e_mm}")
+
         return result
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[Quotes] _ws_quotes exception: {e}")
         return {}
 
 

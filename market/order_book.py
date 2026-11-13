@@ -924,6 +924,34 @@ def analyze_symbol_order_book(
                         live_broker_connected=True,
                         provenance="LIVE_BROKER_L2",
                     )
+
+            # Secondary broker depth failover (e.g. Flattrade)
+            from brokers.session import get_all_brokers, get_data_broker_key
+
+            pri_key = get_data_broker_key() or "fyers"
+            all_brks = get_all_brokers()
+            for sec_key, sec_broker in all_brks.items():
+                if sec_key == pri_key or getattr(sec_broker, "_is_mock", False):
+                    continue
+                if hasattr(sec_broker, "get_market_depth"):
+                    try:
+                        sec_depth = sec_broker.get_market_depth(query_sym)
+                        if sec_depth and (sec_depth.get("bids") or sec_depth.get("buy")):
+                            raw_depth = {
+                                "buy": sec_depth.get("bids") or sec_depth.get("buy", []),
+                                "sell": sec_depth.get("asks") or sec_depth.get("sell", []),
+                            }
+                            return compute_order_book_metrics(
+                                sym_to_report,
+                                raw_depth,
+                                sec_depth.get("ltp", 0.0),
+                                live_broker_connected=True,
+                                provenance=f"LIVE_{sec_key.upper()}_L2",
+                            )
+                    except Exception as e_sec:
+                        logger.debug(
+                            f"[market.order_book] Secondary broker {sec_key} depth failed: {e_sec}"
+                        )
         except Exception as e:
             logger.debug("Failed fetching broker depth for %s: %s", clean_sym, e)
 

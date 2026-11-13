@@ -58,24 +58,31 @@ def get_optimal_workers(file_count: int | None = None, max_cap: int = 8) -> int:
 
 
 def get_python_exe() -> str:
-    """Resolve python executable, preferring virtualenv if active, else py -3.12 on Windows."""
+    """Resolve python executable, preferring healthy virtualenv or system python on Windows."""
     venv_win = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
     venv_nix = ROOT_DIR / ".venv" / "bin" / "python"
     if venv_win.exists():
-        return str(venv_win)
+        try:
+            res = subprocess.run(
+                [str(venv_win), "-m", "ruff", "--version"],
+                capture_output=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return str(venv_win)
+        except Exception:
+            pass
     if venv_nix.exists():
         return str(venv_nix)
-    # If running on Windows and current Python lacks pytest, check for py -3.12
+    # If running on Windows, look for functional py -3.13 / py -3.12
     if sys.platform == "win32":
-        try:
-            import pytest  # noqa: F401
-        except ImportError:
-            import shutil
+        import shutil
 
-            if shutil.which("py"):
+        if shutil.which("py"):
+            for py_tag in ["-3.13", "-3.12"]:
                 try:
                     res = subprocess.run(
-                        ["py", "-3.12", "-c", "import sys; print(sys.executable)"],
+                        ["py", py_tag, "-c", "import sys; print(sys.executable)"],
                         capture_output=True,
                         text=True,
                         check=False,
@@ -178,8 +185,10 @@ def install_hooks() -> bool:
 # ChanakyaTrade Shift-Left Institutional Pre-Commit Gate
 echo "🛡️  Running ChanakyaTrade Shift-Left Pre-Commit Gate..."
 
-if [ -f ".venv/Scripts/python.exe" ]; then
+if [ -f ".venv/Scripts/python.exe" ] && .venv/Scripts/python.exe -m ruff --version >/dev/null 2>&1; then
     PYTHON_BIN=".venv/Scripts/python.exe"
+elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="$(py -3.13 -c 'import sys; print(sys.executable)' 2>/dev/null || py -3.12 -c 'import sys; print(sys.executable)' 2>/dev/null || echo python)"
 elif [ -f ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
 else
@@ -205,8 +214,21 @@ if [ "$SKIP_PRE_PUSH" = "1" ] || [ "$FAST_PUSH" = "1" ]; then
     exit 0
 fi
 
-if [ -f ".venv/Scripts/python.exe" ]; then
+# Optimization: Skip pre-push if current tree was already verified by shift_left_check during pre-commit
+CURRENT_TREE=$(git rev-parse "HEAD^{tree}" 2>/dev/null || git rev-parse "HEAD:" 2>/dev/null)
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
+if [ -f "$GIT_DIR/shift_left_verified_tree" ]; then
+    VERIFIED_TREE=$(cat "$GIT_DIR/shift_left_verified_tree" 2>/dev/null)
+    if [ -n "$CURRENT_TREE" ] && [ "$CURRENT_TREE" = "$VERIFIED_TREE" ]; then
+        echo "⚡ Git tree ($CURRENT_TREE) was already verified by Shift-Left Gate — skipping redundant pre-push run."
+        exit 0
+    fi
+fi
+
+if [ -f ".venv/Scripts/python.exe" ] && .venv/Scripts/python.exe -m ruff --version >/dev/null 2>&1; then
     PYTHON_BIN=".venv/Scripts/python.exe"
+elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="$(py -3.13 -c 'import sys; print(sys.executable)' 2>/dev/null || py -3.12 -c 'import sys; print(sys.executable)' 2>/dev/null || echo python)"
 elif [ -f ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
 else
@@ -555,12 +577,12 @@ def main() -> int:
                 "-n",
                 str(worker_count),
                 "--dist",
-                "loadfile",
+                "worksteal",
                 "--maxfail=15",
                 "-q",
                 "--tb=line",
             ],
-            timeout=180.0,
+            timeout=300.0,
             stream=True,
         )
         results.append(("Tier 2: Core Safety Invariants", ok, dur))
@@ -601,12 +623,12 @@ def main() -> int:
                 "-n",
                 str(worker_count),
                 "--dist",
-                "loadfile",
+                "worksteal",
                 "--maxfail=15",
                 "-q",
                 "--tb=line",
             ],
-            timeout=180.0,
+            timeout=max(480.0, float(len(all_test_files)) * 10.0),
             stream=True,
         )
         results.append(("Unified Shift-Left Test Gate", ok, dur))
@@ -626,7 +648,7 @@ def main() -> int:
                 "-n",
                 str(worker_count),
                 "--dist",
-                "loadfile",
+                "worksteal",
                 "--maxfail=15",
                 "-q",
                 "--tb=short",
@@ -646,6 +668,25 @@ def main() -> int:
         status_icon = "✅" if success else "❌"
         print(f"  {status_icon} {name:<55} {dur:>6.2f}s")
     print("=" * 65)
+
+    # Record verified tree hash so pre-push can avoid redundant re-run of same commit
+    try:
+        git_dir_out = subprocess.check_output(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
+        git_dir = Path(git_dir_out)
+        if not git_dir.is_absolute():
+            git_dir = (ROOT_DIR / git_dir).resolve()
+        tree_hash = subprocess.check_output(
+            ["git", "write-tree"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
+        (git_dir / "shift_left_verified_tree").write_text(tree_hash, encoding="utf-8")
+    except Exception as e_tree:
+        logger.debug(f"[shift_left_check] Non-fatal exception recording verified tree: {e_tree}")
 
     return 0
 

@@ -111,6 +111,12 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("KOTAK_TOTP_SECRET", "Kotak Neo TOTP Secret (Base32)", True),
     ("KOTAK_MPIN", "Kotak Neo 6-digit MPIN", True),
     ("KOTAK_ENVIRONMENT", "Kotak Neo Environment (prod/uat)", False),
+    # ── Flattrade (Pi Connect) ───────────────────────────────
+    ("FLATTRADE_USER_ID", "Flattrade User ID / Client Code", False),
+    ("FLATTRADE_PASSWORD", "Flattrade Trading Password", True),
+    ("FLATTRADE_TOTP_SECRET", "Flattrade TOTP Secret (Base32)", True),
+    ("FLATTRADE_API_KEY", "Flattrade API Key", False),
+    ("FLATTRADE_API_SECRET", "Flattrade API Secret", True),
     # ── AI Provider selection ─────────────────────────────────
     (
         "AI_PROVIDER",
@@ -242,7 +248,7 @@ def _kr_delete(key: str) -> bool:
 
 def load_all() -> None:
     """
-    Load all stored keychain credentials into os.environ at startup.
+    Load all stored keychain credentials and persisted env files into os.environ at startup.
 
     Keychain values only set env vars that are not already set — so an
     explicit value in .env or the shell always wins over the keychain.
@@ -250,6 +256,22 @@ def load_all() -> None:
     """
     if os.environ.get("_CLI_BATCH_MODE"):
         return
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+        from config.paths import app_data_path
+
+        repo_env = Path(__file__).resolve().parent.parent / ".env"
+        if repo_env.exists():
+            load_dotenv(repo_env, override=False)
+
+        user_env = app_data_path(".env")
+        if user_env.exists():
+            load_dotenv(user_env, override=False)
+    except Exception as e_suppressed:
+        logger.debug(f"[config.credentials] Env load notice: {e_suppressed}")
+
     loaded = 0
     for key, _, _ in KNOWN_CREDENTIALS:
         if os.environ.get(key):
@@ -314,6 +336,27 @@ def get_credential(
     if value and not _is_placeholder(value):
         os.environ[key] = value  # inject so rest of code sees it via os.environ
         return value
+
+    # 2b. Check repo .env and user app data .env fallbacks
+    # Skip disk fallback in unit tests so monkeypatched env deletions are honored
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from pathlib import Path
+            from config.paths import app_data_path
+            from dotenv import dotenv_values
+
+            for env_path in (
+                Path(__file__).resolve().parent.parent / ".env",
+                app_data_path(".env"),
+            ):
+                if env_path.exists():
+                    vals = dotenv_values(env_path)
+                    disk_val = str(vals.get(key) or "").strip()
+                    if disk_val and not _is_placeholder(disk_val):
+                        os.environ[key] = disk_val
+                        return disk_val
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Env lookup notice: {e_suppressed}")
 
     # If not required, never prompt interactively
     if not required:

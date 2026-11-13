@@ -158,6 +158,11 @@ def detect_commodity_breakouts(
     Scans liquid MCX commodities for high-asymmetry breakouts and options-first setups.
     Active during post-equity and US market sessions (15:30 - 23:30 IST).
     """
+    from config.discovery_policy import get_discovery_policy
+
+    if not get_discovery_policy().allows("COMMODITY"):
+        return []
+
     from market.quotes import get_quote
 
     found: list[AutoAlert] = []

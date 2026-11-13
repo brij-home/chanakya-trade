@@ -59,10 +59,23 @@ def detect_defined_risk_neutral(
         candles = ctx.candles_daily
 
     adx_val = compute_adx(candles) if candles is not None else None
+    if adx_val is not None and adx_val >= 28.0:
+        logger.info(
+            f"[DefinedRiskNeutral] Vetoed neutral spread for {symbol}: "
+            f"ADX({adx_val:.1f}) >= 28.0 indicates active directional trend. Selling neutral credit spreads strictly vetoed."
+        )
+        return None
     is_low_adx = adx_val is not None and adx_val < 25.0
 
     # 2. Intraday price movement check (consolidating within narrow range)
     day_chg = abs(ctx.day_change_pct)
+    max_neutral_chg = 0.90 if getattr(ctx, "is_index", False) else 1.50
+    if day_chg > max_neutral_chg:
+        logger.info(
+            f"[DefinedRiskNeutral] Vetoed neutral spread for {symbol}: "
+            f"Day change |{ctx.day_change_pct:.2f}%| > {max_neutral_chg:.2f}% indicates directional expansion."
+        )
+        return None
     is_narrow_day = day_chg <= 0.85
 
     # 3. Open interest flanking walls check
@@ -70,23 +83,37 @@ def detect_defined_risk_neutral(
     put_wall_strike: Optional[float] = None
     call_wall_strike: Optional[float] = None
 
-    if ctx.option_chain and len(ctx.option_chain) >= 4:
+    raw_chain = ctx.option_chain
+    chain_contracts = (
+        raw_chain.contracts
+        if hasattr(raw_chain, "contracts")
+        else (raw_chain if isinstance(raw_chain, list) else [])
+    )
+    if chain_contracts and len(chain_contracts) >= 4:
         try:
+
+            def _get_val(obj: Any, key: str, default: Any = 0) -> Any:
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
             calls = [
                 item
-                for item in ctx.option_chain
-                if item.get("option_type") == "CE" and item.get("strike", 0) > ltp
+                for item in chain_contracts
+                if str(_get_val(item, "option_type", "")).upper() == "CE"
+                and float(_get_val(item, "strike", 0.0) or 0.0) > ltp
             ]
             puts = [
                 item
-                for item in ctx.option_chain
-                if item.get("option_type") == "PE" and item.get("strike", 0) < ltp
+                for item in chain_contracts
+                if str(_get_val(item, "option_type", "")).upper() == "PE"
+                and float(_get_val(item, "strike", 0.0) or 0.0) < ltp
             ]
             if calls and puts:
-                best_call = max(calls, key=lambda x: x.get("oi", 0))
-                best_put = max(puts, key=lambda x: x.get("oi", 0))
-                call_wall_strike = float(best_call.get("strike", 0))
-                put_wall_strike = float(best_put.get("strike", 0))
+                best_call = max(calls, key=lambda x: float(_get_val(x, "oi", 0) or 0))
+                best_put = max(puts, key=lambda x: float(_get_val(x, "oi", 0) or 0))
+                call_wall_strike = float(_get_val(best_call, "strike", 0.0) or 0.0)
+                put_wall_strike = float(_get_val(best_put, "strike", 0.0) or 0.0)
                 if call_wall_strike > ltp > put_wall_strike:
                     oi_walls_present = True
         except Exception as exc:

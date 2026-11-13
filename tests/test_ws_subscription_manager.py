@@ -264,6 +264,11 @@ def test_mcx_tender_auto_roll_resolution():
     res_gas_tender = _resolve_commodity_contract("NATURALGAS", ref_time=tender_gas)
     assert res_gas_tender == "MCX:NATURALGAS26JUNFUT"
 
-    # Case E: Crude Oil options grid rolls on day 16
+    # Case E: option grids are master-listed, so a historical reference time cannot
+    # be served from today's snapshot. Futures keep the calendar roll; no option
+    # ticker is assembled from a month suffix. See docs/SAFETY_CONTRACTS.md
+    # ("Never generate plausible symbols from a guessed spot, strike step or
+    # weekday calendar") and tests/test_commodity_contract_selection.py.
     grid_rolled = get_active_commodity_grid(ref_time=dt.datetime(2026, 5, 16, 10, 0, 0))
-    assert any("MCX:CRUDEOIL26JUN" in s and ("CE" in s or "PE" in s) for s in grid_rolled)
+    assert grid_rolled
+    assert not [s for s in grid_rolled if s.endswith(("CE", "PE"))]

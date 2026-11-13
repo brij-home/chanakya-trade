@@ -31,7 +31,8 @@ def run_with_deadline(call: Callable[[], T], *, timeout: float, label: str) -> T
     """Run ``call`` without allowing its worker to extend caller wall time."""
     if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be a finite positive number")
-    if not _slots.acquire(blocking=False):
+    sem = _slots
+    if not sem.acquire(blocking=False):
         raise TimeoutError(
             f"LLM call capacity exhausted; {MAX_INFLIGHT} provider calls are still in flight"
         )
@@ -47,7 +48,7 @@ def run_with_deadline(call: Callable[[], T], *, timeout: float, label: str) -> T
         finally:
             completed.set()
             try:
-                _slots.release()
+                sem.release()
             except ValueError:
                 logger.debug("[llm_deadline] Slot already released or reset")
 
@@ -59,7 +60,7 @@ def run_with_deadline(call: Callable[[], T], *, timeout: float, label: str) -> T
     try:
         worker.start()
     except Exception:
-        _slots.release()
+        sem.release()
         raise
 
     if not completed.wait(timeout):

@@ -1325,6 +1325,16 @@ def test_rca_pwh_rejection_distance_bound_and_adr_exhaustion(monkeypatch):
             pchange=15.0,
             oi_change=3000,
         ),
+        MockOptionContract(
+            "BSE:SENSEX26O2274200PE",
+            74200.0,
+            "PE",
+            60.0,
+            volume=40000,
+            oi=25000,
+            pchange=10.0,
+            oi_change=1000,
+        ),
     ]
     alerts_active = detect_index_put_setup(
         underlying="SENSEX",

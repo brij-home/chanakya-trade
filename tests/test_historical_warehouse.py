@@ -105,3 +105,105 @@ def test_warehouse_stats(tmp_path):
     assert stats["total_files"] == 2
     assert "5m" in stats["intervals"] or "5minute" in stats["intervals"]
     assert stats["total_size_mb"] >= 0.0
+
+
+def test_save_bars_is_append_only_under_locked_reads(tmp_path, monkeypatch):
+    """Writes never depend on reading history, so a read lock cannot fail a save."""
+    monkeypatch.setattr("engine.historical_warehouse.time.sleep", lambda *_: None)
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    original = _create_synthetic_bars(10)
+    assert wh.save_bars("RELIANCE", interval="5minute", df=original) == 10
+
+    def _raise_locked(*args, **kwargs):
+        raise PermissionError(32, "simulated WinError 32 sharing violation")
+
+    monkeypatch.setattr(wh, "_read_parquet_with_retry", _raise_locked)
+    overlap = _create_synthetic_bars(5, start_dt=datetime(2024, 10, 1, 9, 40))
+    saved = wh.save_bars("RELIANCE", interval="5minute", df=overlap)
+    assert saved > 0  # write succeeded while history was unreadable
+
+    monkeypatch.undo()
+    loaded = wh.load_bars("RELIANCE", interval="5minute")
+    assert len(loaded) == 10  # overlap deduped, nothing lost
+
+
+def test_compaction_merges_segments_and_preserves_rows(tmp_path):
+    """Compaction must merge segments without changing the bar set."""
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    base = datetime(2024, 10, 1, 9, 15)
+    for i in range(4):
+        wh.save_bars(
+            "TCS",
+            interval="5minute",
+            df=_create_synthetic_bars(5, start_dt=base + timedelta(minutes=25 * i)),
+        )
+
+    dataset = wh._dataset_dir("TCS", "5minute")
+    before = len(wh.load_bars("TCS", "5minute"))
+    assert before == 20
+
+    absorbed = wh.compact("TCS", "5minute")
+    assert absorbed >= 1
+    assert len(list(dataset.glob("merged-*.parquet"))) == 1
+
+    after = wh.load_bars("TCS", "5minute")
+    assert len(after) == before
+
+
+def test_watermark_ignores_covered_segments(tmp_path):
+    """Crash between merged write and segment delete must not double count."""
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    df = _create_synthetic_bars(5)
+    wh.save_bars("INFY", interval="5minute", df=df)
+    wh.save_bars("INFY", interval="5minute", df=df)  # same bars again
+
+    dataset = wh._dataset_dir("INFY", "5minute")
+    parts = sorted(dataset.glob("part-*.parquet"))
+    max_seq = max(wh._parse_seq(p) for p in parts)
+    combined = pd.concat([pd.read_parquet(p) for p in parts])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    wh._write_frame_atomic(combined, dataset / f"merged-{max_seq:020d}.parquet")
+
+    assert len(list(dataset.glob("part-*.parquet"))) == 2  # crash: not deleted
+    assert len(wh.load_bars("INFY", "5minute")) == 5  # not 10
+
+
+def test_legacy_single_file_is_read_as_base(tmp_path):
+    """Pre-segment single-file layout must remain readable alongside segments."""
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    legacy = wh._legacy_path("SBIN", "5minute")
+    _create_synthetic_bars(3).to_parquet(legacy)
+
+    wh.save_bars(
+        "SBIN",
+        interval="5minute",
+        df=_create_synthetic_bars(2, start_dt=datetime(2024, 10, 1, 10, 0)),
+    )
+
+    loaded = wh.load_bars("SBIN", "5minute")
+    assert len(loaded) == 5
+    assert legacy.exists()  # legacy base is never modified or deleted
+
+
+def test_bar_segment_sequence_clears_watermark(tmp_path):
+    """A wall-clock rollback must never hide newly written bar segments."""
+    wh = HistoricalWarehouse(base_dir=tmp_path)
+    base = datetime(2024, 10, 1, 9, 15)
+
+    wh.save_bars("SBIN", interval="5minute", df=_create_synthetic_bars(3, start_dt=base))
+    dataset = wh._dataset_dir("SBIN", "5minute")
+
+    future_gen = 9_999_999_999_999_999_999
+    merged = pd.concat([pd.read_parquet(p) for p in dataset.glob("part-*.parquet")])
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    wh._write_frame_atomic(merged, dataset / f"merged-{future_gen:020d}.parquet")
+
+    wh.save_bars(
+        "SBIN",
+        interval="5minute",
+        df=_create_synthetic_bars(2, start_dt=datetime(2024, 10, 1, 10, 0)),
+    )
+
+    newest = max(dataset.glob("part-*.parquet"), key=wh._parse_seq)
+    assert wh._parse_seq(newest) > future_gen
+    assert len(wh.load_bars("SBIN", "5minute")) == 5

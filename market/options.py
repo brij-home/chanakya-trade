@@ -230,6 +230,66 @@ def enrich_options_chain_deltas(
                     if base > 0:
                         c.pchange_oi = round((delta / base) * 100.0, 2)
 
+    # 3. Dynamic Black-Scholes Greeks synthesis if missing from broker (e.g. Flattrade / Shoonya)
+    missing_greeks = any(getattr(c, "delta", None) is None for c in chain)
+    if missing_greeks:
+        try:
+            from market.quotes import get_ltp
+            from analysis.options import compute_greeks
+
+            spot = get_ltp(underlying) or get_ltp(f"NSE:{clean_und}") or 0.0
+            if spot <= 0:
+                # Derive synthetic spot via Put-Call Parity: S = K + C - P
+                try:
+                    ce_map = {
+                        float(c.strike): float(getattr(c, "last_price", 0.0) or 0.0)
+                        for c in chain
+                        if getattr(c, "option_type", "") == "CE"
+                        and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    }
+                    pe_map = {
+                        float(c.strike): float(getattr(c, "last_price", 0.0) or 0.0)
+                        for c in chain
+                        if getattr(c, "option_type", "") == "PE"
+                        and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    }
+                    common_k = set(ce_map.keys()) & set(pe_map.keys())
+                    if common_k:
+                        atm_k = min(common_k, key=lambda k: abs(ce_map[k] - pe_map[k]))
+                        spot = atm_k + (ce_map[atm_k] - pe_map[atm_k])
+                except Exception as e_pcp:
+                    logger.debug(f"[market.options] Put-Call Parity spot derivation note: {e_pcp}")
+
+            if spot > 0:
+                for c in chain:
+                    if getattr(c, "delta", None) is None:
+                        lp = float(getattr(c, "last_price", 0.0) or 0.0)
+                        stk = float(getattr(c, "strike", 0.0) or 0.0)
+                        c_exp = getattr(c, "expiry", None) or expiry
+                        opt_t = getattr(c, "option_type", "CE")
+                        if lp > 0.05 and stk > 0 and c_exp:
+                            try:
+                                g = compute_greeks(
+                                    spot=spot,
+                                    strike=stk,
+                                    expiry=str(c_exp),
+                                    option_type=opt_t,
+                                    ltp=lp,
+                                )
+                                if g:
+                                    c.delta = g.delta
+                                    c.gamma = g.gamma
+                                    c.theta = g.theta
+                                    c.vega = g.vega
+                                    if not getattr(c, "iv", None) and g.iv_pct > 0:
+                                        c.iv = g.iv_pct
+                            except Exception as e_cg:
+                                logger.debug(
+                                    f"[market.options] Greek calculation failed for {getattr(c, 'symbol', 'UNKNOWN')}: {e_cg}"
+                                )
+        except Exception as e_greeks:
+            logger.debug(f"[market.options] Dynamic Greeks enrichment exception: {e_greeks}")
+
     return chain
 
 
@@ -394,8 +454,44 @@ def get_options_chain(
                     return chain
             except Exception as e:
                 warn_fallback(
-                    "options", str(e), "commodity_black76" if is_commodity else "nse_scraper"
+                    "options", str(e), "commodity_black76" if is_commodity else "secondary_broker"
                 )
+                if not is_commodity:
+                    try:
+                        from brokers.session import get_all_brokers, get_data_broker_key
+
+                        pri_key = get_data_broker_key() or "broker"
+                        all_connected = get_all_brokers()
+                        for sec_key, sec_broker in all_connected.items():
+                            if sec_key == pri_key or getattr(sec_broker, "_is_mock", False):
+                                continue
+                            if hasattr(sec_broker, "get_options_chain"):
+                                try:
+                                    sec_chain = sec_broker.get_options_chain(underlying, expiry)
+                                    if sec_chain and any(
+                                        float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                                        for c in sec_chain
+                                    ):
+                                        record_source("options", sec_key)
+                                        sec_chain = enrich_options_chain_deltas(
+                                            sec_chain, underlying, expiry
+                                        )
+                                        _store_in_chain_cache(cache_key, sec_chain)
+                                        if not is_index:
+                                            _store_in_chain_cache(f"{clean_sym}:nearest", sec_chain)
+                                        logger.info(
+                                            f"[market.options] 🔄 Secondary broker failover ({sec_key}) succeeded for {underlying} ({len(sec_chain)} contracts)"
+                                        )
+                                        chain_result = sec_chain
+                                        return sec_chain
+                                except Exception as e_sec_opt:
+                                    logger.debug(
+                                        f"[market.options] Secondary broker ({sec_key}) options chain failed: {e_sec_opt}"
+                                    )
+                    except Exception as e_sec_find:
+                        logger.debug(
+                            f"[market.options] Secondary broker search error: {e_sec_find}"
+                        )
 
         # Tier 2: For MCX commodities, build Black-76 theoretical option chain from live futures quote
         if is_commodity:
@@ -454,6 +550,7 @@ def get_options_chain(
         if allow_synthetic:
             if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
                 try:
+                    from market.contract_selection import fresh_underlying_price
                     from market.quotes import get_ltp
 
                     idx_spot = get_ltp(
@@ -461,6 +558,8 @@ def get_options_chain(
                         if clean_sym in ("SENSEX", "BANKEX")
                         else f"NSE:{clean_sym}"
                     ) or get_ltp(clean_sym)
+                    if not idx_spot or idx_spot <= 0:
+                        idx_spot = fresh_underlying_price(clean_sym)
                     if not idx_spot or idx_spot <= 0:
                         _ANCHOR_SPOTS = {
                             "NIFTY": 25000.0,

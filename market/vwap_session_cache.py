@@ -115,6 +115,7 @@ class VwapSessionCache:
         cache_file = self._get_cache_file(today)
         with self._disk_lock:
             try:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
                 with self._lock:
                     payload = {
                         sym: {"vwap": val, "timestamp": ts}
@@ -144,6 +145,10 @@ class VwapSessionCache:
                             logger.debug(
                                 f"[market.vwap_session_cache] Non-fatal exception suppressed: {e_suppressed}"
                             )
+            except PermissionError as p_err:
+                logger.debug(
+                    f"[VwapCache] Disk write contention on {cache_file} non-fatal: {p_err}"
+                )
             except Exception as exc:
                 logger.warning(
                     f"[VwapCache] Failed to save disk cache {cache_file}: {exc}", exc_info=True
@@ -182,6 +187,10 @@ class VwapSessionCache:
         with self._lock:
             self._memory_cache[clean] = (now, float(vwap_val))
         self._save_to_disk()
+
+    def set(self, symbol: str, vwap_val: float) -> None:
+        """Alias for put() to ensure API compatibility."""
+        self.put(symbol, vwap_val)
 
     def is_cached_fresh(self, symbol: str) -> tuple[bool, Optional[float]]:
         """Check if symbol is cached (including negative cache). Returns (is_fresh, value_or_none)."""

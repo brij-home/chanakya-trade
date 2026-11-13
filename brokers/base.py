@@ -30,13 +30,23 @@ def save_secure_token(
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     mode = 0o600
-    fd = os.open(str(p), flags, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(content)
-    try:
-        os.chmod(p, 0o600)
-    except Exception as e_chmod:
-        logger.debug(f"[brokers.base] chmod 0600 not supported on this platform: {e_chmod}")
+
+    last_err: Optional[Exception] = None
+    for attempt in range(5):
+        try:
+            fd = os.open(str(p), flags, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.chmod(p, 0o600)
+            except Exception as e_chmod:
+                logger.debug(f"[brokers.base] chmod 0600 not supported on this platform: {e_chmod}")
+            return
+        except (PermissionError, OSError) as exc:
+            last_err = exc
+            time.sleep(0.08 * (attempt + 1))
+    if last_err:
+        raise last_err
 
 
 # ── Shared dataclasses ────────────────────────────────────────────────────────

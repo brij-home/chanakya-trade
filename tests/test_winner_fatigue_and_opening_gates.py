@@ -143,7 +143,20 @@ class TestOpeningDriveTimingGates:
             index=dates,
         )
 
-        with patch("market.options.get_options_chain", return_value=[]):
+        with (
+            patch("market.options.get_options_chain", return_value=[]),
+            patch(
+                "market.indices.get_heavyweights_posture",
+                return_value={
+                    "heavyweights": [
+                        {"symbol": "HDFCBANK", "change_pct": 1.2, "is_bullish": True},
+                        {"symbol": "RELIANCE", "change_pct": 0.8, "is_bullish": True},
+                    ],
+                    "bull_count": 2,
+                    "bear_count": 0,
+                },
+            ),
+        ):
             alert = detect_opening_drive(
                 symbol="NIFTY",
                 df_5m=df_5m,

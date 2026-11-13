@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -106,6 +107,12 @@ def generate_session_scorecard(
         "obi_imbalances": 0,
         "spread_friction": 0,
     }
+    dimensional_5ws: dict[str, dict[str, dict[str, Any]]] = {
+        "why_alpha_thesis": {},
+        "when_session_window": {},
+        "where_structural_anchor": {},
+        "who_trapped_counterparty": {},
+    }
 
     for alert in today_alerts:
         sym = getattr(alert, "contract_symbol", None) or getattr(alert, "symbol", "") or "UNKNOWN"
@@ -186,9 +193,59 @@ def generate_session_scorecard(
         ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
         is_expired = getattr(alert, "is_expired", False)
 
+        # Extract 5W Hierarchical Dimensions
+        hp_metrics = (getattr(alert, "metrics", {}) or {}).get("hierarchical_pipeline") or {}
+        l2_metrics = hp_metrics.get("level2_5ws") or {} if isinstance(hp_metrics, dict) else {}
+
+        why_dim = str(
+            l2_metrics.get("why_alpha_thesis")
+            or getattr(alert, "setup_archetype", None)
+            or getattr(alert, "alert_type", "MOMENTUM")
+            or "UNSPECIFIED_THESIS"
+        ).upper()
+
+        when_dim = str(
+            l2_metrics.get("when_session_window")
+            or getattr(alert, "session_window", None)
+            or "UNSPECIFIED_WINDOW"
+        ).upper()
+
+        where_dim = str(
+            l2_metrics.get("where_structural_anchor")
+            or (getattr(alert, "key_levels", {}) or {}).get("structural_anchor")
+            or "UNSPECIFIED_ANCHOR"
+        ).upper()
+
+        who_dim = str(
+            l2_metrics.get("who_trapped_counterparty")
+            or getattr(alert, "trapped_party", None)
+            or "UNSPECIFIED_COUNTERPARTY"
+        ).upper()
+
+        dims_to_track = [
+            ("why_alpha_thesis", why_dim),
+            ("when_session_window", when_dim),
+            ("where_structural_anchor", where_dim),
+            ("who_trapped_counterparty", who_dim),
+        ]
+
         if not has_triggered:
             unfulfilled += 1
             stat["unfulfilled"] = stat.get("unfulfilled", 0) + 1
+            for d_name, d_val in dims_to_track:
+                d_stat = dimensional_5ws[d_name].setdefault(
+                    d_val,
+                    {
+                        "total": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "unfulfilled": 0,
+                        "net_r": 0.0,
+                        "win_rate_pct": 0.0,
+                    },
+                )
+                d_stat["total"] += 1
+                d_stat["unfulfilled"] += 1
         elif t1_reached or r_val > 0.3:
             wins += 1
             pos_r_sum += max(0.0, r_val)
@@ -197,11 +254,42 @@ def generate_session_scorecard(
             if r_val > best_trade_r:
                 best_trade_r = r_val
                 best_trade = {"symbol": sym, "archetype": archetype, "r_multiple": r_val}
+            for d_name, d_val in dims_to_track:
+                d_stat = dimensional_5ws[d_name].setdefault(
+                    d_val,
+                    {
+                        "total": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "unfulfilled": 0,
+                        "net_r": 0.0,
+                        "win_rate_pct": 0.0,
+                    },
+                )
+                d_stat["total"] += 1
+                d_stat["wins"] += 1
+                d_stat["net_r"] = round(d_stat["net_r"] + r_val, 2)
         elif is_inv or r_val < -0.3:
             losses += 1
             neg_r_sum += abs(min(0.0, r_val))
             stat["losses"] += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
+
+            for d_name, d_val in dims_to_track:
+                d_stat = dimensional_5ws[d_name].setdefault(
+                    d_val,
+                    {
+                        "total": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "unfulfilled": 0,
+                        "net_r": 0.0,
+                        "win_rate_pct": 0.0,
+                    },
+                )
+                d_stat["total"] += 1
+                d_stat["losses"] += 1
+                d_stat["net_r"] = round(d_stat["net_r"] + r_val, 2)
 
             # Microstructure root-cause tracking
             pm = (getattr(alert, "metrics", {}) or {}).get("post_mortem") or {}
@@ -224,9 +312,38 @@ def generate_session_scorecard(
         elif is_multi_session and not is_expired:
             active_swings += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
+            for d_name, d_val in dims_to_track:
+                d_stat = dimensional_5ws[d_name].setdefault(
+                    d_val,
+                    {
+                        "total": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "unfulfilled": 0,
+                        "net_r": 0.0,
+                        "win_rate_pct": 0.0,
+                    },
+                )
+                d_stat["total"] += 1
+                d_stat["net_r"] = round(d_stat["net_r"] + r_val, 2)
         else:
             unfulfilled += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
+            for d_name, d_val in dims_to_track:
+                d_stat = dimensional_5ws[d_name].setdefault(
+                    d_val,
+                    {
+                        "total": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "unfulfilled": 0,
+                        "net_r": 0.0,
+                        "win_rate_pct": 0.0,
+                    },
+                )
+                d_stat["total"] += 1
+                d_stat["unfulfilled"] += 1
+                d_stat["net_r"] = round(d_stat["net_r"] + r_val, 2)
 
     total_closed = wins + losses
     win_rate = round((wins / total_closed * 100.0), 1) if total_closed > 0 else 0.0
@@ -236,6 +353,12 @@ def generate_session_scorecard(
         else (round(pos_r_sum, 2) if pos_r_sum > 0 else 1.0)
     )
     net_r = round(pos_r_sum - neg_r_sum, 2)
+
+    # Calculate Win Rates for 5W Dimensions
+    for dim_key, dim_dict in dimensional_5ws.items():
+        for k, v in dim_dict.items():
+            closed = v["wins"] + v["losses"]
+            v["win_rate_pct"] = round((v["wins"] / closed * 100.0), 1) if closed > 0 else 0.0
 
     recommendations: list[dict[str, Any]] = []
     if total_closed >= 4 and win_rate < 50.0:
@@ -275,6 +398,34 @@ def generate_session_scorecard(
             }
         )
 
+    # 5W Timing Recommendation (WHEN)
+    for win_name, win_stat in dimensional_5ws["when_session_window"].items():
+        win_closed = win_stat["wins"] + win_stat["losses"]
+        if win_closed >= 2 and win_stat["wins"] == 0:
+            recommendations.append(
+                {
+                    "target": "session_window_filter",
+                    "action": "TIGHTEN_SESSION_WINDOW",
+                    "dimension": "WHEN",
+                    "adjustment": win_name,
+                    "reason": f"Session window '{win_name}' had 0% win rate across {win_closed} closed setups ({win_stat['losses']} losses).",
+                }
+            )
+
+    # 5W Alpha Thesis Recommendation (WHY)
+    for thesis_name, thesis_stat in dimensional_5ws["why_alpha_thesis"].items():
+        thesis_closed = thesis_stat["wins"] + thesis_stat["losses"]
+        if thesis_closed >= 3 and thesis_stat["win_rate_pct"] < 33.4:
+            recommendations.append(
+                {
+                    "target": "alpha_thesis_filter",
+                    "action": "DEGRADE_THESIS_CONVICTION",
+                    "dimension": "WHY",
+                    "adjustment": thesis_name,
+                    "reason": f"Alpha thesis '{thesis_name}' underperformed with {thesis_stat['win_rate_pct']:.1f}% win rate across {thesis_closed} setups.",
+                }
+            )
+
     return {
         "session_date": session_date,
         "total_alerts": len(today_alerts),
@@ -290,6 +441,7 @@ def generate_session_scorecard(
         "best_trade": best_trade,
         "archetype_breakdown": archetype_stats,
         "microstructure_attribution": microstructure_stats,
+        "dimensional_attribution_5ws": dimensional_5ws,
         "calibration_recommendations": recommendations,
     }
 
@@ -318,7 +470,7 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     bd_str = "\n".join(breakdown_lines) if breakdown_lines else "  • <i>No trades executed</i>"
 
     best_str = (
-        f"<b>{best['symbol']}</b> ({best['archetype']}) <b>+{best['r_multiple']:.1f}R</b>"
+        f"<b>{best.get('symbol', 'N/A')}</b> ({best.get('archetype', 'SETUP')}) <b>+{best.get('r_multiple', best.get('realized_r', 0.0)):.1f}R</b>"
         if best
         else "None"
     )
@@ -334,6 +486,17 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     micro_str = (
         f"🔬 <b>Microstructure Root Causes:</b> {', '.join(micro_parts)}\n" if micro_parts else ""
     )
+
+    dim_5ws = scorecard.get("dimensional_attribution_5ws") or {}
+    dim_parts = []
+    when_stats = dim_5ws.get("when_session_window") or {}
+    for w_name, w_st in when_stats.items():
+        if w_st.get("total", 0) > 0 and w_name != "UNSPECIFIED_WINDOW":
+            sub_sign = "+" if w_st["net_r"] >= 0 else ""
+            dim_parts.append(
+                f"{w_name}: {w_st['wins']}/{w_st['total']} ({sub_sign}{w_st['net_r']}R)"
+            )
+    dim_str = f"⏰ <b>Session Timing Performance:</b> {', '.join(dim_parts)}\n" if dim_parts else ""
 
     recs = scorecard.get("calibration_recommendations") or []
     recs_parts = []
@@ -358,6 +521,7 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         f"🏆 <b>Best Setup:</b> {best_str}\n\n"
         f"📋 <b>Strategy Attribution:</b>\n"
         f"{bd_str}\n"
+        + (f"\n{dim_str}" if dim_str else "")
         + (f"\n{micro_str}" if micro_str else "")
         + (f"\n{recs_str}" if recs_str else "")
         + "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -365,13 +529,40 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     )
 
 
-def broadcast_eod_scorecard(scorecard: dict[str, Any]) -> None:
-    """Send EOD scorecard to Telegram and SSE."""
+def broadcast_eod_scorecard(
+    scorecard: dict[str, Any], force: bool = False, enforce_disk_latch: bool = False
+) -> bool:
+    """Send EOD scorecard to Telegram and SSE (strictly once per session date unless force=True)."""
+    session_date = scorecard.get("session_date") or datetime.now(IST).strftime("%Y-%m-%d")
+    session_slug = str(session_date).replace("-", "")
+
+    # Durable broadcast deduplication latch on disk
+    sc_dir = app_data_path("postmortem")
+    broadcast_marker = sc_dir / f"broadcast_{session_slug}.sent"
+
+    is_test_runner = (
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+    )
+
+    if broadcast_marker.exists() and not force and (not is_test_runner or enforce_disk_latch):
+        logger.info(
+            f"[AlertPostMortem] EOD scorecard for session {session_date} was already broadcast. Suppressing duplicate."
+        )
+        return False
+
     msg = format_eod_scorecard_telegram(scorecard)
     try:
         from bot.telegram_bot import send_message
 
         send_message(msg, parse_mode="HTML")
+        if not is_test_runner or enforce_disk_latch:
+            try:
+                sc_dir.mkdir(parents=True, exist_ok=True)
+                broadcast_marker.write_text(datetime.now(IST).isoformat(), encoding="utf-8")
+            except Exception as e_mark:
+                logger.debug(f"[AlertPostMortem] Could not write broadcast marker: {e_mark}")
     except Exception as e:
         logger.debug(f"[AlertPostMortem] Telegram EOD scorecard broadcast failed: {e}")
 
@@ -383,6 +574,7 @@ def broadcast_eod_scorecard(scorecard: dict[str, Any]) -> None:
         logger.debug(
             f"[engine.alert_postmortem_runner] Non-fatal exception suppressed: {e_suppressed}"
         )
+    return True
 
 
 def run_eod_alert_postmortems(
@@ -491,7 +683,7 @@ def run_eod_alert_postmortems(
         logger.debug(f"[AlertPostMortem] Optional local scorecard save note: {e_local}")
 
     if broadcast and len(today_alerts) > 0:
-        broadcast_eod_scorecard(scorecard)
+        broadcast_eod_scorecard(scorecard, force=force)
 
     for alert in today_alerts:
         alert_id = getattr(alert, "alert_id", "") or str(getattr(alert, "id", ""))
@@ -600,6 +792,9 @@ def run_eod_alert_postmortems(
 
             outcome_label = "STOPPED_OUT" if is_invalidated else "UNFULFILLED_EOD"
 
+            hp_pm = (getattr(alert, "metrics", {}) or {}).get("hierarchical_pipeline") or {}
+            l2_pm = hp_pm.get("level2_5ws") or {} if isinstance(hp_pm, dict) else {}
+
             pattern_learning_engine.record_trade_outcome(
                 alert_id=alert_id,
                 symbol=symbol,
@@ -609,6 +804,11 @@ def run_eod_alert_postmortems(
                 outcome=outcome_label,
                 realized_rr=r_mult,
                 factors_present=getattr(alert, "matched_factors", []),
+                alpha_thesis=l2_pm.get("why_alpha_thesis")
+                or getattr(alert, "alert_type", "MOMENTUM"),
+                session_window=l2_pm.get("when_session_window"),
+                structural_anchor=l2_pm.get("where_structural_anchor"),
+                trapped_counterparty=l2_pm.get("who_trapped_counterparty"),
             )
             report["outcomes_recorded"] += 1
 

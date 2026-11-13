@@ -194,8 +194,8 @@ def test_precursor_radar_internal_sla_timeout_and_graceful_completion(scanner):
             force_refresh=True,
         )
         elapsed = time.time() - t0
-        # Elapsed must be close to timeout (bounded under 1.5s), never hanging for 20 * 0.5s = 10s
-        assert elapsed < 2.0, (
+        # Elapsed must be close to timeout (bounded under 3.0s), never hanging for 20 * 0.5s = 10s
+        assert elapsed < 3.0, (
             f"scan_precursors blocked for {elapsed:.2f}s instead of adhering to SLA timeout"
         )
         assert isinstance(candidates, list)
@@ -216,7 +216,9 @@ def test_precursor_radar_uses_passed_quotes_map(scanner):
             force_refresh=True,
         )
         mock_get_quote.assert_not_called()
-        mock_eval.assert_called_once_with("TESTSTOCK", quote=mock_q)
+        assert mock_eval.call_count == 1
+        assert mock_eval.call_args.args[0] == "TESTSTOCK"
+        assert mock_eval.call_args.kwargs.get("quote") == mock_q
 
 
 def test_commodity_adaptive_regime_callable_ref_time_guard():

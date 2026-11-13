@@ -173,3 +173,130 @@ def test_detect_initial_balance_setups_alert_generation():
     assert alert.actionable_plan["target_1"] == 24450.0  # Midpoint
     assert alert.actionable_plan["target_2"] == 24400.0  # IB Low
     assert alert.alert_id.startswith("aa-initial-balance-sfp-nifty-")
+    assert "recommended_structure" in alert.metrics
+    assert "market_phase" in alert.metrics
+
+
+def test_initial_balance_trend_day_expansion_governor_alignment():
+    """Trend day expansion alerts must forward Governor recommended structure and volume profile."""
+    # Post-IB breakout above IB High
+    post_moves = [(24460.0, 24520.0, 24455.0, 24510.0)] * 15
+    df = _generate_synthetic_5m_bars(ib_high=24450.0, ib_low=24400.0, post_ib_moves=post_moves)
+    test_time = datetime(2026, 10, 30, 10, 30, tzinfo=IST)
+
+    alerts = detect_initial_balance_setups(
+        symbol="NIFTY",
+        spot=24510.0,
+        df_5m=df,
+        atr_14=200.0,  # Range 50 < 0.65*84 -> TREND_DAY
+        ref_time=test_time,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.alert_type == "INITIAL_BALANCE_BREAKOUT"
+    assert alert.direction == "BULLISH"
+    assert alert.metrics["extension_status"] == "IBH_EXPANSION"
+    assert "recommended_structure" in alert.metrics
+    assert "bar_rvol" in alert.metrics
+    assert alert.actionable_plan["no_chase_boundary"] > 24510.0
+
+
+def test_initial_balance_normal_variation_day_expansion():
+    """Normal Variation Day range expansion outside IB must be detected and not dropped."""
+    # IB Range: 80 pts (24480 - 24400). ATR: 190. Baseline: 190 * 0.42 = 79.8 pts.
+    # Ratio = 80 / 79.8 = 1.00 -> NORMAL_VARIATION_DAY
+    post_moves = [(24482.0, 24510.0, 24481.0, 24505.0)] * 15
+    df = _generate_synthetic_5m_bars(ib_high=24480.0, ib_low=24400.0, post_ib_moves=post_moves)
+    test_time = datetime(2026, 10, 30, 11, 0, tzinfo=IST)
+
+    alerts = detect_initial_balance_setups(
+        symbol="BANKBARODA",
+        spot=24505.0,
+        df_5m=df,
+        atr_14=190.0,
+        ref_time=test_time,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.alert_type == "INITIAL_BALANCE_BREAKOUT"
+    assert alert.direction == "BULLISH"
+    assert alert.option_type == "CE"
+    assert "RANGE EXTENSION" in alert.headline
+    assert alert.contract_symbol is not None
+    assert alert.option_premium is not None
+    assert alert.actionable_plan["strategy"] == "TREND_DAY_EXPANSION"
+
+
+def test_initial_balance_inside_ib_boundary_fade():
+    """Testing IB High resistance inside balance generates Bearish Fade back to POC."""
+    # Spot near IB High: 24490 (IB range 100: [24400, 24500]. Boundary zone: 15 pts -> >= 24485)
+    post_moves = [(24470.0, 24495.0, 24465.0, 24490.0)] * 15
+    df = _generate_synthetic_5m_bars(ib_high=24500.0, ib_low=24400.0, post_ib_moves=post_moves)
+    test_time = datetime(2026, 10, 30, 11, 0, tzinfo=IST)
+
+    alerts = detect_initial_balance_setups(
+        symbol="NIFTY",
+        spot=24490.0,
+        df_5m=df,
+        atr_14=120.0,
+        ref_time=test_time,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.alert_type == "INITIAL_BALANCE_FADE"
+    assert alert.direction == "BEARISH"
+    assert alert.option_type == "PE"
+    assert "FADE" in alert.headline
+    assert alert.actionable_plan["target_1"] == 24450.0  # IB Midpoint / POC
+    assert alert.actionable_plan["invalidation_stop_loss"] > 24500.0  # Above IB High
+
+
+def test_initial_balance_inside_ib_boundary_bounce():
+    """Testing IB Low support inside balance generates Bullish Bounce back to POC."""
+    # Spot near IB Low: 24410 (IB range 100: [24400, 24500]. Boundary zone: 15 pts -> <= 24415)
+    post_moves = [(24420.0, 24425.0, 24405.0, 24410.0)] * 15
+    df = _generate_synthetic_5m_bars(ib_high=24500.0, ib_low=24400.0, post_ib_moves=post_moves)
+    test_time = datetime(2026, 10, 30, 11, 0, tzinfo=IST)
+
+    alerts = detect_initial_balance_setups(
+        symbol="NIFTY",
+        spot=24410.0,
+        df_5m=df,
+        atr_14=120.0,
+        ref_time=test_time,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.alert_type == "INITIAL_BALANCE_FADE"
+    assert alert.direction == "BULLISH"
+    assert alert.option_type == "CE"
+    assert "BOUNCE" in alert.headline
+    assert alert.actionable_plan["target_1"] == 24450.0  # IB Midpoint / POC
+    assert alert.actionable_plan["invalidation_stop_loss"] < 24400.0  # Below IB Low
+
+
+def test_initial_balance_inside_ib_middle_chop_suppression():
+    """Spot in the middle of Initial Balance has zero statistical edge and must return no alerts."""
+    # Spot at 24450 (exact midpoint of 24400 - 24500)
+    post_moves = [(24445.0, 24455.0, 24440.0, 24450.0)] * 15
+    df = _generate_synthetic_5m_bars(ib_high=24500.0, ib_low=24400.0, post_ib_moves=post_moves)
+    test_time = datetime(2026, 10, 30, 11, 0, tzinfo=IST)
+
+    alerts = detect_initial_balance_setups(
+        symbol="NIFTY",
+        spot=24450.0,
+        df_5m=df,
+        atr_14=120.0,
+        ref_time=test_time,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) == 0

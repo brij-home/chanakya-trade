@@ -59,6 +59,8 @@ from collections import defaultdict, deque
 
 import logging
 
+import math
+
 import os
 
 import re
@@ -334,6 +336,20 @@ class AutoAlertEngine:
 
         self._cached_orb_levels: dict[str, tuple[str, float, float, float, float]] = {}
 
+        # Dynamic universe staggered rotation counters for bounded detector cycles
+        self._predator_rotation_step: int = 0
+        self._ib_rotation_step: int = 0
+        self._turtle_rotation_step: int = 0
+
+        # In-Memory Universe Velocity Rotator cycle counter & cache (Frontier 4)
+        self._universe_rotation_cycle: int = 0
+        self._prioritized_targets_lock = threading.RLock()
+        self._prioritized_targets_cache: list[str] = []
+        self._prioritized_surge_set_cache: set[str] = set()
+        self._prioritized_targets_ts: float = 0.0
+        self._prioritized_targets_ttl: float = 30.0
+        self._prioritized_targets_index_allowed: Optional[bool] = None
+
         self._save_worker_thread: Optional[threading.Thread] = None
 
         self._poller_thread: Optional[threading.Thread] = None
@@ -454,7 +470,7 @@ class AutoAlertEngine:
 
         self._prioritized_targets_ts: float = 0.0
 
-        self._prioritized_targets_lock = threading.Lock()
+        self._prioritized_targets_lock = threading.RLock()
 
         self._prioritized_targets_ttl: float = 30.0  # 30s cache for target ranking
 
@@ -1767,9 +1783,13 @@ class AutoAlertEngine:
                     alert.metrics["spot_no_chase_boundary"] = alert.actionable_plan[
                         "no_chase_boundary"
                     ]
+                    alert.actionable_plan["spot_no_chase_boundary"] = alert.actionable_plan[
+                        "no_chase_boundary"
+                    ]
 
                 elif alert.no_chase_boundary:
                     alert.metrics["spot_no_chase_boundary"] = alert.no_chase_boundary
+                    alert.actionable_plan["spot_no_chase_boundary"] = alert.no_chase_boundary
 
                 alert.actionable_plan["contract"] = resolved.contract_symbol
 
@@ -1783,9 +1803,19 @@ class AutoAlertEngine:
 
                 alert.derivative_type = "OPT"
 
-                is_pure_option = getattr(
-                    alert, "instrument_type", None
-                ) == "OPTION" or is_alert_option_premium_level(alert)
+                is_idx_sym = is_index_symbol(clean_sym)
+                is_pure_option = (
+                    is_idx_sym
+                    or getattr(alert, "instrument_type", None) == "OPTION"
+                    or is_alert_option_premium_level(alert)
+                )
+
+                # SEBI physical settlement next-month protection propagation
+                is_next_month = getattr(resolved, "is_next_month_routed", False)
+                alert.metrics["is_next_month_routed"] = is_next_month
+                if is_next_month:
+                    alert.metrics["rollover_series"] = "NEXT_MONTH"
+                    alert.metrics["rollover_protected"] = True
 
                 if is_pure_option:
                     alert.instrument_type = "OPTION"
@@ -1928,7 +1958,8 @@ class AutoAlertEngine:
                     alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
 
                     if (
-                        is_alert_option_premium_level(alert)
+                        is_pure_option
+                        or is_alert_option_premium_level(alert)
                         or getattr(alert, "instrument_type", "") == "OPTION"
                     ):
                         alert.entry_price = opt_entry
@@ -1995,6 +2026,85 @@ class AutoAlertEngine:
 
         """
 
+        clean_target = self._clean_sym(alert.symbol)
+
+        # Pre-enrich F&O contracts for any eligible underlying so that options execution details
+        # are attached and FNO_ONLY policy correctly recognizes them as derivative setups.
+        from engine.option_resolver import is_index_symbol
+        from engine.position_sizer import is_fno_symbol
+
+        atype = str(getattr(alert, "alert_type", "") or "")
+        stage = str(getattr(alert, "stage", "") or "")
+        is_cash_desk_setup = stage == "EARLY_WARNING" or atype in (
+            "PRECURSOR_RADAR",
+            "ASYMMETRIC_RADAR",
+            "MULTIBAGGER",
+            "STAGE_1_TO_2_EXPANSION",
+            "RRG_SECTOR_ROTATION",
+            "DCF_UNDERVALUED",
+            "FORENSIC_GEM",
+        )
+
+        is_fno_eligible = not is_cash_desk_setup and (
+            is_index_symbol(clean_target) or is_fno_symbol(clean_target)
+        )
+        if is_fno_eligible and not getattr(alert, "contract_symbol", None):
+            self._enrich_fno_contract_if_applicable(alert)
+
+        # Dynamic Level-3 TBT Promotion (15-Slot 50-Depth Matrix):
+        # Promote high-conviction F&O candidate to Fyers 15-slot TBT stream for sub-second microstructure validation
+        if is_fno_eligible:
+            try:
+                from market.fyers_tbt_manager import (
+                    fyers_tbt_manager,
+                    resolve_tradable_tbt_symbol,
+                )
+
+                if getattr(fyers_tbt_manager, "is_connected", False):
+                    target_tbt_sym = (
+                        getattr(alert, "contract_symbol", None)
+                        or resolve_tradable_tbt_symbol(alert.symbol)
+                        or resolve_tradable_tbt_symbol(clean_target)
+                    )
+                    if target_tbt_sym:
+                        fyers_tbt_manager.promote_jit_scout(
+                            target_tbt_sym,
+                            duration_sec=120.0,
+                            reason=str(getattr(alert, "alert_type", "PRIMED_SETUP")),
+                        )
+            except Exception as _tbt_prom_err:
+                logger.debug(f"[AutoAlertEngine] TBT JIT promotion non-fatal: {_tbt_prom_err}")
+
+        # Dynamic Market Calibration Enrichment (MarketDynamicsGovernor)
+        if is_fno_eligible:
+            try:
+                from engine.market_dynamics_governor import get_market_dynamics_governor
+
+                gov = get_market_dynamics_governor()
+                cpr_t = (
+                    alert.metrics.get("cpr_type")
+                    if isinstance(getattr(alert, "metrics", None), dict)
+                    else None
+                )
+                adr_p = (
+                    alert.metrics.get("adr_exhaustion_pct")
+                    if isinstance(getattr(alert, "metrics", None), dict)
+                    else None
+                )
+                calib = gov.get_calibration(
+                    clean_target or alert.symbol,
+                    strategy=str(getattr(alert, "alert_type", "DEFAULT")),
+                    cpr_type=cpr_t,
+                    adr_exhaustion_pct=adr_p,
+                )
+                if alert.metrics is None or not isinstance(alert.metrics, dict):
+                    alert.metrics = {}
+                alert.metrics["dynamic_calibration"] = calib.to_dict()
+                if not getattr(alert, "recommended_vehicle", None):
+                    alert.recommended_vehicle = calib.preferred_vehicle
+            except Exception as _calib_err:
+                logger.debug(f"[AutoAlertEngine] Calibration enrichment non-fatal: {_calib_err}")
+
         policy = get_discovery_policy()
 
         if policy.fno_only:
@@ -2014,8 +2124,12 @@ class AutoAlertEngine:
 
                 seg = str(getattr(alert, "segment", "") or "").upper()
 
-                if has_contract or seg in ("FNO", "FNO_INDEX", "FNO_STOCK"):
+                if has_contract or seg in ("FNO", "FNO_INDEX", "FNO_STOCK") or is_fno_eligible:
                     is_fno = True
+                    if not seg or seg == "EQUITY":
+                        alert.segment = (
+                            "FNO_INDEX" if is_index_symbol(clean_target) else "FNO_STOCK"
+                        )
 
             if not is_fno:
                 if hasattr(alert, "record_audit"):
@@ -2031,8 +2145,6 @@ class AutoAlertEngine:
                 )
 
                 return False
-
-        clean_target = self._clean_sym(alert.symbol)
 
         now = time.time()
 
@@ -4512,20 +4624,22 @@ class AutoAlertEngine:
 
                     existing_active.confidence = max(existing_active.confidence, alert.confidence)
 
-                    if not alert.signal_ref:
+                    # Generate fresh signal_ref for the ignited trade when transitioning from EARLY_WARNING
+                    if alert.signal_ref and alert.signal_ref != prior_sig_ref:
+                        existing_active.signal_ref = alert.signal_ref
+                    else:
                         try:
-                            from bot.alert_templates import generate_signal_ref
+                            from bot.alert_templates import build_signal_ref
 
-                            alert.signal_ref = generate_signal_ref(
-                                alert.symbol,
-                                contract=alert.contract_symbol,
+                            existing_active.signal_ref = build_signal_ref(
+                                symbol=existing_active.symbol,
+                                alert_id=existing_active.alert_id,
+                                contract=getattr(existing_active, "contract_symbol", "") or "",
                                 created_at=now_iso,
                             )
-
+                            alert.signal_ref = existing_active.signal_ref
                         except Exception as e_sig:
                             logger.debug(f"[AutoAlertEngine] Signal ref generation error: {e_sig}")
-
-                    existing_active.signal_ref = alert.signal_ref or prior_sig_ref
 
                     existing_active.achieved_milestones = []
 
@@ -6253,7 +6367,22 @@ class AutoAlertEngine:
                                     or 0.0
                                 )
 
-                                if spot_p <= 0 or spot_p < 1000:
+                                clean_sym_for_spot = canonical_alert_symbol(alert.symbol)
+                                is_idx_spot = clean_sym_for_spot in (
+                                    "NIFTY",
+                                    "BANKNIFTY",
+                                    "FINNIFTY",
+                                    "MIDCPNIFTY",
+                                    "SENSEX",
+                                    "BANKEX",
+                                )
+                                is_invalid_spot = (
+                                    spot_p <= 0
+                                    or (is_idx_spot and spot_p < 5000)
+                                    or (not is_idx_spot and spot_p < 5.0)
+                                )
+
+                                if is_invalid_spot:
                                     logger.warning(
                                         f"[AutoAlertEngine] Skipping hedge spread for {alert.alert_id}: "
                                         f"could not resolve a valid underlying spot (got {spot_p!r}). "
@@ -6315,6 +6444,47 @@ class AutoAlertEngine:
 
                     except Exception as _e_qg:
                         logger.debug(f"[AutoAlertEngine] Quality gate evaluation error: {_e_qg}")
+
+                # 2bh. Hierarchical Quantitative Decision Pipeline (3Cs Context -> 5Ws Setup -> Execution How):
+                if not is_sim and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    try:
+                        from engine.pipeline.hierarchical_engine import hierarchical_pipeline
+
+                        h_verdict = hierarchical_pipeline.evaluate(alert)
+                        if not isinstance(alert.metrics, dict):
+                            alert.metrics = {}
+                        alert.metrics["hierarchical_pipeline"] = h_verdict.to_dict()
+                        alert.metrics["composite_confluence_score"] = (
+                            h_verdict.composite_confluence_score
+                        )
+
+                        if (
+                            not h_verdict.passed
+                            and not is_sim
+                            and os.environ.get("CHANAKYA_TESTING") != "1"
+                        ):
+                            alert.record_audit(
+                                event_type="HIERARCHICAL_PIPELINE_VETOED",
+                                message=h_verdict.primary_reason,
+                                actor="HIERARCHICAL_PIPELINE",
+                                details=h_verdict.to_dict(),
+                            )
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Hierarchical Pipeline Veto for {clean_target} ({alert.alert_type}): "
+                                f"{h_verdict.primary_reason}"
+                            )
+                            return False
+
+                        alert.record_audit(
+                            event_type="HIERARCHICAL_PIPELINE_PASSED",
+                            message=h_verdict.summary,
+                            actor="HIERARCHICAL_PIPELINE",
+                            details=h_verdict.to_dict(),
+                        )
+                    except Exception as _e_hp:
+                        logger.debug(
+                            f"[AutoAlertEngine] Hierarchical pipeline evaluation error: {_e_hp}"
+                        )
 
         # If an existing active alert was upgraded or aggregated with multi-radar confluence, dispatch immediately!
 
@@ -6940,18 +7110,55 @@ class AutoAlertEngine:
                     ]
 
                     # Gated Staging: Only stage for Telegram if alert passes the Apex Channel Gate
-
                     # and Telegram notifications are enabled in preferences.
-
                     from engine.alerts import _is_market_hours
 
                     in_mkt = _is_market_hours(alert.exchange)
-
                     passes_apex, _ = self._eval_telegram_apex_gate(alert, in_market=in_mkt)
-
                     tg_pref_allowed = alert_preferences.is_alert_allowed(alert, channel="telegram")
 
-                    if passes_apex and tg_pref_allowed:
+                    # "SIGNAL ONCE" DISCIPLINE: An alert setup card is dispatched to Telegram ONCE.
+                    # Subsequent outbox staging for Telegram must strictly be verified lifecycle milestones.
+                    is_initial_tg = not getattr(alert, "telegram_dispatched", False)
+                    is_milestone_event = bool(
+                        getattr(alert, "achieved_milestones", None)
+                        or getattr(alert, "is_invalidated", False)
+                        or getattr(alert, "should_trail", False)
+                        or getattr(alert, "stage", "")
+                        in (
+                            "INVALIDATED",
+                            "EXPIRED",
+                            "CANCELLED",
+                            "DISQUALIFIED",
+                            "SETUP_DISQUALIFIED",
+                            "TIME_STOP_EXIT",
+                            "TIME_STOP_SCRATCH",
+                            "RUNNER_EXIT",
+                            "PROFIT_SECURED",
+                            "BREAKEVEN_EXIT",
+                            "IN_FLIGHT_WARNING",
+                            "T0_5_ACHIEVED",
+                            "T1_ACHIEVED",
+                            "T2_ACHIEVED",
+                            "T3_ACHIEVED",
+                            "TRAIL_UPDATE",
+                            "STOP_LOSS_HIT",
+                        )
+                    )
+
+                    if passes_apex and tg_pref_allowed and (is_initial_tg or is_milestone_event):
+                        # Ensure permanent signal_ref is latched into alert and payload
+                        if not getattr(alert, "signal_ref", None):
+                            from bot.alert_templates import build_signal_ref
+
+                            alert.signal_ref = build_signal_ref(
+                                symbol=alert.symbol,
+                                alert_id=alert.alert_id,
+                                contract=getattr(alert, "contract_symbol", "") or "",
+                                created_at=getattr(alert, "created_at", "") or "",
+                            )
+                        alert_payload["signal_ref"] = alert.signal_ref
+
                         outbox_entries.append(
                             {
                                 "channel": "TELEGRAM",
@@ -8186,9 +8393,9 @@ class AutoAlertEngine:
 
             if nifty_chg is None and not is_test_runner:
                 try:
-                    from market.quotes import get_market_quote
+                    from market.quotes import get_quote
 
-                    nifty_q = get_market_quote("NIFTY 50") or get_market_quote("NIFTY")
+                    nifty_q = get_quote("NIFTY 50") or get_quote("NIFTY")
 
                     if nifty_q and hasattr(nifty_q, "change_pct"):
                         nifty_chg = float(nifty_q.change_pct)
@@ -8203,9 +8410,9 @@ class AutoAlertEngine:
 
             if banknifty_chg is None and not is_test_runner:
                 try:
-                    from market.quotes import get_market_quote
+                    from market.quotes import get_quote
 
-                    bn_q = get_market_quote("BANKNIFTY") or get_market_quote("NIFTY BANK")
+                    bn_q = get_quote("BANKNIFTY") or get_quote("NIFTY BANK")
 
                     if bn_q and hasattr(bn_q, "change_pct"):
                         banknifty_chg = float(bn_q.change_pct)
@@ -12500,6 +12707,30 @@ class AutoAlertEngine:
                                     f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
                                 )
 
+                            # Frontier 3: Elastic L3 50-Depth TBT Scout Slot Promotion
+                            try:
+                                from market.fyers_tbt_manager import (
+                                    fyers_tbt_manager,
+                                    resolve_tradable_tbt_symbol,
+                                )
+
+                                target_tbt_sym = getattr(
+                                    alert, "contract_symbol", None
+                                ) or resolve_tradable_tbt_symbol(alert.symbol)
+                                if target_tbt_sym:
+                                    fyers_tbt_manager.promote_jit_scout(
+                                        target_tbt_sym,
+                                        duration_sec=90.0,
+                                        reason=f"INTERCEPTION_PRIMED:{alert.alert_id}",
+                                    )
+                                    logger.info(
+                                        f"[AutoAlertEngine] Promoted PRIMED alert {alert.alert_id} ({target_tbt_sym}) to L3 50-Depth TBT Scout slot"
+                                    )
+                            except Exception as e_tbt_prime:
+                                logger.debug(
+                                    f"[AutoAlertEngine] PRIMED TBT scout promotion suppressed: {e_tbt_prime}"
+                                )
+
                             # Predator Strike Clock Heads-Up Dispatch (T-60s pre-ignition alert)
 
                             if not getattr(alert, "strike_clock_sent", False):
@@ -13673,7 +13904,16 @@ class AutoAlertEngine:
         if not in_time_window:
             return None
 
-        if getattr(self, "_eod_session_reviewed_date", None) == today_str and not force:
+        session_slug = today_str.replace("-", "")
+        from config.paths import app_data_path
+
+        broadcast_marker = app_data_path("postmortem") / f"broadcast_{session_slug}.sent"
+
+        if (
+            getattr(self, "_eod_session_reviewed_date", None) == today_str
+            or (broadcast_marker.exists() and not force and not is_test_runner)
+        ) and not force:
+            self._eod_session_reviewed_date = today_str
             return None  # Already reviewed today
 
         try:
@@ -13685,6 +13925,12 @@ class AutoAlertEngine:
                 return None
 
             self._eod_session_reviewed_date = today_str
+            if not is_test_runner:
+                try:
+                    broadcast_marker.parent.mkdir(parents=True, exist_ok=True)
+                    broadcast_marker.write_text(now_dt.isoformat(), encoding="utf-8")
+                except Exception as e_mark:
+                    logger.debug(f"[AutoAlertEngine] Could not write broadcast marker: {e_mark}")
 
             logger.info(
                 f"[AutoAlertEngine] 🏁 EOD Session Scorecard generated and broadcast for {report.get('processed_count', 0)} alerts."
@@ -15066,6 +15312,10 @@ class AutoAlertEngine:
 
         return "NSE"
 
+    def resolve_symbol_exchange(self, sym: str) -> str:
+        """Public alias for resolving canonical exchange."""
+        return self._resolve_index_exchange(sym)
+
     def _get_cached_index_ohlcv(
         self,
         sym: str,
@@ -15243,10 +15493,91 @@ class AutoAlertEngine:
 
         return final_map
 
+    def _slice_and_rotate_targets(
+        self,
+        targets: list[str],
+        surge_set: set[str],
+        max_targets: Optional[int] = None,
+        stagger_rotate: bool = True,
+        cycle_index: Optional[int] = None,
+    ) -> list[str]:
+        """Slices and staggers candidate targets so each cycle evaluates at most 15 targets
+
+        (Benchmark Indices + High-Velocity Surge Equities + Staggered Batches of 10).
+        """
+        if max_targets is None or max_targets <= 0:
+            return list(targets)
+
+        if not stagger_rotate:
+            return list(targets[:max_targets])
+
+        target_cap = min(max_targets, 15)
+
+        lock = getattr(self, "_prioritized_targets_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._prioritized_targets_lock = lock
+
+        with lock:
+            if cycle_index is not None:
+                c_idx = cycle_index
+            else:
+                c_idx = getattr(self, "_universe_rotation_cycle", 0)
+                self._universe_rotation_cycle = (c_idx + 1) % 1_000_000
+
+        watched_idx = set(
+            getattr(
+                self,
+                "_watched_indices",
+                ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"),
+            )
+        )
+
+        # Benchmark indices (up to 5) anchored at the front of every cycle
+        cycle_indices = [s for s in targets if s in watched_idx][:5]
+
+        # Remaining universe consists of equities
+        equities_pool = [s for s in targets if s not in watched_idx]
+
+        equity_slots = max(0, target_cap - len(cycle_indices))
+        if equity_slots == 0:
+            return cycle_indices[:target_cap]
+
+        # Identify surge stocks (propelling into immediate cycle)
+        surge_equities = [
+            s
+            for s in equities_pool
+            if s in surge_set
+            or s.replace(".NS", "").replace("NSE:", "").strip().upper() in surge_set
+        ]
+        regular_equities = [s for s in equities_pool if s not in surge_equities]
+
+        selected_surge = surge_equities[:equity_slots]
+        remaining_slots = equity_slots - len(selected_surge)
+
+        selected_regular: list[str] = []
+        if remaining_slots > 0 and regular_equities:
+            batch_size = 10
+            num_batches = max(1, math.ceil(len(regular_equities) / batch_size))
+            batch_num = c_idx % num_batches
+            start_idx = batch_num * batch_size
+            selected_regular = regular_equities[start_idx : start_idx + remaining_slots]
+            if len(selected_regular) < remaining_slots and len(regular_equities) > len(
+                selected_regular
+            ):
+                needed = remaining_slots - len(selected_regular)
+                selected_regular.extend(regular_equities[:needed])
+
+        cycle_equities = selected_surge + selected_regular
+        result = cycle_indices + cycle_equities
+        return result[:target_cap]
+
     def _get_prioritized_targets(
         self,
         max_targets: Optional[int] = None,
         quotes_map: Optional[dict[str, Any]] = None,
+        stagger_rotate: bool = True,
+        cycle_index: Optional[int] = None,
     ) -> list[str]:
         """Returns targets prioritized dynamically by Real-Time Velocity Score & Expiry."""
 
@@ -15265,12 +15596,16 @@ class AutoAlertEngine:
         lock = getattr(self, "_prioritized_targets_lock", None)
 
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
 
             self._prioritized_targets_lock = lock
 
+        cached_targets = None
+        cached_surge_set = None
+
         with lock:
             cache = getattr(self, "_prioritized_targets_cache", None)
+            surge_set_cache = getattr(self, "_prioritized_surge_set_cache", set())
 
             ts = getattr(self, "_prioritized_targets_ts", 0.0)
 
@@ -15281,9 +15616,17 @@ class AutoAlertEngine:
                 and getattr(self, "_prioritized_targets_index_allowed", None) == index_allowed
                 and (now_m - ts < ttl)
             ):
-                res = list(cache)
+                cached_targets = list(cache)
+                cached_surge_set = set(surge_set_cache)
 
-                return res[:max_targets] if max_targets and max_targets > 0 else res
+        if cached_targets is not None:
+            return self._slice_and_rotate_targets(
+                targets=cached_targets,
+                surge_set=cached_surge_set or set(),
+                max_targets=max_targets,
+                stagger_rotate=stagger_rotate,
+                cycle_index=cycle_index,
+            )
 
         targets: list[str] = []
 
@@ -15322,6 +15665,7 @@ class AutoAlertEngine:
 
         # Prioritize active momentum equities and opening drive heavyweights
 
+        surge_set: set[str] = set()
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock
 
@@ -15355,6 +15699,11 @@ class AutoAlertEngine:
                     cached_q = None
 
                     for key in (clean, f"NSE:{clean}", f"{clean}.NS", s):
+                        if quotes_map and key in quotes_map:
+                            cached_q = quotes_map[key]
+
+                            break
+
                         if self._cycle_quotes_cache and key in self._cycle_quotes_cache:
                             cached_q = self._cycle_quotes_cache[key]
 
@@ -15386,6 +15735,20 @@ class AutoAlertEngine:
                     )
 
                     effective_move = max(chg, intraday_chg)
+                    rvol_val = (
+                        float(
+                            getattr(cached_q, "rvol", 0.0)
+                            or getattr(cached_q, "bar_rvol", 0.0)
+                            or getattr(cached_q, "volume_surge", 0.0)
+                            or 0.0
+                        )
+                        if cached_q
+                        else 0.0
+                    )
+
+                    if effective_move >= 3.0 or rvol_val >= 2.5:
+                        surge_set.add(s)
+                        surge_set.add(clean)
 
                     is_hw = clean in core_heavyweights
 
@@ -15426,7 +15789,8 @@ class AutoAlertEngine:
             else:
                 sorted_equities = [s for _, s in active_movers] + other_equities
 
-        except Exception:
+        except Exception as _e_sort:
+            logger.debug(f"[AutoAlertEngine] Prioritizing targets sorting fallback: {_e_sort}")
             sorted_equities = list(self.watched_equities)
 
         for s in sorted_equities:
@@ -15451,18 +15815,26 @@ class AutoAlertEngine:
 
         with lock:
             self._prioritized_targets_cache = list(targets)
+            self._prioritized_surge_set_cache = set(surge_set)
 
             self._prioritized_targets_ts = now_m
 
             self._prioritized_targets_index_allowed = index_allowed
 
-        return targets[:max_targets] if max_targets and max_targets > 0 else targets
+        return self._slice_and_rotate_targets(
+            targets=targets,
+            surge_set=surge_set,
+            max_targets=max_targets,
+            stagger_rotate=stagger_rotate,
+            cycle_index=cycle_index,
+        )
 
     def scan_gamma_blasts(
         self,
         indices_only: bool = False,
         quotes_map: Optional[dict[str, Any]] = None,
         chains_map: Optional[dict[str, Any]] = None,
+        targets: Optional[list[str]] = None,
     ) -> list[AutoAlert]:
         """Scans watched indices and high-turnover F&O leaders for Gamma Blast inflection.
 
@@ -15492,11 +15864,12 @@ class AutoAlertEngine:
 
         now_ist = datetime.now(IST)
 
-        if indices_only:
+        if targets is not None:
+            pass
+        elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
-
         else:
-            targets = self._get_prioritized_targets(max_targets=35)
+            targets = self._get_prioritized_targets(max_targets=15)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -15902,7 +16275,9 @@ class AutoAlertEngine:
         return found
 
     def scan_squeeze_breakouts(
-        self, quotes_map: Optional[dict[str, Any]] = None
+        self,
+        quotes_map: Optional[dict[str, Any]] = None,
+        targets: Optional[list[str]] = None,
     ) -> list[AutoAlert]:
         """Scans watched indices and equities for multi-timeframe TTM Squeeze early warnings."""
 
@@ -15910,20 +16285,21 @@ class AutoAlertEngine:
 
         from market.quotes import get_ltp
 
-        # Adaptive Market Dynamics: Query India VIX
-
+        # Adaptive Market Dynamics: Query Governor VIX
         vix_val = 14.0
-
         try:
-            from market.indices import get_vix
+            from engine.market_dynamics_governor import get_market_dynamics_governor
 
-            v_val = get_vix()
+            vix_val = get_market_dynamics_governor()._fetch_live_vix()
+        except Exception:
+            try:
+                from market.indices import get_vix
 
-            if v_val and v_val > 0:
-                vix_val = float(v_val)
-
-        except Exception as e_suppressed:
-            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
+                v_val = get_vix()
+                if v_val and v_val > 0:
+                    vix_val = float(v_val)
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # Low VIX Regime Filter (VIX < 12.5):
 
@@ -15945,7 +16321,8 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = self._get_prioritized_targets(max_targets=45)
+        if targets is None:
+            targets = self._get_prioritized_targets(max_targets=15)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -16024,8 +16401,22 @@ class AutoAlertEngine:
                                 # Low-VIX filter on intraday squeezes
 
                                 rvol_15m = (alert_15m.metrics or {}).get("rvol", 1.0)
+                                req_rvol = 1.8 if is_low_vix else 1.2
+                                try:
+                                    from engine.market_dynamics_governor import (
+                                        get_market_dynamics_governor,
+                                    )
 
-                                if is_low_vix and (rvol_15m < 1.8 or alert_15m.confidence < 85):
+                                    sq_calib = get_market_dynamics_governor().get_calibration(sym)
+                                    req_rvol = max(req_rvol, sq_calib.min_required_rvol)
+                                except Exception as e_calib:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Squeeze governor calibration notice: {e_calib}"
+                                    )
+
+                                if is_low_vix and (
+                                    rvol_15m < req_rvol or alert_15m.confidence < 85
+                                ):
                                     pass
 
                                 else:
@@ -16149,7 +16540,7 @@ class AutoAlertEngine:
 
         from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
 
-        target_universe = self.watched_equities[:40]
+        target_universe = list(self.watched_equities)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(target_universe)
@@ -16285,23 +16676,39 @@ class AutoAlertEngine:
         from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 
         from market.history import get_ohlcv
+        from engine.alert_identity import canonical_alert_symbol
+        from engine.eod_store import get_cached_ohlcv_batch
 
         found: list[AutoAlert] = []
 
-        targets = self.watched_equities[:40]
+        targets = list(self.watched_equities)
+        clean_targets = [canonical_alert_symbol(s) for s in targets]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=250)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in SMC OB retest: {e_eod}")
 
         def _evaluate_sym(sym: str) -> list[AutoAlert]:
 
             try:
+                clean = canonical_alert_symbol(sym)
                 ltp = 0.0
 
                 if quotes_map:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = (
+                        quotes_map.get(f"NSE:{clean}")
+                        or quotes_map.get(clean)
+                        or quotes_map.get(f"NSE:{sym}")
+                        or quotes_map.get(sym)
+                    )
 
                     if q and hasattr(q, "last_price") and q.last_price > 0:
                         ltp = float(q.last_price)
 
-                df = get_ohlcv(sym, exchange="NSE", interval="day", days=250)
+                df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    df = get_ohlcv(sym, exchange="NSE", interval="day", days=250)
 
                 return detect_smc_orderblock_retest(
                     symbol=sym,
@@ -16316,17 +16723,99 @@ class AutoAlertEngine:
 
                 return []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(targets))) as executor:
             future_to_sym = {executor.submit(_evaluate_sym, sym): sym for sym in targets}
 
-            for fut in concurrent.futures.as_completed(future_to_sym):
-                alerts = fut.result()
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=15.0):
+                    alerts = fut.result()
 
-                for alert in alerts:
-                    if self.record_alert(alert):
-                        found.append(alert)
+                    for alert in alerts:
+                        if self.record_alert(alert):
+                            found.append(alert)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[AutoAlertEngine] SMC OB retest timeout (15s) reached. Proceeding with {len(found)} alerts."
+                )
 
         return found
+
+    def _rank_candidates_by_velocity(
+        self, candidates: list[str], quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[str]:
+        """Rank equity candidates by live intraday turnover (Cr) and velocity (abs change %)."""
+        if not quotes_map or not candidates:
+            return list(candidates)
+
+        def _v_score(sym: str) -> float:
+            q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+            if not q:
+                return 0.0
+            chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
+            vol = float(getattr(q, "volume", 0.0) or 0.0)
+            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+            turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
+            is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
+            return chg * (1.5 if is_liquid else 1.0)
+
+        return sorted(candidates, key=_v_score, reverse=True)
+
+    def _select_staggered_targets(
+        self,
+        eq_candidates: list[str],
+        cycle_step: int,
+        base_targets: list[str],
+        max_total_targets: int = 15,
+        anchor_count: int = 5,
+        max_pool_depth: int = 50,
+    ) -> list[str]:
+        """
+        Dynamically selects targets for a detector cycle, guaranteeing len(targets) <= max_total_targets
+        while rotating through the top `max_pool_depth` candidates across cycles.
+        """
+        targets = list(base_targets)
+        if not eq_candidates:
+            return targets[:max_total_targets]
+
+        remaining_budget = max(0, max_total_targets - len(targets))
+        if remaining_budget == 0:
+            return targets[:max_total_targets]
+
+        # 1. Anchors: Top high-velocity candidates up to anchor_count
+        anchors = []
+        for s in eq_candidates:
+            if len(anchors) >= min(anchor_count, remaining_budget):
+                break
+            if s not in targets:
+                anchors.append(s)
+                targets.append(s)
+
+        remaining_budget = max(0, max_total_targets - len(targets))
+        if remaining_budget == 0:
+            return targets[:max_total_targets]
+
+        # 2. Pool for rotation: from anchor_count up to max_pool_depth
+        pool = [s for s in eq_candidates[anchor_count:max_pool_depth] if s not in targets]
+        if not pool:
+            pool = [s for s in eq_candidates if s not in targets]
+
+        if pool:
+            chunk_size = remaining_budget
+            num_chunks = max(1, (len(pool) + chunk_size - 1) // chunk_size)
+            chunk_idx = cycle_step % num_chunks
+            start_idx = chunk_idx * chunk_size
+            rotating = pool[start_idx : start_idx + chunk_size]
+            if len(rotating) < chunk_size and len(pool) > len(rotating):
+                wrap_needed = chunk_size - len(rotating)
+                for item in pool[:wrap_needed]:
+                    if item not in rotating:
+                        rotating.append(item)
+            for s in rotating:
+                if len(targets) >= max_total_targets:
+                    break
+                targets.append(s)
+
+        return targets[:max_total_targets]
 
     def scan_predator_liquidity_sweeps(
         self, quotes_map: Optional[dict[str, Any]] = None
@@ -16347,32 +16836,49 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-
-        if hasattr(self, "watched_equities") and self.watched_equities:
-            for eq_s in self.watched_equities[:10]:
-                if eq_s not in targets:
-                    targets.append(eq_s)
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_predator_rotation_step", 0)
+        self._predator_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> Optional[AutoAlert]:
 
             try:
+                exch = self.resolve_symbol_exchange(sym)
                 ltp = 0.0
 
                 vwap = None
 
                 if quotes_map:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
 
                     if q and hasattr(q, "last_price") and q.last_price > 0:
                         ltp = float(q.last_price)
 
                         vwap = getattr(q, "vwap", None)
 
-                df = get_ohlcv(sym, exchange="NSE", interval="5m", days=3)
+                from engine.market_matrix import get_market_matrix
+
+                df = get_market_matrix().get_candles_df(sym, timeframe="5m", limit=80)
 
                 if df is None or len(df) < 10:
-                    df = get_ohlcv(sym, exchange="NSE", interval="day", days=30)
+                    df = get_ohlcv(sym, exchange=exch, interval="5m", days=3)
+
+                if df is None or len(df) < 10:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=30)
 
                 if df is None or len(df) < 10:
                     return None
@@ -16382,7 +16888,7 @@ class AutoAlertEngine:
                     df=df,
                     ltp=ltp,
                     vwap=vwap,
-                    exchange="NSE",
+                    exchange=exch,
                 )
 
             except Exception as e:
@@ -16523,25 +17029,42 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-
-        if hasattr(self, "watched_equities") and self.watched_equities:
-            for eq_s in self.watched_equities[:10]:
-                if eq_s not in targets:
-                    targets.append(eq_s)
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_ib_rotation_step", 0)
+        self._ib_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> list[AutoAlert]:
 
             try:
+                exch = self.resolve_symbol_exchange(sym)
                 ltp = 0.0
 
                 if quotes_map:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
 
                     if q and hasattr(q, "last_price") and q.last_price > 0:
                         ltp = float(q.last_price)
 
-                df = get_ohlcv(sym, exchange="NSE", interval="5m", days=3)
+                from engine.market_matrix import get_market_matrix
+
+                df = get_market_matrix().get_candles_df(sym, timeframe="5m", limit=80)
+
+                if df is None or len(df) < 6:
+                    df = get_ohlcv(sym, exchange=exch, interval="5m", days=3)
 
                 if df is None or len(df) < 6:
                     return []
@@ -16580,10 +17103,8 @@ class AutoAlertEngine:
         ingested = []
 
         for a in found:
-            ing = self.ingest_alert(a)
-
-            if ing:
-                ingested.append(ing)
+            if a and self.record_alert(a):
+                ingested.append(a)
 
         return ingested
 
@@ -16606,29 +17127,49 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = ["NIFTY", "BANKNIFTY"] + [
-            s for s in self.watched_equities[:10] if s not in ("NIFTY", "BANKNIFTY")
-        ]
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        eq_candidates = (
+            list(self.watched_equities)
+            if hasattr(self, "watched_equities") and self.watched_equities
+            else []
+        )
+        ranked_candidates = self._rank_candidates_by_velocity(eq_candidates, quotes_map)
+        step = getattr(self, "_turtle_rotation_step", 0)
+        self._turtle_rotation_step = step + 1
+        targets = self._select_staggered_targets(
+            eq_candidates=ranked_candidates,
+            cycle_step=step,
+            base_targets=base_indices,
+            max_total_targets=15,
+            anchor_count=5,
+            max_pool_depth=50,
+        )
 
         def _evaluate_sym(sym: str) -> Optional[AutoAlert]:
 
             try:
+                exch = self.resolve_symbol_exchange(sym)
                 ltp = 0.0
 
                 vwap = None
 
                 if quotes_map:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
 
                     if q and hasattr(q, "last_price") and q.last_price > 0:
                         ltp = float(q.last_price)
 
                         vwap = getattr(q, "vwap", None)
 
-                df = get_ohlcv(sym, exchange="NSE", interval="15m", days=5)
+                from engine.market_matrix import get_market_matrix
+
+                df = get_market_matrix().get_candles_df(sym, timeframe="15m", limit=80)
 
                 if df is None or len(df) < 15:
-                    df = get_ohlcv(sym, exchange="NSE", interval="day", days=30)
+                    df = get_ohlcv(sym, exchange=exch, interval="15m", days=5)
+
+                if df is None or len(df) < 15:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=30)
 
                 if df is None or len(df) < 15:
                     return None
@@ -16638,7 +17179,7 @@ class AutoAlertEngine:
                     df=df,
                     ltp=ltp,
                     vwap=vwap,
-                    exchange="NSE",
+                    exchange=exch,
                 )
 
             except Exception as e:
@@ -16729,13 +17270,32 @@ class AutoAlertEngine:
         targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
         if hasattr(self, "watched_equities") and self.watched_equities:
-            for eq_s in self.watched_equities[:10]:
+            eq_candidates = list(self.watched_equities)
+            if quotes_map:
+
+                def _v_neutral_score(sym: str) -> float:
+                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    if not q:
+                        return 999.0
+                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
+                    vol = float(getattr(q, "volume", 0.0) or 0.0)
+                    # For defined-risk neutral spreads, prioritize low-drift equities with adequate liquidity
+                    liq_bonus = 0.5 if vol >= 200000 else 1.0
+                    return chg * liq_bonus
+
+                eq_candidates.sort(key=_v_neutral_score, reverse=False)
+            for eq_s in eq_candidates[:25]:
                 if eq_s not in targets:
                     targets.append(eq_s)
 
         for sym in targets:
             try:
-                df_15m = get_ohlcv(sym, exchange="NSE", interval="15m", days=5)
+                exch = self.resolve_symbol_exchange(sym)
+                from engine.market_matrix import get_market_matrix
+
+                df_15m = get_market_matrix().get_candles_df(sym, timeframe="15m", limit=80)
+                if df_15m is None or len(df_15m) < 10:
+                    df_15m = get_ohlcv(sym, exchange=exch, interval="15m", days=5)
 
                 fallback_close = (
                     float(df_15m["close"].iloc[-1])
@@ -16757,7 +17317,7 @@ class AutoAlertEngine:
                 prev_close = None
 
                 if quotes_map:
-                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
 
                     if q:
                         prev_close = getattr(q, "prev_close", None)
@@ -16774,8 +17334,8 @@ class AutoAlertEngine:
                 is_idx = sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
                 ctx = build_detection_context(
-                    symbol=f"NSE:{sym}",
-                    exchange="NSE",
+                    symbol=f"{exch}:{sym}",
+                    exchange=exch,
                     segment="FNO_INDEX" if is_idx else "FNO_STOCK",
                     ltp=ltp,
                     prev_close=prev_close,
@@ -17295,18 +17855,28 @@ class AutoAlertEngine:
                 return list(alerts)
 
         from market.history import get_ohlcv
+        from engine.alert_identity import canonical_alert_symbol
+        from engine.eod_store import get_cached_ohlcv_batch
 
         found: list[AutoAlert] = []
 
         target_list = (
-            targets if (targets is not None and len(targets) > 0) else self.watched_equities[:40]
+            targets if (targets is not None and len(targets) > 0) else list(self.watched_equities)
         )
+        clean_targets = [canonical_alert_symbol(s) for s in target_list]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=60)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in pre-inflection: {e_eod}")
 
         for sym in target_list:
             try:
-                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                clean_sym = canonical_alert_symbol(sym)
 
-                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+                df = eod_cache.get(clean_sym) or eod_cache.get(sym)
+                if df is None or len(df) < 25:
+                    df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
 
                 if df is None or len(df) < 25:
                     continue
@@ -18382,7 +18952,12 @@ class AutoAlertEngine:
 
         return found
 
-    def scan_opening_drives(self, quotes_map: Optional[dict[str, Any]] = None) -> list[AutoAlert]:
+    def scan_opening_drives(
+        self,
+        quotes_map: Optional[dict[str, Any]] = None,
+        indices_only: bool = False,
+        targets: Optional[list[str]] = None,
+    ) -> list[AutoAlert]:
         """
 
         Scans watched indices and comprehensive F&O universe for explosive Opening Drive ignitions
@@ -18414,7 +18989,12 @@ class AutoAlertEngine:
 
         # Full-universe in-memory screening for Opening Drive (Open == Low / Open == High)
 
-        all_syms = list(dict.fromkeys(self._watched_indices + list(self.watched_equities)))
+        if targets:
+            all_syms = list(dict.fromkeys(targets))
+        elif indices_only:
+            all_syms = list(self._watched_indices)
+        else:
+            all_syms = list(dict.fromkeys(self._watched_indices + list(self.watched_equities)))
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(all_syms)
@@ -18484,6 +19064,20 @@ class AutoAlertEngine:
                     if not is_candidate:
                         continue
 
+                    clean_s = canonical_alert_symbol(sym)
+                    is_idx_sym = clean_s in (
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "SENSEX",
+                        "BANKEX",
+                    )
+                    # For equities, require minimum directional expansion from open (>=0.35%) to avoid dormant candidates
+                    if not is_idx_sym and not is_test_env:
+                        if abs(ltp - spot_open) / spot_open < 0.0035:
+                            continue
+
                 eval_drive_targets.append(
                     (sym, exch, ltp, vwap_val, prev_close, prev_high, prev_low)
                 )
@@ -18493,17 +19087,87 @@ class AutoAlertEngine:
                     f"[AutoAlertEngine] Opening drive pre-filter error for {sym}: {e_drv_pre}"
                 )
 
+        # Prioritize top liquid momentum candidates for equities to maintain SLA (< 5s)
+        if not indices_only and len(eval_drive_targets) > 25 and not is_test_env:
+            idx_targets = [
+                t
+                for t in eval_drive_targets
+                if canonical_alert_symbol(t[0])
+                in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            ]
+            eq_targets = [t for t in eval_drive_targets if t not in idx_targets]
+
+            def _eq_exp_score(t):
+                sym_t, _, ltp_t, _, _, _, _ = t
+                q_t = (
+                    quotes_map.get(sym_t) or quotes_map.get(f"NSE:{sym_t}") if quotes_map else None
+                )
+                o_t = float(getattr(q_t, "open", 0.0) or 0.0) if q_t else 0.0
+                return abs(ltp_t - o_t) / max(1.0, o_t) if o_t > 0 else 0.0
+
+            eq_targets.sort(key=_eq_exp_score, reverse=True)
+            eval_drive_targets = idx_targets + eq_targets[:20]
+
         def _eval_drive_sym(item):
 
             sym, exch, ltp, vwap_val, prev_close, prev_high, prev_low = item
 
             try:
-                df_5m = get_ohlcv(
-                    sym, exchange=exch, interval="5minute", days=1, include_live_candle=True
+                clean_s = (
+                    sym.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
                 )
+                is_idx_sym = clean_s in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                )
+                df_5m = None
+                if is_idx_sym:
+                    df_5m = self._get_cached_index_ohlcv(
+                        clean_s, interval="5minute", exchange=exch, days=1
+                    )
+                if df_5m is None:
+                    df_5m = get_ohlcv(
+                        sym,
+                        exchange=exch,
+                        interval="5minute",
+                        days=1,
+                        include_live_candle=True,
+                    )
 
                 if df_5m is None or len(df_5m) < 1:
-                    return None
+                    # Synthesize from live quote so candidate is never dropped due to history timeout
+                    q_cand = (
+                        quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
+                        if quotes_map
+                        else None
+                    )
+                    if q_cand and getattr(q_cand, "open", 0.0):
+                        o = float(q_cand.open)
+                        h = float(getattr(q_cand, "high", o) or o)
+                        l = float(getattr(q_cand, "low", o) or o)
+                        c = ltp
+                        v = float(getattr(q_cand, "volume", 0) or 1000)
+                        import pandas as pd
+
+                        now_bar_dt = now_ist.replace(second=0, microsecond=0)
+                        df_5m = pd.DataFrame(
+                            [
+                                {
+                                    "date": now_bar_dt,
+                                    "open": o,
+                                    "high": h,
+                                    "low": l,
+                                    "close": c,
+                                    "volume": v,
+                                }
+                            ]
+                        ).set_index("date")
+                    else:
+                        return None
 
                 rvol_val = 1.8
 
@@ -18634,7 +19298,10 @@ class AutoAlertEngine:
         return found
 
     def scan_afternoon_thrusts(
-        self, indices_only: bool = False, quotes_map: Optional[dict[str, Any]] = None
+        self,
+        indices_only: bool = False,
+        quotes_map: Optional[dict[str, Any]] = None,
+        targets: Optional[list[str]] = None,
     ) -> list[AutoAlert]:
         """
 
@@ -18658,7 +19325,7 @@ class AutoAlertEngine:
             or ("PYTEST_CURRENT_TEST" in os.environ)
         )
 
-        if not is_test_env and (curr_t < dtime(13, 0) or curr_t > dtime(15, 0)):
+        if not is_test_env and (curr_t < dtime(13, 0) or curr_t > dtime(15, 15)):
             return []
 
         from market.history import get_ohlcv
@@ -18675,11 +19342,12 @@ class AutoAlertEngine:
 
         stock_candidates: list[AutoAlert] = []
 
-        if indices_only:
+        if targets is not None:
+            pass
+        elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
-
         else:
-            targets = self._get_prioritized_targets(max_targets=35)
+            targets = self._get_prioritized_targets(max_targets=15)
 
         if not targets:
             return []
@@ -19195,7 +19863,9 @@ class AutoAlertEngine:
         return found
 
     def scan_opening_range_breakouts(
-        self, quotes_map: Optional[dict[str, Any]] = None
+        self,
+        quotes_map: Optional[dict[str, Any]] = None,
+        targets: Optional[list[str]] = None,
     ) -> list[AutoAlert]:
         """
 
@@ -19224,7 +19894,8 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = self._get_prioritized_targets(max_targets=35)
+        if targets is None:
+            targets = self._get_prioritized_targets(max_targets=15)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -19344,31 +20015,21 @@ class AutoAlertEngine:
                     elif not is_test_env:
                         return None
 
-                # Compute real TOD-RVOL from volume series or quotes_map
-
+                # Compute unified institutional volume profile
                 rvol_val = 1.0
-
                 if df_5m is not None:
                     try:
-                        vols = df_5m["volume"].values if "volume" in df_5m.columns else None
+                        from engine.daily_levels import compute_institutional_volume_profile
 
-                        if vols is not None and len(vols) >= 3:
-                            cur_v = float(vols[-1])
-
-                            avg_v = float(np.mean(vols[:-1]))
-
-                            if avg_v > 0:
-                                rvol_val = round(cur_v / avg_v, 2)
-
+                        prof = compute_institutional_volume_profile(df_5m)
+                        rvol_val = prof.hybrid_rvol
                     except Exception as e_suppressed:
                         logger.debug(
                             f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
                         )
-
                 else:
                     try:
                         from engine.detectors.intraday_spark import get_cached_avg_volume_20
-
                         from engine.auto_alert_engine import compute_time_of_day_rvol
 
                         q_sym = (
@@ -19377,14 +20038,10 @@ class AutoAlertEngine:
                             if quotes_map
                             else None
                         )
-
                         vol_now = int(getattr(q_sym, "volume", 0) or 0) if q_sym else 0
-
                         avg_vol_20 = get_cached_avg_volume_20(clean_sym_norm)
-
                         if vol_now > 0 and avg_vol_20 > 0:
                             rvol_val = compute_time_of_day_rvol(vol_now, avg_vol_20, ref_dt=now_ist)
-
                     except Exception as e_rvol:
                         logger.debug(
                             f"[AutoAlertEngine] ORB TOD-RVOL compute error for {sym}: {e_rvol}"
@@ -19907,6 +20564,7 @@ class AutoAlertEngine:
                     qualifying_expansion_signals = {
                         "INSTITUTIONAL_EXPANSION_THRUST",
                         "DAY_HIGH_BREAKOUT",
+                        "CAMARILLA_H5_EXPANSION",
                         "CAMARILLA_H4_BREAKOUT",
                         "DOUBLE_BOTTOM_BREAKOUT",
                         "SQUEEZE_BREAKOUT",
@@ -20400,14 +21058,18 @@ class AutoAlertEngine:
                 # retreated >=0.30% from day high, or lagging Nifty change by >=0.20%).
 
                 if (
-                    (benchmark_is_bullish and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY"))
-                    or (banknifty_is_bullish and sym == "NIFTY")
-                ) and (not is_test_runner or enforce_regime):
-                    sym_bouncing = (
-                        day_low_val > 0 and (spot - day_low_val) / max(1.0, day_low_val) >= 0.0025
+                    benchmark_is_bullish
+                    and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY")
+                    and (not is_test_runner or enforce_regime)
+                ):
+                    sym_above_vwap_and_surging = (
+                        vwap_val > 0
+                        and spot > vwap_val
+                        and day_low_val > 0
+                        and (spot - day_low_val) / max(1.0, day_low_val) >= 0.004
                     )
 
-                    is_decoupled = not sym_bouncing and (
+                    is_decoupled = not sym_above_vwap_and_surging and (
                         (vwap_val > 0 and spot <= vwap_val)
                         or (
                             day_high_val > 0
@@ -20417,15 +21079,9 @@ class AutoAlertEngine:
                     )
 
                     if not is_decoupled:
-                        suppress_reason = (
-                            f"{sym} is bouncing off session low (+{((spot - day_low_val) / day_low_val * 100):.2f}%) in sympathy with benchmark"
-                            if sym_bouncing
-                            else f"{sym} has not decoupled from benchmark"
-                        )
-
                         logger.debug(
                             f"[AutoAlertEngine] Put scanner suppressed for {sym}: "
-                            f"Benchmark Nifty is bullish (+{nifty_chg:.2f}%) and {suppress_reason}."
+                            f"Benchmark Nifty is bullish (+{nifty_chg:.2f}%) and {sym} has not decoupled."
                         )
 
                         return local_alerts
@@ -20681,6 +21337,7 @@ class AutoAlertEngine:
                     qualifying_breakdown_signals = {
                         "INSTITUTIONAL_EXPANSION_BREAKDOWN",
                         "DAY_LOW_BREAKDOWN",
+                        "CAMARILLA_L5_EXPANSION",
                         "CAMARILLA_L4_BREAKDOWN",
                         "DOUBLE_TOP_BREAKDOWN",
                         "SQUEEZE_BREAKDOWN",
@@ -21398,7 +22055,13 @@ class AutoAlertEngine:
 
                     vol = float(getattr(q, "volume", 0.0) or 0.0)
 
-                    return chg * (1.5 if vol > 500000 else 1.0)
+                    ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+
+                    turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
+
+                    is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
+
+                    return chg * (1.5 if is_liquid else 1.0)
 
                 full_eq = list(self.watched_equities)
 
@@ -21416,6 +22079,10 @@ class AutoAlertEngine:
 
             except Exception as e_sort:
                 logger.debug(f"[AutoAlertEngine] Dynamic equity prioritization skipped: {e_sort}")
+
+        # Step 1.8: In-Memory Universe Velocity Rotator (Frontier 4):
+        # Resolve active cycle targets (<= 15 targets: Benchmark Indices + Staggered Batches/Surge Stocks)
+        active_cycle_targets = self._get_prioritized_targets(max_targets=15)
 
         # Step 2: Concurrent evaluation of all orthogonal detectors (bounded max_workers=12)
 
@@ -21467,12 +22134,24 @@ class AutoAlertEngine:
                 lambda: self.scan_thematic_peer_sympathy(quotes_map=quotes_map),
             ),
             ("circuits", lambda: self.scan_circuits(quotes_map=quotes_map)),
-            ("afternoon_thrusts", lambda: self.scan_afternoon_thrusts(quotes_map=quotes_map)),
+            (
+                "afternoon_thrusts",
+                lambda: self.scan_afternoon_thrusts(
+                    quotes_map=quotes_map, targets=active_cycle_targets
+                ),
+            ),
             ("order_book_thrusts", lambda: self.scan_order_book_thrusts(quotes_map=quotes_map)),
         ]
 
         if self._should_run_detector("squeeze", 60.0):
-            tasks.append(("squeeze", lambda: self.scan_squeeze_breakouts(quotes_map=quotes_map)))
+            tasks.append(
+                (
+                    "squeeze",
+                    lambda: self.scan_squeeze_breakouts(
+                        quotes_map=quotes_map, targets=active_cycle_targets
+                    ),
+                )
+            )
 
         if self._should_run_detector("pre_inflection", 60.0):
             tasks.append(
@@ -21485,7 +22164,14 @@ class AutoAlertEngine:
             tasks.append(("sparks", lambda: self.scan_intraday_mover_sparks(quotes_map=quotes_map)))
 
         if self._should_run_detector("orb", 60.0):
-            tasks.append(("orb", lambda: self.scan_opening_range_breakouts(quotes_map=quotes_map)))
+            tasks.append(
+                (
+                    "orb",
+                    lambda: self.scan_opening_range_breakouts(
+                        quotes_map=quotes_map, targets=active_cycle_targets
+                    ),
+                )
+            )
 
         if self._should_run_detector("options_momentum", 45.0):
             tasks.append(
@@ -21501,7 +22187,11 @@ class AutoAlertEngine:
             tasks.append(
                 (
                     "gamma_blasts",
-                    lambda: self.scan_gamma_blasts(quotes_map=quotes_map, chains_map=chains_map),
+                    lambda: self.scan_gamma_blasts(
+                        quotes_map=quotes_map,
+                        chains_map=chains_map,
+                        targets=active_cycle_targets,
+                    ),
                 )
             )
 
@@ -21565,9 +22255,7 @@ class AutoAlertEngine:
         if self._should_run_detector("asymmetric", 120.0):
             # Prioritize top liquid targets during active session to preserve 18s SLA
 
-            active_asym_targets = (
-                self._get_prioritized_targets(max_targets=45) if not is_test else None
-            )
+            active_asym_targets = active_cycle_targets if not is_test else None
 
             tasks.append(
                 (
@@ -21584,7 +22272,7 @@ class AutoAlertEngine:
         if self._should_run_detector("precursor", 120.0):
             # Prioritize top liquid targets during active session to preserve 18s SLA
 
-            active_targets = self._get_prioritized_targets(max_targets=45) if not is_test else None
+            active_targets = active_cycle_targets if not is_test else None
 
             tasks.append(
                 (
@@ -21672,9 +22360,43 @@ class AutoAlertEngine:
                 "Prioritizing range-bound defined-risk neutral, SMC retests, and cointegration pairs."
             )
 
-        is_post_1500_cutoff = (curr_t >= dtime(15, 0)) and not is_test
+        # Step 2.6: Upstream 3Cs Context & WHEN Session Perimeter Task Gating
+        if not is_test:
+            # 1. Opening Drive window: only valid 09:15 - 10:15 IST
+            if curr_t >= dtime(10, 15):
+                tasks = [t for t in tasks if t[0] != "opening_drives"]
 
-        if is_post_1500_cutoff:
+            # 2. Opening Range Breakout (ORB) window: only valid 09:30 - 11:30 IST
+            if curr_t < dtime(9, 30) or curr_t >= dtime(11, 30):
+                tasks = [t for t in tasks if t[0] != "orb"]
+
+            # 3. Afternoon Thrusts & 0-DTE Gamma Unpin: only valid post-12:45 IST
+            if curr_t < dtime(12, 45):
+                tasks = [t for t in tasks if t[0] not in ("afternoon_thrusts", "0dte_gamma_unpin")]
+
+            # 4. Midday Compression / Theta Chop Window (11:30 - 13:15 IST):
+            # Suppress aggressive naked opening breakout detectors (68% false-breakout trap rate).
+            # Retain defined-risk neutral, SMC Order Block retests, pattern coiling, and high-catalyst sparks.
+            if dtime(11, 30) <= curr_t < dtime(13, 15):
+                midday_suppress = {"orb", "opening_drives"}
+                tasks = [t for t in tasks if t[0] not in midday_suppress]
+
+            # 5. Edgeless Chop Gate (Level 1 3Cs): disarm directional breakouts upfront
+            try:
+                from engine.market_regime_gate import evaluate_market_regime
+
+                reg_snap = evaluate_market_regime()
+                if reg_snap and reg_snap.is_edgeless:
+                    edgeless_suppress = {"orb", "options_momentum", "opening_drives"}
+                    tasks = [t for t in tasks if t[0] not in edgeless_suppress]
+            except Exception as _e_reg:
+                logger.debug(f"[AutoAlertEngine] Upstream market regime gate check error: {_e_reg}")
+
+        # Post-15:15 Cutoff: Broker MIS square-off occurs at 15:20 IST.
+        # Allow 15:00-15:15 gamma thrust and expiry pinning opportunities, while gating new entries past 15:15.
+        is_post_1515_cutoff = (curr_t >= dtime(15, 15)) and not is_test
+
+        if is_post_1515_cutoff:
             intraday_only_detectors = {
                 "index_micro_scalp",
                 "opening_drives",
@@ -21717,9 +22439,9 @@ class AutoAlertEngine:
             future_to_name = {executor.submit(_safe_run, name, fn): name for name, fn in tasks}
 
             try:
-                # SLA protection: Cap total scan cycle wait to prevent desk freeze (18.0s official SLA)
+                # SLA protection: Cap total scan cycle wait to prevent desk freeze (45.0s scan SLA)
 
-                for fut in concurrent.futures.as_completed(future_to_name, timeout=30.0):
+                for fut in concurrent.futures.as_completed(future_to_name, timeout=45.0):
                     try:
                         res = fut.result()
 
@@ -21737,7 +22459,7 @@ class AutoAlertEngine:
                 stalled = [name for fut, name in future_to_name.items() if not fut.done()]
 
                 logger.warning(
-                    f"[AutoAlertEngine] Scan cycle timeout (30.0s) reached! {len(stalled)} detectors stalled: {stalled}. "
+                    f"[AutoAlertEngine] Scan cycle timeout (45.0s) reached! {len(stalled)} detectors stalled: {stalled}. "
                     f"Proceeding safely with {len(results)} alerts from completed detectors."
                 )
 
@@ -22986,7 +23708,13 @@ class AutoAlertEngine:
 
                 if is_active_index_window and fno_allowed:
                     try:
-                        index_targets = self._get_prioritized_targets()
+                        index_targets = list(
+                            getattr(
+                                self,
+                                "_watched_indices",
+                                ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
+                            )
+                        )
 
                         quotes_map = self._get_cycle_quotes(index_targets)
 
@@ -22997,7 +23725,7 @@ class AutoAlertEngine:
                         # Scan opening drives during the opening window (09:15 to 09:35 IST)
 
                         if now_ist.hour == 9 and now_ist.minute <= 35:
-                            self.scan_opening_drives(quotes_map=quotes_map)
+                            self.scan_opening_drives(quotes_map=quotes_map, indices_only=True)
 
                         self.scan_index_micro_scalp(quotes_map=quotes_map, chains_map=chains_map)
 

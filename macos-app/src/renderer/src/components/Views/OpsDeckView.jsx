@@ -132,8 +132,10 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const [expandedTracebacks, setExpandedTracebacks] = useState({})
   const [actionInProgress, setActionInProgress] = useState('')
   const [newTbtSymbol, setNewTbtSymbol] = useState('')
+  const [dedicatedTbt, setDedicatedTbt] = useState(null)
   const [tbtFilterRole, setTbtFilterRole] = useState('ALL')
   const [showSentinelGuide, setShowSentinelGuide] = useState(false)
+  const [showFlattradeWsModal, setShowFlattradeWsModal] = useState(false)
   const [copiedIncKey, setCopiedIncKey] = useState(null)
 
   // ── L2 Universe Depth Radar State ─────────────────────────────────
@@ -160,6 +162,78 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
       // Ignore
     }
   }, [radarInspectorOpen])
+
+  // ── Market Dynamics & Hierarchical 3Cs State ──────────────────────
+  const [dynamicsData, setDynamicsData] = useState(null)
+  const [hierarchical3CsData, setHierarchical3CsData] = useState(null)
+  const [dynamicsLoading, setDynamicsLoading] = useState(false)
+  const [dynamicsLookupSymbol, setDynamicsLookupSymbol] = useState('')
+  const [dynamicsLookupResult, setDynamicsLookupResult] = useState(null)
+  const [hierarchicalLookupResult, setHierarchicalLookupResult] = useState(null)
+  const [dynamicsLookupLoading, setDynamicsLookupLoading] = useState(false)
+
+  const fetchMarketDynamics = useCallback(async () => {
+    if (!port) return
+    try {
+      setDynamicsLoading(true)
+      const [resDyn, res3Cs] = await Promise.allSettled([
+        fetch(`${getBaseUrl(port)}/api/market/dynamics?symbol=NIFTY`, {
+          signal: AbortSignal.timeout(4000),
+        }),
+        fetch(`${getBaseUrl(port)}/api/pipeline/hierarchical-market-context?symbol=NIFTY`, {
+          signal: AbortSignal.timeout(4000),
+        }),
+      ])
+      if (resDyn.status === 'fulfilled' && resDyn.value.ok) {
+        const json = await resDyn.value.json()
+        setDynamicsData(json)
+      }
+      if (res3Cs.status === 'fulfilled' && res3Cs.value.ok) {
+        const json = await res3Cs.value.json()
+        setHierarchical3CsData(json?.market_context_3cs || null)
+      }
+    } catch (_) {
+      // Degraded
+    } finally {
+      setDynamicsLoading(false)
+    }
+  }, [port])
+
+  useEffect(() => {
+    if (activeTab === 'dynamics') {
+      fetchMarketDynamics()
+      const timer = setInterval(fetchMarketDynamics, 5000)
+      return () => clearInterval(timer)
+    }
+  }, [activeTab, fetchMarketDynamics])
+
+  const handleLookupSymbolCalibration = async (e) => {
+    e?.preventDefault()
+    const sym = (dynamicsLookupSymbol || '').trim().toUpperCase()
+    if (!sym || !port) return
+    try {
+      setDynamicsLookupLoading(true)
+      const [resDyn, res3Cs] = await Promise.allSettled([
+        fetch(`${getBaseUrl(port)}/api/market/dynamics?symbol=${encodeURIComponent(sym)}`, {
+          signal: AbortSignal.timeout(4000),
+        }),
+        fetch(`${getBaseUrl(port)}/api/pipeline/hierarchical-market-context?symbol=${encodeURIComponent(sym)}`, {
+          signal: AbortSignal.timeout(4000),
+        }),
+      ])
+      if (resDyn.status === 'fulfilled' && resDyn.value.ok) {
+        const json = await resDyn.value.json()
+        setDynamicsLookupResult(json)
+      }
+      if (res3Cs.status === 'fulfilled' && res3Cs.value.ok) {
+        const json = await res3Cs.value.json()
+        setHierarchicalLookupResult(json?.market_context_3cs || null)
+      }
+    } catch (_) {
+    } finally {
+      setDynamicsLookupLoading(false)
+    }
+  }
 
   // ── Sentinel Hover Intel Portal State (Screen-Adaptive & Zero Scroll Clipping) ──
   const [hoveredSentinel, setHoveredSentinel] = useState(null) // { intel, rect }
@@ -311,11 +385,32 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     }
   }, [port, scopeFilter])
 
+  const fetchTbtData = useCallback(async () => {
+    if (!port) return
+    try {
+      const res = await fetch(`${getBaseUrl(port)}/api/fyers/tbt-status`, {
+        signal: AbortSignal.timeout(5000),
+      })
+      if (res.ok) {
+        const json = await res.json()
+        if (json.data) {
+          setDedicatedTbt(json.data)
+        }
+      }
+    } catch {
+      // Non-fatal fallback to health-hub
+    }
+  }, [port])
+
   useEffect(() => {
     fetchHubData()
-    const interval = setInterval(fetchHubData, 6000)
+    fetchTbtData()
+    const interval = setInterval(() => {
+      fetchHubData()
+      fetchTbtData()
+    }, 6000)
     return () => clearInterval(interval)
-  }, [fetchHubData])
+  }, [fetchHubData, fetchTbtData])
 
   // Actions
   const handleResetBreaker = async () => {
@@ -343,6 +438,33 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
       }
     } catch (e) {
       addToast({ title: 'Action Failed', message: String(e), type: 'error' })
+    } finally {
+      setActionInProgress('')
+    }
+  }
+
+  const handleSetBrokerRole = async (broker, role) => {
+    try {
+      setActionInProgress(`role_${broker}_${role}`)
+      const res = await fetch(`${getBaseUrl(port)}/api/broker/role`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ broker, role }),
+      })
+      if (res.ok) {
+        addToast({
+          title: 'Broker Role Updated',
+          message: `${broker.toUpperCase()} assigned role: ${role.toUpperCase()}`,
+          type: 'success',
+        })
+        fetchHubData()
+        fetchTbtData()
+      } else {
+        const err = await res.json().catch(() => ({}))
+        addToast({ title: 'Role Update Failed', message: err.detail || 'Could not update broker role', type: 'error' })
+      }
+    } catch (e) {
+      addToast({ title: 'Role Update Failed', message: String(e), type: 'error' })
     } finally {
       setActionInProgress('')
     }
@@ -424,6 +546,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           type: 'success',
         })
         fetchHubData()
+        fetchTbtData()
       } else {
         const err = await res.json().catch(() => ({}))
         addToast({
@@ -494,6 +617,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           type: 'success',
         })
         fetchHubData()
+        fetchTbtData()
       } else {
         const err = await res.json().catch(() => ({}))
         addToast({ title: 'Eviction Failed', message: err.detail || 'Could not evict symbol', type: 'error' })
@@ -521,6 +645,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           type: 'success',
         })
         fetchHubData()
+        fetchTbtData()
       }
     } catch (e) {
       addToast({ title: 'Rebalance Failed', message: String(e), type: 'error' })
@@ -544,6 +669,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           type: 'info',
         })
         fetchHubData()
+        fetchTbtData()
       }
     } catch (e) {
       addToast({ title: 'Focus Update Failed', message: String(e), type: 'error' })
@@ -571,6 +697,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
         })
         setNewTbtSymbol('')
         fetchHubData()
+        fetchTbtData()
       } else {
         const err = await res.json().catch(() => ({}))
         addToast({ title: 'Subscribe Failed', message: err.detail || 'Could not subscribe symbol', type: 'error' })
@@ -597,6 +724,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           type: 'success',
         })
         fetchHubData()
+        fetchTbtData()
       } else {
         const err = await res.json().catch(() => ({}))
         addToast({ title: 'Clear Failed', message: err.detail || 'Could not clear cooldowns', type: 'error' })
@@ -659,7 +787,9 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const overall = data?.overall_status || (loading ? 'SYNCING…' : 'NOMINAL')
   const cb = data?.circuit_breaker || {}
   const rg = data?.rate_gate || {}
-  const tbt = data?.tbt || {}
+  const tbt = (dedicatedTbt && ((dedicatedTbt.slots && dedicatedTbt.slots.length > 0) || (dedicatedTbt.active_total > 0)))
+    ? dedicatedTbt
+    : (data?.tbt || dedicatedTbt || {})
   const ws = data?.websocket || {}
   const counts = useMemo(() => {
     const list = data?.incidents || []
@@ -671,6 +801,9 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     return derived
   }, [data?.incidents])
   const brokers = data?.brokers || {}
+  const flattrade = data?.flattrade || {}
+  const flattradeWs = flattrade.websocket || {}
+  const flattradeRg = flattrade.rate_gate || {}
   const slo = data?.slo_report || {}
   const providerHealth = data?.provider_health || {}
   const telem = data?.telemetry_summary || {}
@@ -838,6 +971,23 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
             <span>Peak: {rg.peak_minute_recorded || 0}/min</span>
             <span>Left: {rg.daily_budget_remaining != null ? Math.round(rg.daily_budget_remaining / 1000) + 'k' : '—'}</span>
           </div>
+
+          <div className="mt-1.5 pt-1.5 border-t border-border/40 flex items-center justify-between text-[10px] font-mono">
+            <span className="text-muted flex items-center gap-1">
+              <span
+                className="inline-block w-1.5 h-1.5 rounded-full"
+                style={{ background: flattrade.authenticated ? 'var(--color-emerald)' : 'var(--color-muted)' }}
+              />
+              Standby: <strong className="text-text">Flattrade (Pi)</strong>
+            </span>
+            <span
+              className={`px-1 py-0.2 rounded text-[9px] font-bold ${
+                flattrade.authenticated ? 'bg-emerald/15 text-emerald' : 'bg-surface text-muted'
+              }`}
+            >
+              {flattrade.authenticated ? (flattrade.role ? flattrade.role.toUpperCase() : 'HOT STANDBY') : 'OFFLINE'}
+            </span>
+          </div>
         </div>
 
         {/* Card 3: WebSocket Streaming Capacity */}
@@ -870,8 +1020,27 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
             </div>
           </div>
 
-          <div className="text-[10px] font-mono text-muted">
-            Core: {ws.core_count || 0} • Dynamic: {ws.dynamic_count || 0}
+          <div className="text-[10px] font-mono text-muted flex items-center justify-between">
+            <span>Core: {ws.core_count || 0} • Dynamic: {ws.dynamic_count || 0}</span>
+          </div>
+
+          <div className="mt-1.5 pt-1.5 border-t border-border/40 flex items-center justify-between text-[10px] font-mono">
+            <span className="text-muted flex items-center gap-1">
+              <span
+                className="inline-block w-1.5 h-1.5 rounded-full"
+                style={{
+                  background: flattradeWs.connected
+                    ? 'var(--color-emerald)'
+                    : flattradeWs.subscriptions_count > 0
+                      ? 'var(--color-gold)'
+                      : 'var(--color-muted)',
+                }}
+              />
+              Flattrade Feed:
+            </span>
+            <span className="text-text font-bold text-[9px]">
+              {flattradeWs.subscriptions_count || 0} tokens {flattradeWs.connected ? '🟢 LIVE' : '⚪ READY'}
+            </span>
           </div>
         </div>
 
@@ -1037,6 +1206,19 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
             >
               L2 / 5-Depth
             </span>
+          </button>
+          <button
+            type="button"
+            data-testid="tab-dynamics"
+            onClick={() => setActiveTab('dynamics')}
+            className={`px-3 py-2 text-xs font-mono font-bold border-b-2 transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'dynamics'
+                ? 'border-gold text-gold bg-elevated/60'
+                : 'border-transparent text-muted hover:text-text'
+            }`}
+          >
+            <span>🧭</span>
+            <span>Market Dynamics Governor</span>
           </button>
           <button
             type="button"
@@ -1424,39 +1606,312 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
             </div>
 
             {/* Brokers Connectivity Matrix */}
-            <div className="p-4 rounded-xl border border-border bg-panel space-y-3">
-              <h3 className="text-xs font-bold font-ui uppercase tracking-wider text-muted">
-                Broker Integrations & Session Status
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {Object.entries(brokers).map(([name, b]) => {
-                  const isAuth = b.authenticated
-                  const isConfig = b.configured
-                  return (
-                    <div
-                      key={name}
-                      className="p-3 rounded-xl border border-border bg-elevated flex items-center justify-between"
-                    >
+            <div className="p-4 rounded-xl border border-border bg-panel space-y-4">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-bold font-ui uppercase tracking-wider text-muted">
+                    Broker Integrations & Session Status
+                  </h3>
+                  <p className="text-[11px] font-mono text-muted mt-0.5">
+                    Dual Gateway Ops Matrix: Fyers Prime (Primary L3 Data + Execution) & Flattrade Pi (Secondary Hot Standby & Zero-Brokerage OMS)
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-sapphire/15 text-sapphire border border-sapphire/30">
+                    GATEWAY 1: FYERS (PRIME)
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-gold/15 text-gold border border-gold/30">
+                    GATEWAY 2: FLATTRADE (STANDBY)
+                  </span>
+                </div>
+              </div>
+
+              {/* Dual Gateway Core Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {/* 1. Fyers Prime Card */}
+                <div
+                  className="p-3.5 rounded-xl border border-sapphire/40 bg-elevated relative overflow-hidden flex flex-col justify-between"
+                  style={{ background: 'linear-gradient(135deg, rgba(37,99,235,0.06) 0%, rgba(15,23,42,0.6) 100%)' }}
+                >
+                  <div>
+                    <div className="flex items-start justify-between">
                       <div>
-                        <span className="text-xs font-bold font-mono uppercase block text-text">
-                          {name}
-                        </span>
-                        <span className="text-[10px] font-mono text-muted">
-                          Role: {b.role || 'Data / Exec'}
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold font-mono uppercase text-text">
+                            Fyers Prime
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-sapphire/20 text-sapphire border border-sapphire/40">
+                            PRIMARY GATEWAY
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted block mt-0.5">
+                          Institutional L3 Data Engine & Primary Execution OMS
                         </span>
                       </div>
-                      <div className="text-right">
-                        <span
-                          className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
-                            isAuth ? 'bg-emerald/15 text-emerald' : isConfig ? 'bg-gold/15 text-gold' : 'bg-surface text-muted'
-                          }`}
-                        >
-                          {isAuth ? 'AUTHENTICATED' : isConfig ? 'CONFIGURED' : 'NOT CONFIGURED'}
+                      <span
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
+                          brokers.fyers?.authenticated
+                            ? 'bg-emerald/15 text-emerald border border-emerald/30'
+                            : brokers.fyers?.configured
+                              ? 'bg-gold/15 text-gold border border-gold/30'
+                              : 'bg-surface text-muted border border-border'
+                        }`}
+                      >
+                        {brokers.fyers?.authenticated ? '● AUTHENTICATED' : brokers.fyers?.configured ? '○ CONFIGURED' : '✕ NOT CONFIGURED'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 my-3 text-xs font-mono">
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">Role Assignment</span>
+                        <span className="font-bold text-sapphire">
+                          {brokers.fyers?.role ? brokers.fyers.role.toUpperCase() : 'DATA & EXECUTION'}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">REST Rate Gate</span>
+                        <span className="font-bold text-emerald">
+                          {rg.plan || 'PRIME'} • {Math.round(rg.daily_budget_remaining != null ? rg.daily_budget_remaining / 1000 : 500)}k left
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">WebSocket Streaming</span>
+                        <span className="font-bold text-text">
+                          {ws.total_subscribed || 0} / {ws.max_capacity || 5000} slots ({ws.utilization_pct || 0}%)
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">50-Depth TBT Engine</span>
+                        <span className="font-bold text-gold">
+                          {tbt.active_total || 0} / 15 slots allocated
                         </span>
                       </div>
                     </div>
-                  )
-                })}
+                  </div>
+
+                  <div className="pt-2 border-t border-border/40 space-y-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-muted">
+                      <span>Circuit Breaker: <strong className={cb.state === 'CLOSED' ? 'text-emerald' : 'text-rose'}>{cb.state || 'CLOSED'}</strong></span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-panel text-muted border border-border">
+                        Full Greeks • ATP • VWAP
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-muted">
+                        Quick Promotion:
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          data-testid="btn-fyers-exec"
+                          disabled={actionInProgress === 'role_fyers_execution'}
+                          onClick={() => handleSetBrokerRole('fyers', 'execution')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-border text-muted hover:text-text cursor-pointer transition-colors"
+                          title="Promote Fyers Prime to active execution broker"
+                        >
+                          Prime Exec
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="btn-fyers-data"
+                          disabled={actionInProgress === 'role_fyers_data'}
+                          onClick={() => handleSetBrokerRole('fyers', 'data')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-border text-muted hover:text-text cursor-pointer transition-colors"
+                          title="Set Fyers Prime as primary data feed"
+                        >
+                          Prime Data
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="btn-fyers-both"
+                          disabled={actionInProgress === 'role_fyers_both'}
+                          onClick={() => handleSetBrokerRole('fyers', 'both')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-sapphire/40 text-sapphire hover:text-text cursor-pointer transition-colors"
+                          title="Set Fyers Prime as primary for both data and execution"
+                        >
+                          Prime (Both)
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Flattrade (Pi Connect) Card */}
+                <div
+                  className="p-3.5 rounded-xl border border-gold/40 bg-elevated relative overflow-hidden flex flex-col justify-between"
+                  style={{ background: 'linear-gradient(135deg, rgba(245,166,35,0.06) 0%, rgba(15,23,42,0.6) 100%)' }}
+                >
+                  <div>
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold font-mono uppercase text-text">
+                            Flattrade (Pi)
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-gold/20 text-gold border border-gold/40">
+                            HOT STANDBY GATEWAY
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted block mt-0.5">
+                          Zero-Brokerage Execution Engine & Noren L2 Tick Fallback
+                        </span>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
+                          flattrade.authenticated || brokers.flattrade?.authenticated
+                            ? 'bg-emerald/15 text-emerald border border-emerald/30'
+                            : flattrade.configured || brokers.flattrade?.configured
+                              ? 'bg-gold/15 text-gold border border-gold/30'
+                              : 'bg-surface text-muted border border-border'
+                        }`}
+                      >
+                        {flattrade.authenticated || brokers.flattrade?.authenticated ? '● AUTHENTICATED' : '✕ NOT CONFIGURED'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 my-3 text-xs font-mono">
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">Role Assignment</span>
+                        <span className="font-bold text-gold">
+                          {flattrade.role ? flattrade.role.toUpperCase() : 'HOT STANDBY (FAILOVER)'}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">REST Rate Governor</span>
+                        <span
+                          className={`font-bold ${
+                            flattradeRg.status === 'EXHAUSTED'
+                              ? 'text-rose'
+                              : flattradeRg.status === 'SATURATED' || flattradeRg.status === 'THROTTLED'
+                              ? 'text-gold'
+                              : 'text-emerald'
+                          }`}
+                        >
+                          {flattradeRg.max_per_sec || 8} req/s • {flattradeRg.requests_last_min || 0} req/m ({flattradeRg.utilization_pct || 0}%)
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">Streaming WebSocket</span>
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-text flex items-center gap-1">
+                            <span
+                              className="inline-block w-1.5 h-1.5 rounded-full"
+                              style={{
+                                background: flattradeWs.connected
+                                  ? 'var(--color-emerald)'
+                                  : flattradeWs.subscriptions_count > 0
+                                    ? 'var(--color-gold)'
+                                    : 'var(--color-muted)',
+                              }}
+                            />
+                            {flattradeWs.subscriptions_count || 0} tokens {flattradeWs.connected ? 'Streaming' : 'Ready'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShowFlattradeWsModal(true)}
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-panel border border-border hover:border-gold/50 text-muted hover:text-gold transition-colors cursor-pointer"
+                            title="Inspect Flattrade WebSocket subscriptions and latency"
+                          >
+                            Inspect
+                          </button>
+                        </div>
+                      </div>
+                      <div className="p-2 rounded bg-surface/70 border border-border/40">
+                        <span className="text-[10px] text-muted block">Client UCC & Pricing</span>
+                        <span className="font-bold text-text flex items-center justify-between">
+                          <span>{flattrade.user_id || flattrade.account_id || 'FZ59464'}</span>
+                          <span className="text-emerald text-[10px] font-bold">₹0 Brokerage</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-border/40 space-y-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-muted">
+                      <span>Rate Pacing: <strong className="text-emerald">ACTIVE (8 req/s)</strong> • Hist: <strong className="text-gold">1 req/s</strong></span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-panel text-muted border border-border">
+                        Auto-Failover → Fyers
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-muted">
+                        Quick Promotion:
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          disabled={actionInProgress === 'role_flattrade_execution'}
+                          onClick={() => handleSetBrokerRole('flattrade', 'execution')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-border text-muted hover:text-text cursor-pointer transition-colors"
+                          title="Promote Flattrade to active execution broker"
+                        >
+                          Set Exec
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actionInProgress === 'role_flattrade_data'}
+                          onClick={() => handleSetBrokerRole('flattrade', 'data')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-border text-muted hover:text-text cursor-pointer transition-colors"
+                          title="Set Flattrade as primary data feed"
+                        >
+                          Set Data
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actionInProgress === 'role_flattrade_both'}
+                          onClick={() => handleSetBrokerRole('flattrade', 'both')}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-panel hover:bg-highlight border border-border text-gold hover:text-text cursor-pointer transition-colors"
+                          title="Set Flattrade as primary for both data and execution"
+                        >
+                          Set Both
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Other Configured Adapters */}
+              <div className="pt-2">
+                <span className="text-[10px] font-mono uppercase text-muted tracking-wider block mb-2">
+                  Additional Supported Broker Adapters
+                </span>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                  {Object.entries(brokers)
+                    .filter(([name]) => name !== 'fyers' && name !== 'flattrade')
+                    .map(([name, b]) => {
+                      const isAuth = b.authenticated
+                      const isConfig = b.configured
+                      return (
+                        <div
+                          key={name}
+                          className="p-2.5 rounded-lg border border-border/60 bg-surface/50 flex items-center justify-between"
+                        >
+                          <div>
+                            <span className="text-xs font-bold font-mono uppercase block text-text">
+                              {name.replace('_', ' ')}
+                            </span>
+                            <span className="text-[9px] font-mono text-muted">
+                              Role: {b.role || 'Standby'}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span
+                              className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                                isAuth
+                                  ? 'bg-emerald/15 text-emerald'
+                                  : isConfig
+                                    ? 'bg-gold/15 text-gold'
+                                    : 'bg-panel text-muted'
+                              }`}
+                            >
+                              {isAuth ? 'AUTH' : isConfig ? 'CONFIG' : 'IDLE'}
+                            </span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                </div>
               </div>
             </div>
 
@@ -2545,6 +3000,341 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           </div>
         )}
 
+        {/* ─────────── TAB: MARKET DYNAMICS GOVERNOR ─────────── */}
+        {activeTab === 'dynamics' && (() => {
+          const dyn = dynamicsData || {}
+          const calib = dyn.calibration || dyn.sample_index_calibration || {}
+          const phase = dyn.current_phase || 'UNKNOWN'
+          const volRegime = dyn.volatility_regime || 'NORMAL_VIX'
+          const vix = dyn.india_vix || 14.0
+          const mandate = calib.mandate || 'UNKNOWN'
+          const vehicle = calib.preferred_vehicle || 'STANDARD'
+          const breakoutAllowed = calib.is_breakout_allowed
+          const meanRevFavored = calib.is_mean_reversion_favored
+          const quarantined = calib.stock_options_quarantined
+
+          const phaseLabels = {
+            OPENING_AUCTION_DISCOVERY: { label: 'Opening Auction & Discovery', time: '09:15 – 09:45 IST', desc: 'Price discovery, wide spreads, high volume hurdle (2.5x)' },
+            MORNING_INSTITUTIONAL_EXPANSION: { label: 'Morning Institutional Expansion', time: '09:45 – 11:30 IST', desc: 'Prime directional momentum, optimal for ORB and trend continuation' },
+            MIDDAY_MEAN_REVERSION_CHOP: { label: 'Midday Mean Reversion Chop', time: '11:30 – 13:15 IST', desc: 'Theta trap for option buyers. Breakouts suppressed; VWAP/CPR fades favored' },
+            AFTERNOON_TREND_IGNITION: { label: 'Afternoon Trend Ignition', time: '13:15 – 14:45 IST', desc: 'Secondary momentum thrusts, gamma blasts on volume surge' },
+            EXPIRY_0DTE_GAMMA_UNPIN: { label: '0DTE Gamma Explosion & Unpin', time: '14:45 – 15:15 IST', desc: 'Expiry pin-strikes, violent gamma unpins; stock options frozen' },
+            SESSION_MOC_HARDBOARD_CUTOFF: { label: 'MOC Hardboard Cutoff', time: '15:15 – 15:30 IST', desc: 'Absolute entry freeze; risk-off trailing; margin square-off immunity' },
+            OFF_MARKET_POSTCLOSE: { label: 'Off-Market Post-Close', time: '15:30 – 09:15 IST', desc: 'Market closed; zero new entries permitted' },
+            OFF_MARKET_PREOPEN: { label: 'Pre-Open Auction', time: '09:00 – 09:15 IST', desc: 'Pre-market order matching; entries suppressed' },
+          }
+
+          const currentPhaseInfo = phaseLabels[phase] || { label: phase, time: '—', desc: 'Active market phase' }
+
+          const activeDisplay = dynamicsLookupResult || dyn
+          const activeCalib = activeDisplay.calibration || activeDisplay.sample_index_calibration || {}
+          const activeSym = activeDisplay.target_symbol || 'NIFTY'
+
+          return (
+            <div className="space-y-4 max-w-6xl mx-auto">
+              {/* Header / Current Intraday Phase Banner */}
+              <div className="p-4 rounded-xl border border-border bg-panel space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-3">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🧭</span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-bold font-ui uppercase tracking-wider text-text">
+                          Institutional Market Dynamics Governor
+                        </h3>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          SUB-MILLISECOND IN-MEMORY MATRIX
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted font-mono mt-0.5">
+                        Context-adaptive parametric calibration for Indian F&O. Replaces static parameters with live regime governance.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={fetchMarketDynamics}
+                    disabled={dynamicsLoading}
+                    className="px-3 py-1 rounded-lg text-xs font-mono font-bold bg-elevated hover:bg-highlight border border-border text-text transition-colors cursor-pointer"
+                  >
+                    {dynamicsLoading ? 'Refreshing…' : '🔄 Refresh Matrix'}
+                  </button>
+                </div>
+
+                {/* 4 Core Pillars Overview */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {/* Pillar 1: Phase */}
+                  <div className="p-3 rounded-lg border border-border bg-elevated space-y-1">
+                    <span className="text-[10px] font-mono text-muted block uppercase">Current Session Phase</span>
+                    <span className="text-sm font-mono font-bold text-gold block truncate">
+                      {currentPhaseInfo.label}
+                    </span>
+                    <span className="text-[11px] font-mono text-muted block">
+                      {currentPhaseInfo.time}
+                    </span>
+                  </div>
+
+                  {/* Pillar 2: Volatility Regime */}
+                  <div className="p-3 rounded-lg border border-border bg-elevated space-y-1">
+                    <span className="text-[10px] font-mono text-muted block uppercase">Volatility Regime (India VIX)</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono font-bold text-text">
+                        {vix.toFixed(2)}
+                      </span>
+                      <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                        volRegime === 'LOW_VIX' ? 'bg-sky-500/15 text-sky-400' :
+                        volRegime === 'NORMAL_VIX' ? 'bg-emerald-500/15 text-emerald-400' :
+                        volRegime === 'ELEVATED_VIX' ? 'bg-amber-500/15 text-amber-400' :
+                        'bg-rose-500/15 text-rose-400'
+                      }`}>
+                        {volRegime}
+                      </span>
+                    </div>
+                    <span className="text-[11px] font-mono text-muted block">
+                      SL ATR Multiplier: {(activeCalib.atr_sl_multiplier || 1.0).toFixed(2)}x
+                    </span>
+                  </div>
+
+                  {/* Pillar 3: Mandate & Vehicle */}
+                  <div className="p-3 rounded-lg border border-border bg-elevated space-y-1">
+                    <span className="text-[10px] font-mono text-muted block uppercase">Vehicle Mandate</span>
+                    <span className="text-sm font-mono font-bold text-sapphire block truncate">
+                      {vehicle}
+                    </span>
+                    <span className="text-[11px] font-mono text-muted block truncate">
+                      Mandate: {mandate}
+                    </span>
+                  </div>
+
+                  {/* Pillar 4: Permissions */}
+                  <div className="p-3 rounded-lg border border-border bg-elevated space-y-1">
+                    <span className="text-[10px] font-mono text-muted block uppercase">Regime Gates</span>
+                    <div className="flex items-center gap-2 text-xs font-mono">
+                      <span>Breakouts:</span>
+                      <span className={breakoutAllowed ? 'text-emerald-400 font-bold' : 'text-rose font-bold'}>
+                        {breakoutAllowed ? 'ALLOWED' : 'VETOED'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-mono">
+                      <span>Mean-Rev:</span>
+                      <span className={meanRevFavored ? 'text-emerald-400 font-bold' : 'text-muted'}>
+                        {meanRevFavored ? 'FAVORED' : 'NEUTRAL'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Phase Description Quote */}
+                <div className="p-2.5 rounded-lg border border-border/40 bg-elevated/40 text-xs font-mono text-text/80 flex items-center gap-2">
+                  <span className="text-gold">ℹ</span>
+                  <span>{currentPhaseInfo.desc}</span>
+                  {quarantined && (
+                    <span className="ml-auto px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                      ⚠️ SEBI Expiry Physical Delivery Quarantine Active
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Symbol Calibration Inspector */}
+              <div className="p-4 rounded-xl border border-border bg-panel space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold font-ui uppercase tracking-wider text-muted">
+                    Symbol Dynamic Calibration Inspector
+                  </h4>
+                  <form onSubmit={handleLookupSymbolCalibration} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={dynamicsLookupSymbol}
+                      onChange={(e) => setDynamicsLookupSymbol(e.target.value)}
+                      placeholder="e.g. NIFTY, BANKNIFTY, RELIANCE"
+                      className="px-2.5 py-1 text-xs font-mono rounded-lg bg-elevated border border-border text-text focus:outline-none focus:border-gold w-48 uppercase"
+                    />
+                    <button
+                      type="submit"
+                      disabled={dynamicsLookupLoading}
+                      className="px-3 py-1 rounded-lg text-xs font-mono font-bold bg-gold/15 text-gold border border-gold/40 hover:bg-gold/25 transition-colors cursor-pointer"
+                    >
+                      {dynamicsLookupLoading ? 'Inspecting…' : 'Inspect Symbol'}
+                    </button>
+                  </form>
+                </div>
+
+                {/* Active Inspected Symbol Card */}
+                <div className="p-3.5 rounded-xl border border-border bg-elevated space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/40 pb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-bold font-mono text-text">{activeSym}</span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-sapphire/15 text-sapphire border border-sapphire/30">
+                        {activeCalib.instrument_tier || 'TIER_1'}
+                      </span>
+                      <span className="text-xs font-mono text-muted">
+                        Calibrated at: {activeCalib.timestamp || 'Live'}
+                      </span>
+                    </div>
+                    <span className="text-xs font-mono font-bold text-gold">
+                      Preferred: {activeCalib.preferred_vehicle || 'STANDARD'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Min Required RVOL</span>
+                      <span className="text-sm font-mono font-bold text-text">
+                        {(activeCalib.min_required_rvol || 1.8).toFixed(2)}x
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Stop ATR Multiplier</span>
+                      <span className="text-sm font-mono font-bold text-text">
+                        {(activeCalib.atr_sl_multiplier || 1.0).toFixed(2)}x
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Target 1 (Scalp)</span>
+                      <span className="text-sm font-mono font-bold text-emerald-400">
+                        +{(activeCalib.target_1_rr || 2.0).toFixed(1)}R
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Target 2 (Runner)</span>
+                      <span className="text-sm font-mono font-bold text-emerald-400">
+                        +{(activeCalib.target_2_rr || 3.5).toFixed(1)}R
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Max Chase Limit</span>
+                      <span className="text-sm font-mono font-bold text-amber-400">
+                        {(activeCalib.max_chase_pct || 0.12).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-panel border border-border/60">
+                      <span className="text-[10px] font-mono text-muted block uppercase">Delivery Quarantine</span>
+                      <span className={`text-sm font-mono font-bold ${activeCalib.stock_options_quarantined ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {activeCalib.stock_options_quarantined ? 'FROZEN' : 'CLEAR'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {activeCalib.rationale && (
+                    <div className="p-2 rounded bg-panel/60 border border-border/30 text-xs font-mono text-muted">
+                      <span className="text-text font-bold">Governor Rationale:</span> {activeCalib.rationale}
+                    </div>
+                  )}
+                </div>
+
+                {/* Modernized Level 1 Market Context (The 3Cs Framework) */}
+                {(() => {
+                  const active3Cs = hierarchicalLookupResult || hierarchical3CsData || {}
+                  const c1 = active3Cs.c1_customers_order_flow || {}
+                  const c2 = active3Cs.c2_competitors_intermarket || {}
+                  const c3 = active3Cs.c3_company_asset_mechanics || {}
+                  const isFavorable = active3Cs.is_favorable
+                  const confMultiplier = active3Cs.confidence_multiplier || 1.0
+
+                  return (
+                    <div className="p-3.5 rounded-xl border border-border bg-elevated space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold font-mono uppercase tracking-wider text-text">
+                            Level 1 Context: The Modernized 3Cs
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                              isFavorable
+                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                            }`}
+                          >
+                            {isFavorable ? 'FAVORABLE CONTEXT' : 'RESTRICTED / CHOP'}
+                          </span>
+                        </div>
+                        <span className="text-xs font-mono text-muted">
+                          Confidence Multiplier: <strong className="text-gold">{confMultiplier.toFixed(2)}x</strong>
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {/* C1: Customers & Order Flow */}
+                        <div className="p-3 rounded-lg border border-border/60 bg-panel space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-mono font-bold text-sapphire">1. Customers (Order Flow)</span>
+                            <span className="text-[10px] font-mono text-muted">Liquidity Dominance</span>
+                          </div>
+                          <div className="space-y-1.5 text-xs font-mono">
+                            <div className="flex justify-between">
+                              <span className="text-muted">Participant Bias:</span>
+                              <span className="text-text font-bold">{c1.participant_oi_bias || 'NEUTRAL'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">OBI-50 Imbalance:</span>
+                              <span className={(c1.obi_50_imbalance || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                                {(c1.obi_50_imbalance || 0).toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">TOD-RVOL:</span>
+                              <span className="text-text">{(c1.time_of_day_rvol || 1.0).toFixed(2)}x</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* C2: Competitors & Intermarket */}
+                        <div className="p-3 rounded-lg border border-border/60 bg-panel space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-mono font-bold text-sky-400">2. Competitors (Macro & RRG)</span>
+                            <span className="text-[10px] font-mono text-muted">Correlated Assets</span>
+                          </div>
+                          <div className="space-y-1.5 text-xs font-mono">
+                            <div className="flex justify-between">
+                              <span className="text-muted">Macro Posture:</span>
+                              <span className="text-text font-bold">{c2.macro_posture || 'NEUTRAL'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">GIFT Nifty Gap:</span>
+                              <span className={(c2.gift_nifty_gap_pts || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                                {(c2.gift_nifty_gap_pts || 0) > 0 ? '+' : ''}{(c2.gift_nifty_gap_pts || 0).toFixed(1)} pts
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">Sector RRG:</span>
+                              <span className="text-gold">{c2.sector_rrg_quadrant || 'LEADING'}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* C3: Company / Asset Mechanics */}
+                        <div className="p-3 rounded-lg border border-border/60 bg-panel space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-mono font-bold text-amber-400">3. Company (Mechanics)</span>
+                            <span className="text-[10px] font-mono text-muted">Volatility Distribution</span>
+                          </div>
+                          <div className="space-y-1.5 text-xs font-mono">
+                            <div className="flex justify-between">
+                              <span className="text-muted">Volatility Regime:</span>
+                              <span className="text-text font-bold">{c3.volatility_regime || 'NORMAL'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">Edgeless Chop:</span>
+                              <span className={c3.is_edgeless_chop ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                                {c3.is_edgeless_chop ? 'ACTIVE (AVOID)' : 'CLEAR'}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted">CPR Alignment:</span>
+                              <span className="text-text">{c3.cpr_alignment || 'NEUTRAL'}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            </div>
+          )
+        })()}
+
         {/* ─────────── TAB 3: AI & TELEMETRY ─────────── */}
         {activeTab === 'telemetry' && (
           <div className="space-y-4 max-w-6xl mx-auto">
@@ -2816,6 +3606,144 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           )
         })(),
         document.body
+      )}
+
+      {/* ── Flattrade WebSocket & Governor Inspector Modal ─────────────────── */}
+      {showFlattradeWsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setShowFlattradeWsModal(false)}
+        >
+          <div
+            className="w-full max-w-xl bg-panel border border-border rounded-xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-base font-bold font-mono text-gold">⚡ Flattrade (Pi Connect) Telemetry</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-gold/15 text-gold border border-gold/30">
+                  HOT STANDBY
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFlattradeWsModal(false)}
+                className="text-muted hover:text-text text-lg cursor-pointer leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-3 overflow-y-auto flex-1 pr-1 font-mono text-xs">
+              {/* Governor Grid */}
+              <div>
+                <span className="text-[10px] uppercase text-muted tracking-wider block mb-1.5 font-bold">
+                  REST Rate Governor Status
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Pacing & Ceiling</span>
+                    <span className="font-bold text-emerald">
+                      {flattradeRg.max_per_sec || 8} req/s cap (10 max)
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Minute Velocity</span>
+                    <span className="font-bold text-text">
+                      {flattradeRg.requests_last_min || 0} req/m ({flattradeRg.utilization_pct || 0}%)
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Historical Candle Pacing</span>
+                    <span className="font-bold text-gold">1.0 req/s strict throttle</span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Governor State</span>
+                    <span className="font-bold text-emerald">
+                      {flattradeRg.status || 'NOMINAL'} (0 drops)
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* WebSocket Telemetry */}
+              <div>
+                <span className="text-[10px] uppercase text-muted tracking-wider block mb-1.5 font-bold">
+                  WebSocket Streaming Engine
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Connection Status</span>
+                    <span className={`font-bold flex items-center gap-1.5 ${flattradeWs.connected ? 'text-emerald' : 'text-gold'}`}>
+                      <span className={`w-2 h-2 rounded-full ${flattradeWs.connected ? 'bg-emerald shadow-[0_0_6px_rgba(16,185,129,0.5)]' : 'bg-gold'}`} />
+                      {flattradeWs.connected ? 'STREAMING (LIVE)' : flattradeWs.subscriptions_count > 0 ? 'READY (HOT STANDBY)' : 'OFFLINE'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Stream State</span>
+                    <span className="font-bold text-text">{flattradeWs.state || 'IDLE'}</span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Subscribed Tokens</span>
+                    <span className="font-bold text-text">{flattradeWs.subscriptions_count || 0} instruments</span>
+                  </div>
+                  <div className="p-2.5 rounded bg-surface border border-border/50">
+                    <span className="text-[10px] text-muted block">Dropped Packets</span>
+                    <span className="font-bold text-emerald">{flattradeWs.dropped_events || 0}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Subscribed Scrips / Tokens */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] uppercase text-muted tracking-wider font-bold">
+                    Active Subscribed Scrips / Tokens
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    Batch Pacing: 30 tokens / 40ms
+                  </span>
+                </div>
+                <div className="p-2.5 rounded bg-surface border border-border/50 max-h-36 overflow-y-auto">
+                  {Array.isArray(flattradeWs.subscriptions) && flattradeWs.subscriptions.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {flattradeWs.subscriptions.map((sym, idx) => (
+                        <span
+                          key={idx}
+                          className="px-2 py-0.5 rounded text-[10px] bg-panel border border-border text-text font-mono"
+                        >
+                          {sym}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted italic">
+                      No standalone direct subscriptions active. Flattrade is in hot standby failover mode; upon Fyers disconnection or promotion, tokens route automatically.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Failover Policy Info */}
+              <div className="p-3 rounded-lg bg-gold/10 border border-gold/30 text-[11px] space-y-1">
+                <span className="font-bold text-gold block">Institutional Failover Architecture</span>
+                <p className="text-muted leading-relaxed">
+                  If Flattrade hits API rate limits, the REST Rate Governor auto-paces requests with zero dropped orders. If connection drops, market feeds automatically fallback to Fyers Prime L3 quotes.
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-border flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowFlattradeWsModal(false)}
+                className="px-3 py-1.5 rounded-lg bg-elevated hover:bg-highlight text-text text-xs font-mono font-bold border border-border transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

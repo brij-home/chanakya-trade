@@ -460,3 +460,32 @@ def test_get_all_metrics_and_reset_all(temp_breaker):
 
     temp_breaker.reset_all()
     assert len(temp_breaker.get_all_metrics()) == 0
+
+
+def test_two_intraday_consecutive_losses_trigger_probation(temp_breaker):
+    """
+    Two consecutive losses in today's active session place a detector into PROBATION
+    with a 25% discount, even if overall historical expectancy is positive.
+    """
+    # 3 prior wins (expectancy positive)
+    for i in range(3):
+        _record_test_outcome(temp_breaker, f"win-{i}", "NIFTY", "INTRADAY_DET", "WIN", 2.0)
+
+    # 2 consecutive losses today
+    _record_test_outcome(temp_breaker, "loss-1", "NIFTY", "INTRADAY_DET", "LOSS", -1.0)
+    _record_test_outcome(temp_breaker, "loss-2", "NIFTY", "INTRADAY_DET", "LOSS", -1.0)
+
+    metrics = temp_breaker.get_metrics("INTRADAY_DET")
+    assert metrics.sample_count == 5
+    assert metrics.today_consecutive_losses == 2
+    assert metrics.consecutive_losses == 2
+    # Expectancy is (3*2.0 - 2*1.0)/5 = 0.8 > 0, but today_consecutive_losses == 2 triggers PROBATION
+    assert metrics.expectancy > 0.0
+    assert metrics.status == "PROBATION"
+    assert metrics.confidence_multiplier == 0.75
+
+    allowed, mult, msg = temp_breaker.evaluate_alert_allowed("INTRADAY_DET")
+    assert allowed is True
+    assert mult == 0.75
+    assert "probation" in msg.lower()
+    assert "2 intraday consecutive losses" in msg.lower()

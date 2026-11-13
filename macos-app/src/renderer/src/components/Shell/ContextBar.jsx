@@ -8,6 +8,109 @@ import { fuzzySearchUniverse } from '../../data/universeData'
 /**
  * HorizonSwitcher — Global Intraday vs Swing context toggle pill
  */
+export function MarketDynamicsPill() {
+  const port = useChatStore((s) => s.port)
+  const sidecarError = useChatStore((s) => s.sidecarError)
+  const setActiveView = useChatStore((s) => s.setActiveView)
+  const [dyn, setDyn] = useState(null)
+  const [indicators, setIndicators] = useState(null)
+
+  useEffect(() => {
+    if (!port || sidecarError) return
+    let active = true
+    const fetchDyn = async () => {
+      try {
+        const [resDyn, resInd] = await Promise.allSettled([
+          fetch(`${getBaseUrl(port)}/api/market/dynamics?symbol=NIFTY`, {
+            signal: AbortSignal.timeout(3000),
+          }),
+          fetch(`${getBaseUrl(port)}/api/market/indicators?symbol=NIFTY`, {
+            signal: AbortSignal.timeout(3000),
+          }),
+        ])
+        if (active) {
+          if (resDyn.status === 'fulfilled' && resDyn.value.ok) {
+            setDyn(await resDyn.value.json())
+          }
+          if (resInd.status === 'fulfilled' && resInd.value.ok) {
+            const indJson = await resInd.value.json()
+            setIndicators(indJson?.indicators || null)
+          }
+        }
+      } catch (_) {}
+    }
+    fetchDyn()
+    const interval = setInterval(fetchDyn, 10000)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [port, sidecarError])
+
+  if (!dyn) return null
+
+  const phase = dyn.current_phase || 'OFF_MARKET'
+  const vix = dyn.india_vix || 14.0
+
+  const phaseLabels = {
+    OPENING_AUCTION_DISCOVERY: '🌅 DISCOVERY',
+    MORNING_INSTITUTIONAL_EXPANSION: '🚀 EXPANSION',
+    MIDDAY_MEAN_REVERSION_CHOP: '⚖️ CHOP',
+    AFTERNOON_TREND_IGNITION: '⚡ IGNITION',
+    EXPIRY_0DTE_GAMMA_UNPIN: '💥 GAMMA',
+    SESSION_MOC_HARDBOARD_CUTOFF: '🛑 MOC',
+    OFF_MARKET_POSTCLOSE: '🌙 POST-CLOSE',
+    OFF_MARKET_PREOPEN: '⏳ PRE-OPEN',
+  }
+
+  const phaseColor = phase.includes('CHOP')
+    ? 'var(--color-amber)'
+    : phase.includes('CUTOFF') || phase.includes('OFF')
+    ? 'var(--color-subtle)'
+    : 'var(--color-emerald)'
+
+  const basis = indicators?.futures_basis
+  const cpr = indicators?.cpr_regime ? indicators.cpr_regime.replace('_CPR', '') : null
+
+  return (
+    <button
+      type="button"
+      onClick={() => setActiveView('opsdeck')}
+      className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer select-none no-drag"
+      style={{
+        background: 'rgba(255,255,255,0.03)',
+        borderColor: 'var(--color-border)',
+        color: phaseColor,
+      }}
+      title={`Market Dynamics: ${phase} | VIX: ${vix.toFixed(1)}${cpr ? ` | CPR: ${cpr}` : ''}${indicators?.atr_daily ? ` | ATR: ${indicators.atr_daily.toFixed(1)}` : ''}${basis != null ? ` | Fut Basis: ${basis > 0 ? '+' : ''}${basis.toFixed(1)} pts` : ''} (Click to open OpsDeck Dynamics matrix)`}
+    >
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: phaseColor }} />
+      <span>{phaseLabels[phase] || phase}</span>
+      <span className="text-muted">|</span>
+      <span className="text-text font-bold">VIX {vix.toFixed(1)}</span>
+      {cpr && (
+        <>
+          <span className="text-muted">|</span>
+          <span className="text-amber/90 font-bold" title={`Daily CPR: ${indicators.cpr_regime}`}>
+            CPR {cpr}
+          </span>
+        </>
+      )}
+      {basis != null && (
+        <>
+          <span className="text-muted">|</span>
+          <span
+            className={basis >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}
+            title={`Nifty Near-Month Futures Basis (${basis > 0 ? '+' : ''}${basis.toFixed(1)} pts)`}
+          >
+            Basis {basis > 0 ? '+' : ''}{Math.round(basis)}
+          </span>
+        </>
+      )}
+    </button>
+  )
+}
+
 export function HorizonSwitcher() {
   const { horizon, toggleHorizon } = useChatStore()
   const isIntraday = horizon === 'INTRADAY'
@@ -333,6 +436,7 @@ export default function ContextBar({
 
       {/* Horizon Switcher (Intraday vs Swing) */}
       <HorizonSwitcher />
+      <MarketDynamicsPill />
 
       {/* Relevant View Badges & Quick Action Links */}
       {activeView === 'options' && (

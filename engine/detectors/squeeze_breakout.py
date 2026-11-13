@@ -129,10 +129,21 @@ def _format_squeeze_alert(
         else None
     )
 
+    ote_limit = float(tp_dict.get("optimal_entry_limit") or 0.0) if tp_dict else 0.0
+    is_ext = bool(tp_dict.get("is_extended")) if tp_dict else False
+    base_struct = str(tp_dict.get("base_structure") or "") if tp_dict else ""
+    ote_rg_str = str(tp_dict.get("optimal_entry_range") or "") if tp_dict else ""
+    entry_strat = str(tp_dict.get("entry_strategy") or "") if tp_dict else ""
+    breakout_mode = str(tp_dict.get("breakout_mode") or "") if tp_dict else ""
+
     if opt_plan:
         icon = "🎯" if stage == "EARLY_WARNING" else "🚀"
         status_txt = "COILING" if stage == "EARLY_WARNING" else "IGNITED"
         opt_headline = f"{icon} SQUEEZE {status_txt}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        if is_ext and ote_limit > 0:
+            opt_headline = f"🎯 [LIMIT RETEST: {base_struct or 'OTE'}] {opt_headline}"
+        elif breakout_mode == "CONTINUATION_RUNNER" or entry_strat == "CONFIRMATION_STOP_LIMIT":
+            opt_headline = f"🚀 [CONTINUATION RUNNER] {opt_headline}"
         opt_no_chase = round(opt_plan.entry_premium * 1.06, 1)
         opt_entry_max = round(min(opt_no_chase - 0.5, opt_plan.entry_premium * 1.03), 1)
         opt_entry_min = round(max(opt_plan.sl_premium + 0.5, opt_plan.entry_premium * 0.97), 1)
@@ -141,6 +152,10 @@ def _format_squeeze_alert(
         metrics["spot"] = ltp
         metrics["underlying_ltp"] = ltp
         metrics["underlying_symbol"] = clean_sym
+        metrics["optimal_entry_limit"] = ote_limit
+        metrics["is_extended"] = is_ext
+        metrics["base_structure"] = base_struct
+        metrics["breakout_mode"] = breakout_mode
         act_plan = {
             "action": f"BUY {opt_plan.option_type}",
             "contract": opt_plan.contract_symbol,
@@ -148,6 +163,13 @@ def _format_squeeze_alert(
             "instrument_type": "OPTION",
             "recommended_entry": opt_entry_rg,
             "entry_range": opt_entry_rg,
+            "recommended_entry_type": "LIMIT_PULLBACK"
+            if (is_ext and ote_limit > 0)
+            else "STOP_LIMIT_PIVOT",
+            "optimal_entry_limit": ote_limit,
+            "base_structure": base_struct,
+            "is_extended": is_ext,
+            "breakout_mode": breakout_mode,
             "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
             "target": f"₹{opt_plan.t1_premium:,.1f}",
             "target_0_5": f"₹{opt_plan.t0_5_premium:,.1f}" if opt_plan.t0_5_premium else None,
@@ -165,6 +187,9 @@ def _format_squeeze_alert(
             "trade_plan": tp_dict,
             "no_chase_boundary": f"₹{opt_no_chase:,.1f}",
         }
+        effective_stage = (
+            "PRIMED" if (is_ext and ote_limit > 0 and stage in ("IGNITED", "TRIGGERED")) else stage
+        )
         return AutoAlert(
             alert_id=generate_alert_id(
                 clean_sym,
@@ -172,7 +197,7 @@ def _format_squeeze_alert(
                 variant=f"{opt_plan.option_type.lower()}-{format_strike(opt_plan.strike).replace('.', 'p')}-{phase_slot}",
             ),
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
-            stage=stage,
+            stage=effective_stage,
             symbol=clean_sym,
             exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
             direction=direction,
@@ -222,6 +247,34 @@ def _format_squeeze_alert(
             e_max = round(cash_no_chase + 1.0, 1)
         clean_entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
 
+    effective_stage = stage
+    effective_trigger = trigger_lvl
+    effective_action = action
+    effective_headline = headline
+
+    if is_ext and ote_limit > 0:
+        clean_entry_rg = ote_rg_str or clean_entry_rg
+        rec_entry = f"₹{ote_limit:,.1f} (Limit on Retest)"
+        effective_trigger = ote_limit
+        effective_action = (
+            "BUY_PULLBACK_RETEST" if direction == "BULLISH" else "SELL_PULLBACK_RETEST"
+        )
+        effective_stage = "PRIMED" if stage in ("IGNITED", "TRIGGERED") else stage
+        effective_headline = f"🎯 [LIMIT RETEST: {base_struct or 'OTE'}] {headline}"
+    elif breakout_mode == "CONTINUATION_RUNNER" or entry_strat == "CONFIRMATION_STOP_LIMIT":
+        effective_headline = f"🚀 [CONTINUATION RUNNER] {headline}"
+        rec_entry = f"₹{trigger_lvl:.1f} (Stop-Limit Pivot)"
+        effective_action = (
+            "BUY_ON_PIVOT_RUNNER" if direction == "BULLISH" else "SELL_ON_PIVOT_RUNNER"
+        )
+    else:
+        rec_entry = clean_entry_rg
+
+    metrics["optimal_entry_limit"] = ote_limit
+    metrics["is_extended"] = is_ext
+    metrics["base_structure"] = base_struct
+    metrics["breakout_mode"] = breakout_mode
+
     return AutoAlert(
         alert_id=generate_alert_id(
             symbol,
@@ -229,14 +282,14 @@ def _format_squeeze_alert(
             variant=f"{direction.lower()[:4]}-{phase_slot}",
         ),
         alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
-        stage=stage,
+        stage=effective_stage,
         symbol=symbol,
         exchange=exchange,
         direction=direction,
-        headline=headline,
+        headline=effective_headline,
         summary=summary,
         ltp=ltp,
-        trigger_level=trigger_lvl,
+        trigger_level=effective_trigger,
         target_level=target,
         stop_loss=sl,
         no_chase_boundary=cash_no_chase,
@@ -244,9 +297,16 @@ def _format_squeeze_alert(
         preferred_vehicle=preferred_vehicle,
         metrics=metrics,
         actionable_plan={
-            "action": action,
+            "action": effective_action,
             "entry_range": clean_entry_rg,
-            "recommended_entry": clean_entry_rg,
+            "recommended_entry": rec_entry,
+            "recommended_entry_type": "LIMIT_PULLBACK"
+            if (is_ext and ote_limit > 0)
+            else "STOP_LIMIT_PIVOT",
+            "optimal_entry_limit": ote_limit,
+            "base_structure": base_struct,
+            "is_extended": is_ext,
+            "breakout_mode": breakout_mode,
             "breakout_trigger": f"₹{trigger_lvl:.1f}",
             "target": f"₹{target:.1f}",
             "target_2": f"₹{target_2:.1f}",

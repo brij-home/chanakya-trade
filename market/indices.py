@@ -7,6 +7,7 @@ SENSEX, sector indices, and a market posture helper.
 
 from __future__ import annotations
 import logging
+import threading
 
 logger = logging.getLogger("market.indices")
 
@@ -171,10 +172,11 @@ def get_index(name: str) -> IndexSnapshot:
     )
 
 
-def get_market_snapshot() -> MarketSnapshot:
+def get_market_snapshot(extended: bool = True) -> MarketSnapshot:
     """
     Full market pulse: NIFTY, BANKNIFTY, VIX, SENSEX + posture.
-    Single batched quote call for efficiency.
+    Single batched quote call for efficiency. When extended=False,
+    skips network-heavy GIFT NIFTY and polarization calculation.
     """
     instruments = [
         INDEX_INSTRUMENTS["NIFTY50"],
@@ -215,23 +217,25 @@ def get_market_snapshot() -> MarketSnapshot:
 
     # GIFT NIFTY pre-market indicator (#106) — best-effort, never blocks
     gift_nifty = None
-    try:
-        from market.gift_nifty import get_gift_nifty
+    if extended:
+        try:
+            from market.gift_nifty import get_gift_nifty
 
-        gift_nifty = get_gift_nifty(nifty_spot=nifty.ltp if nifty.ltp else None)
-    except Exception as e_suppressed:
-        logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
+            gift_nifty = get_gift_nifty(nifty_spot=nifty.ltp if nifty.ltp else None)
+        except Exception as e_suppressed:
+            logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
 
     # Heavyweight Tug-of-War Polarization Detector
     polarization = None
-    try:
-        polarization = get_index_polarization("NIFTY")
-        if polarization and polarization.is_polarized:
-            reason += f" | {polarization.summary}"
-            if posture in ("BULLISH", "BEARISH"):
-                posture = "NEUTRAL"
-    except Exception as e_suppressed:
-        logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
+    if extended:
+        try:
+            polarization = get_index_polarization("NIFTY")
+            if polarization and polarization.is_polarized:
+                reason += f" | {polarization.summary}"
+                if posture in ("BULLISH", "BEARISH"):
+                    posture = "NEUTRAL"
+        except Exception as e_suppressed:
+            logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
 
     return MarketSnapshot(
         nifty=nifty,
@@ -402,6 +406,156 @@ def get_vix() -> float:
     return vix_quote.last_price if vix_quote else 0.0
 
 
+# ── Index Futures Snapshot ───────────────────────────────────────────────────
+
+# Near-month futures contract lookup table: index → Fyers NFO/BFO symbol prefix
+# Actual contract symbol is resolved dynamically from symbol master at runtime.
+_INDEX_FUTURES_EXCHANGE: dict[str, str] = {
+    "NIFTY": "NFO",
+    "BANKNIFTY": "NFO",
+    "FINNIFTY": "NFO",
+    "MIDCPNIFTY": "NFO",
+    "SENSEX": "BFO",
+    "BANKEX": "BFO",
+}
+
+_futures_snapshot_cache: dict[str, tuple[float, dict]] = {}
+_futures_snapshot_lock = threading.Lock()
+_FUTURES_SNAPSHOT_TTL = 15.0  # seconds
+
+
+def get_index_futures_snapshot(index: str) -> dict[str, Any]:
+    """
+    Fetches the near-month futures contract quote (LTP, volume, OI, basis) for
+    a given index. Used in the 3Cs C2 (Intermarket) layer to detect futures-led
+    moves, cash-futures basis, and rollover OI patterns.
+
+    Returns a dict with keys:
+        status:     "REAL_LIVE" | "DEGRADED_CACHED" | "UNAVAILABLE"
+        provenance: "REAL_LIVE" | "DEGRADED_CACHED" | "UNAVAILABLE"
+        ltp:        float | None  — Futures Last Traded Price
+        volume:     int | None    — Day volume of the futures contract
+        oi:         int | None    — Open Interest
+        basis:      float | None  — Basis = futures_ltp - spot_ltp
+        contract:   str | None    — Resolved contract symbol (e.g. NSE:NIFTY25NOVFUT)
+        spot_ltp:   float | None  — Underlying spot LTP at time of snapshot
+
+    Fail-closed: Returns {"status": "UNAVAILABLE"} on any error.
+    Never raises; never fabricates values.
+    """
+    clean_idx = canonical_symbol(index)
+    now_ts = __import__("time").time()
+
+    with _futures_snapshot_lock:
+        if clean_idx in _futures_snapshot_cache:
+            cached_ts, cached_result = _futures_snapshot_cache[clean_idx]
+            if now_ts - cached_ts < _FUTURES_SNAPSHOT_TTL:
+                return cached_result
+
+    fut_exch = _INDEX_FUTURES_EXCHANGE.get(clean_idx)
+    if not fut_exch:
+        return {
+            "status": "UNAVAILABLE",
+            "provenance": "UNAVAILABLE",
+            "reason": f"No futures exchange for {clean_idx}",
+        }
+
+    try:
+        # 1. Resolve near-month futures contract symbol via instrument master
+        from market.symbol_master import resolve_active_future
+        from market.quotes import get_quote
+
+        fut_contract = resolve_active_future(clean_idx, exch=fut_exch)
+        if not fut_contract:
+            result = {
+                "status": "UNAVAILABLE",
+                "provenance": "UNAVAILABLE",
+                "reason": f"Near-month futures contract not found for {clean_idx}",
+                "contract": None,
+                "ltp": None,
+                "volume": None,
+                "oi": None,
+                "basis": None,
+                "spot_ltp": None,
+            }
+            with _futures_snapshot_lock:
+                _futures_snapshot_cache[clean_idx] = (now_ts, result)
+            return result
+
+        # 2. Fetch futures quote
+        quotes = get_quote([fut_contract])
+        fut_q = quotes.get(fut_contract)
+
+        # 3. Fetch spot LTP for basis computation
+        spot_inst = INDEX_INSTRUMENTS.get(clean_idx, "")
+        spot_quotes = get_quote([spot_inst]) if spot_inst else {}
+        spot_q = spot_quotes.get(spot_inst)
+
+        if not fut_q or float(getattr(fut_q, "last_price", 0.0) or 0.0) <= 0:
+            result = {
+                "status": "UNAVAILABLE",
+                "provenance": "UNAVAILABLE",
+                "reason": f"No live quote for futures contract {fut_contract}",
+                "contract": fut_contract,
+                "ltp": None,
+                "volume": None,
+                "oi": None,
+                "basis": None,
+                "spot_ltp": float(getattr(spot_q, "last_price", 0.0) or 0.0) if spot_q else None,
+            }
+            with _futures_snapshot_lock:
+                _futures_snapshot_cache[clean_idx] = (now_ts, result)
+            return result
+
+        fut_ltp = float(fut_q.last_price)
+        fut_volume = int(getattr(fut_q, "volume", 0) or 0)
+        fut_oi = int(getattr(fut_q, "oi", 0) or 0)
+        spot_ltp = float(getattr(spot_q, "last_price", 0.0) or 0.0) if spot_q else None
+        basis = round(fut_ltp - spot_ltp, 2) if spot_ltp and spot_ltp > 0 else None
+
+        # Determine provenance from quote provider field
+        provider = str(getattr(fut_q, "provider", "") or "")
+        prov = (
+            "REAL_LIVE"
+            if any(k in provider.lower() for k in ("ws", "websocket", "tbt"))
+            else "DEGRADED_CACHED"
+        )
+
+        result = {
+            "status": prov,
+            "provenance": prov,
+            "contract": fut_contract,
+            "ltp": fut_ltp,
+            "volume": fut_volume if fut_volume > 0 else None,
+            "oi": fut_oi if fut_oi > 0 else None,
+            "basis": basis,
+            "spot_ltp": spot_ltp,
+        }
+        with _futures_snapshot_lock:
+            _futures_snapshot_cache[clean_idx] = (now_ts, result)
+        return result
+
+    except Exception as exc:
+        logger.warning(
+            f"[market.indices] get_index_futures_snapshot({clean_idx}) error: {exc}",
+            exc_info=False,
+        )
+        result = {
+            "status": "UNAVAILABLE",
+            "provenance": "UNAVAILABLE",
+            "reason": str(exc),
+            "contract": None,
+            "ltp": None,
+            "volume": None,
+            "oi": None,
+            "basis": None,
+            "spot_ltp": None,
+        }
+        with _futures_snapshot_lock:
+            _futures_snapshot_cache[clean_idx] = (now_ts, result)
+        return result
+
+
 def get_sector_snapshot() -> list[IndexSnapshot]:
     """Return snapshots for all sector indices.
 
@@ -548,6 +702,21 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
 
     try:
         from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+        missing = []
+        with _quote_cache_lock:
+            for sym in heavyweights:
+                if not any(
+                    k in _QUOTE_CACHE for k in (f"NSE:{sym}", f"BSE:{sym}", sym, f"{sym}.NS")
+                ):
+                    missing.append(f"NSE:{sym}")
+        if missing:
+            try:
+                from market.quotes import get_quote
+
+                get_quote(missing)
+            except Exception as _e_q:
+                logger.debug(f"[get_heavyweights_posture] Quote prefetch note: {_e_q}")
 
         details = []
         bull_count = 0

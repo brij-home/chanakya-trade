@@ -121,6 +121,12 @@ def _isolate_fyers_rate_gate_and_circuit_breaker():
         except Exception:
             pass
         try:
+            from brokers.fyers import _reset_auth_backoff
+
+            _reset_auth_backoff()
+        except Exception:
+            pass
+        try:
             from market.fyers_rate_gate import get_fyers_rate_gate
 
             gate = get_fyers_rate_gate()
@@ -146,6 +152,21 @@ def _isolate_fyers_rate_gate_and_circuit_breaker():
         except Exception:
             pass
 
+        try:
+            from market.quotes import clear_quote_cache
+
+            clear_quote_cache()
+        except Exception:
+            pass
+
+        try:
+            import market.sentiment as ms
+
+            ms._BREADTH_CACHE = None
+            ms._BREADTH_CACHE_TS = 0.0
+        except Exception:
+            pass
+
     _do_reset()
     yield
     _do_reset()
@@ -160,9 +181,16 @@ _PROCESS_ALLOW_NETWORK = False
 _ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
+# The quarantine is latched at import time on purpose. Deriving "am I under test?"
+# from CHANAKYA_TESTING/PYTEST_CURRENT_TEST at connect time let any test that
+# deletes CHANAKYA_TESTING (or any background thread that outlives its test)
+# silently re-open live broker and AI traffic for the rest of the process, which
+# polluted shared quote caches and burned real provider quota.
+_GUARD_ACTIVE = True
+
+
 def _test_guarded_socket_connect(self, address):
-    is_testing = os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
-    if is_testing and not _PROCESS_ALLOW_NETWORK:
+    if _GUARD_ACTIVE and not _PROCESS_ALLOW_NETWORK:
         if isinstance(address, (tuple, list)) and len(address) >= 1:
             host = address[0]
             if isinstance(host, str) and host not in _ALLOWED_LOCAL_HOSTS:
@@ -226,6 +254,10 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
     # the default for every test so a self-hosted test cannot leak its auth
     # policy into unrelated endpoint tests. Auth tests opt in explicitly.
     monkeypatch.setenv("DEPLOY_MODE", "test")
+    # Mode is process-global state that the API switch endpoint mutates directly.
+    # A leaked EXECUTE/SIMULATE mode from an earlier test silently changes risk,
+    # broker and order-lifecycle branches in every later test in the same worker.
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
     if "network" not in request.keywords:
         monkeypatch.setenv("CHANAKYA_TESTING", "1")
         monkeypatch.setenv("AI_FAST_PROVIDER", "")

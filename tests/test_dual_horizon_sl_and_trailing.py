@@ -335,6 +335,14 @@ def test_opening_drive_detector_dual_invalidation(monkeypatch):
         },
     )
 
+    # Daily levels are live market data. A detector unit test must not depend on
+    # whatever CPR happened to be cached for the current session (a wide live CPR
+    # can legitimately veto the fixture). CPR gate behaviour has its own tests.
+    from engine.daily_levels import CPRGateResult
+
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *a, **k: None)
+    monkeypatch.setattr("engine.daily_levels.evaluate_cpr_gate", lambda *a, **k: CPRGateResult())
+
     alert = detect_opening_drive(
         symbol="NIFTY",
         df_5m=df_bar,

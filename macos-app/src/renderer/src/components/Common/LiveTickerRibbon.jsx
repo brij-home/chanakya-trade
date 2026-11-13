@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatLivePrice, formatLiveChange, classifyDataSource } from '../../utils/marketDataUtils'
 
@@ -26,7 +26,18 @@ export default function LiveTickerRibbon({
   } = useRealtimeMarket()
 
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [tickAgeSec, setTickAgeSec] = useState(0)
   const scrollContainerRef = useRef(null)
+
+  useEffect(() => {
+    if (!lastUpdated) return
+    const updateAge = () => {
+      setTickAgeSec(Math.max(0, Math.round((Date.now() - new Date(lastUpdated).getTime()) / 1000)))
+    }
+    updateAge()
+    const timer = setInterval(updateAge, 1000)
+    return () => clearInterval(timer)
+  }, [lastUpdated])
 
   const rawTickers = (propTickers && propTickers.length > 0) ? propTickers : storeTickers
   // Filter out redundant/noise tickers (e.g. FIN NIFTY is redundant with BANK NIFTY)
@@ -92,15 +103,31 @@ export default function LiveTickerRibbon({
       {/* Live Streaming Indicator & Manual Refresh */}
       <div className="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 border-r flex-shrink-0" style={{ borderColor: 'var(--color-border-subtle)' }}>
         {isStreaming ? (
-          <div className="flex items-center gap-1.5" title={`Real-time SSE Stream Connected • Updated ${lastUpdated ? lastUpdated.toLocaleTimeString() : 'now'}`}>
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-            <span className="text-[10px] font-extrabold tracking-wider font-mono uppercase hidden sm:inline" style={{ color: 'var(--color-emerald)' }}>
-              LIVE
-            </span>
-          </div>
+          tickAgeSec > 8 ? (
+            <div className="flex items-center gap-1.5" title={`Stream Stale • No ticks received for ${tickAgeSec}s`}>
+              <span className="h-2 w-2 rounded-full bg-rose-500"></span>
+              <span className="text-[10px] font-extrabold tracking-wider font-mono uppercase hidden sm:inline text-rose-500">
+                STALE {tickAgeSec}s
+              </span>
+            </div>
+          ) : tickAgeSec > 3 ? (
+            <div className="flex items-center gap-1.5" title={`Stream Delayed • Last tick received ${tickAgeSec}s ago`}>
+              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>
+              <span className="text-[10px] font-extrabold tracking-wider font-mono uppercase hidden sm:inline text-amber-400">
+                DELAYED {tickAgeSec}s
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5" title={`Real-time SSE Stream Connected • Updated ${lastUpdated ? lastUpdated.toLocaleTimeString() : 'now'}`}>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[10px] font-extrabold tracking-wider font-mono uppercase hidden sm:inline" style={{ color: 'var(--color-emerald)' }}>
+                LIVE
+              </span>
+            </div>
+          )
         ) : (
           <div className="flex items-center gap-1.5" title="Connecting to live SSE stream...">
             <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>

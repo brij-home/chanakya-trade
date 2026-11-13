@@ -254,6 +254,24 @@ def detect_turtle_soup_sweep(
         clean_sym, "TURTLE_SOUP_SWEEP", session_date=sess_date, variant=variant
     )
 
+    # Market Dynamics Governor: Dynamic Targets & Vehicle Alignment
+    calib = None
+    try:
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        as_of = datetime.combine(sess_date, datetime.now(IST).time()).replace(tzinfo=IST)
+        calib = get_market_dynamics_governor().get_calibration(
+            clean_sym,
+            strategy="TURTLE_SOUP",
+            as_of_time=as_of,
+        )
+    except Exception as e_calib:
+        logger.debug(f"[TurtleSoup] Governor query suppressed: {e_calib}")
+
+    t1_rr = calib.target_1_rr if calib else 2.0
+    t2_rr = calib.target_2_rr if calib else 3.5
+    runner_rr = t2_rr + 2.0
+
     # Ballistic Level Calibration with Institutional Volatility Floor
     min_risk_floor = max(0.70 * atr, curr_ltp * 0.008)
     sl_buffer = max(0.35 * atr, curr_ltp * 0.004)
@@ -262,10 +280,15 @@ def detect_turtle_soup_sweep(
         entry_price = round(curr_ltp, 2)
         risk = max(entry_price - raw_stop, min_risk_floor)
         stop_loss = round(entry_price - risk, 2)
-        target_1 = round(entry_price + (2.0 * risk), 2)
-        target_2 = round(entry_price + (3.5 * risk), 2)
-        runner_target = round(entry_price + (5.5 * risk), 2)
-        no_chase = round(entry_price + (0.35 * risk), 2)
+        target_1 = round(entry_price + (t1_rr * risk), 2)
+        target_2 = round(entry_price + (t2_rr * risk), 2)
+        runner_target = round(entry_price + (runner_rr * risk), 2)
+        max_chase_pts = (
+            max(curr_ltp * (calib.max_chase_pct / 100.0), 0.20 * risk)
+            if calib is not None
+            else 0.35 * risk
+        )
+        no_chase = round(entry_price + max_chase_pts, 2)
         action_verb = "BUY"
         headline = (
             f"🐢 [TURTLE SOUP] Bullish Spring Reversal: {clean_sym} swept low ₹{sweep_level:,.2f}"
@@ -279,10 +302,15 @@ def detect_turtle_soup_sweep(
         entry_price = round(curr_ltp, 2)
         risk = max(raw_stop - entry_price, min_risk_floor)
         stop_loss = round(entry_price + risk, 2)
-        target_1 = round(entry_price - (2.0 * risk), 2)
-        target_2 = round(entry_price - (3.5 * risk), 2)
-        runner_target = round(entry_price - (5.5 * risk), 2)
-        no_chase = round(entry_price - (0.35 * risk), 2)
+        target_1 = round(entry_price - (t1_rr * risk), 2)
+        target_2 = round(entry_price - (t2_rr * risk), 2)
+        runner_target = round(entry_price - (runner_rr * risk), 2)
+        max_chase_pts = (
+            max(curr_ltp * (calib.max_chase_pct / 100.0), 0.20 * risk)
+            if calib is not None
+            else 0.35 * risk
+        )
+        no_chase = round(entry_price - max_chase_pts, 2)
         action_verb = "SELL"
         headline = f"🐢 [TURTLE SOUP] Bearish Upthrust Reversal: {clean_sym} swept high ₹{sweep_level:,.2f}"
         summary = (
@@ -407,6 +435,10 @@ def detect_turtle_soup_sweep(
         eta_desc = "Today 15:15 IST" if exchange != "MCX" else "Today 23:15 IST"
         style_val = "INTRADAY_REVERSAL"
 
+    confidence_val = 89 if smt_confirmed else 82
+    if calib and calib.is_mean_reversion_favored:
+        confidence_val = min(94, confidence_val + 4)
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type="TURTLE_SOUP_SWEEP",
@@ -426,7 +458,7 @@ def detect_turtle_soup_sweep(
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
-        confidence=89 if smt_confirmed else 82,
+        confidence=confidence_val,
         time_horizon=horizon_val,
         eta_label=eta_desc,
         setup_style=style_val,
@@ -443,6 +475,11 @@ def detect_turtle_soup_sweep(
             "vwap": vwap,
             "smt_confirmed": smt_confirmed,
             "smt_sibling": smt_sibling,
+            "recommended_structure": calib.preferred_vehicle
+            if calib
+            else ("DEBIT_SPREAD" if is_index_symbol(clean_sym) else "NAKED_OPTION_BUY"),
+            "volatility_regime": calib.volatility_regime if calib else "NORMAL_VIX",
+            "market_phase": calib.phase if calib else "UNKNOWN",
         },
     )
 

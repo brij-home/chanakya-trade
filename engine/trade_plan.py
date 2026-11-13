@@ -125,6 +125,11 @@ class TradePlan:
 
     # Optimal Trade Entry (OTE) & Pullback Boundaries
     optimal_entry_range: str = ""
+    optimal_entry_limit: float = 0.0
+    entry_strategy: str = "CONFIRMATION"  # "PULLBACK_OTE_LIMIT" | "CONFIRMATION_STOP_LIMIT"
+    base_structure: str = ""  # "RBR_DEMAND_BASE", "DBD_SUPPLY_BASE", "DBR_DEMAND_BASE", "RBD_SUPPLY_BASE", "FIB_OTE_DISCOUNT", "FIB_OTE_PREMIUM"
+    is_extended: bool = False
+    extension_pct: float = 0.0
 
     # Reference Datetime
     ref_dt: Optional[datetime] = None
@@ -1120,18 +1125,149 @@ def calculate_trade_plan(
     t3_distance_pct = (t3_distance_pts / ltp) * 100.0
     rr_t3 = round(t3_distance_pts / stop_distance_pts, 2)
 
-    # ── 11. Optimal Trade Entry (OTE) Pullback Range ───────────────────────────
+    # ── 11. Optimal Trade Entry (OTE) & Base Retest Architecture ──────────────
+    # Fibonacci Retracement on the active swing leg (or Order Block sweet spot)
+    # 61.8% (Golden Pocket), 70.5% (Deep OTE), 78.6% (Structural Discount Threshold)
+    swing_leg_high = (
+        max([ltp] + swing_highs) if is_long else (max(swing_highs) if swing_highs else ltp)
+    )
+    swing_leg_low = (
+        min(swing_lows)
+        if swing_lows
+        else (invalidation_stop if is_long else min([ltp] + swing_lows))
+    )
+    swing_range = max(1.0, swing_leg_high - swing_leg_low)
+
+    # Detect Base Structure (RBR, DBR, DBD, RBD)
+    base_structure = ""
+    base_price = 0.0
+    if df is not None and len(df) >= 4:
+        try:
+            c = df["Close"] if "Close" in df.columns else df["close"]
+            h = df["High"] if "High" in df.columns else df["high"]
+            l = df["Low"] if "Low" in df.columns else df["low"]
+            o = df["Open"] if "Open" in df.columns else df["open"]
+
+            prior_body = (c.iloc[-4:-1] - o.iloc[-4:-1]).abs().mean()
+            if prior_body <= 0.45 * atr:
+                base_high = float(h.iloc[-4:-1].max())
+                base_low = float(l.iloc[-4:-1].min())
+                if is_long:
+                    first_candle_dir = float(c.iloc[-5] - o.iloc[-5]) if len(c) >= 5 else 1.0
+                    base_structure = (
+                        "RBR_DEMAND_BASE" if first_candle_dir >= 0 else "DBR_DEMAND_BASE"
+                    )
+                    base_price = base_high
+                else:
+                    first_candle_dir = float(c.iloc[-5] - o.iloc[-5]) if len(c) >= 5 else -1.0
+                    base_structure = (
+                        "DBD_SUPPLY_BASE" if first_candle_dir <= 0 else "RBD_SUPPLY_BASE"
+                    )
+                    base_price = base_low
+        except Exception as e_base:
+            logger.debug(f"[TradePlan] Base structure detection note: {e_base}")
+
+    # Confluence with SMC Order Blocks if active
+    if is_long and demand_zones:
+        active_ob_price = max(demand_zones)
+        if not base_structure:
+            base_structure = "SMC_DEMAND_ORDER_BLOCK"
+            base_price = active_ob_price
+    elif (not is_long) and supply_zones:
+        active_ob_price = min(supply_zones)
+        if not base_structure:
+            base_structure = "SMC_SUPPLY_ORDER_BLOCK"
+            base_price = active_ob_price
+
     if is_long:
-        pullback_entry_low = round(
-            max(invalidation_stop + 0.5, ltp - (stop_distance_pts * 0.35)), 1
-        )
-        pullback_entry_high = round(ltp, 1)
-    else:
+        ote_618 = round(swing_leg_high - (0.618 * swing_range), 2)
+        ote_786 = round(swing_leg_high - (0.786 * swing_range), 2)
         pullback_entry_high = round(
-            min(invalidation_stop - 0.5, ltp + (stop_distance_pts * 0.35)), 1
+            max(
+                ote_786,
+                min(ltp - 0.2, ote_618 if ote_618 < ltp else (ltp - 0.25 * stop_distance_pts)),
+            ),
+            1,
         )
-        pullback_entry_low = round(ltp, 1)
+        pullback_entry_low = round(
+            max(
+                invalidation_stop + 0.5,
+                ote_786 if ote_786 > invalidation_stop else (ltp - 0.50 * stop_distance_pts),
+            ),
+            1,
+        )
+        if pullback_entry_high < pullback_entry_low:
+            pullback_entry_high, pullback_entry_low = pullback_entry_low, pullback_entry_high
+
+        optimal_entry_limit = round(
+            base_price
+            if (invalidation_stop < base_price < ltp)
+            else ((pullback_entry_high + pullback_entry_low) / 2.0),
+            1,
+        )
+        if not base_structure:
+            base_structure = "FIB_OTE_DISCOUNT"
+    else:
+        ote_618 = round(swing_leg_low + (0.618 * swing_range), 2)
+        ote_786 = round(swing_leg_low + (0.786 * swing_range), 2)
+        pullback_entry_low = round(
+            min(
+                ote_786,
+                max(ltp + 0.2, ote_618 if ote_618 > ltp else (ltp + 0.25 * stop_distance_pts)),
+            ),
+            1,
+        )
+        pullback_entry_high = round(
+            min(
+                invalidation_stop - 0.5,
+                ote_786 if ote_786 < invalidation_stop else (ltp + 0.50 * stop_distance_pts),
+            ),
+            1,
+        )
+        if pullback_entry_high < pullback_entry_low:
+            pullback_entry_high, pullback_entry_low = pullback_entry_low, pullback_entry_high
+
+        optimal_entry_limit = round(
+            base_price
+            if (ltp < base_price < invalidation_stop)
+            else ((pullback_entry_high + pullback_entry_low) / 2.0),
+            1,
+        )
+        if not base_structure:
+            base_structure = "FIB_OTE_PREMIUM"
+
     optimal_entry_range = f"₹{pullback_entry_low:,.1f} – ₹{pullback_entry_high:,.1f}"
+    dist_from_optimal = abs(ltp - optimal_entry_limit)
+    extension_pct = round((dist_from_optimal / ltp) * 100.0, 2)
+
+    # Microstructure Breakout Classification (Runner vs Retest vs Trap)
+    try:
+        from engine.breakout_classifier import classify_breakout_mode, BreakoutMode
+
+        breakout_eval = classify_breakout_mode(
+            df=df,
+            ltp=ltp,
+            breakout_level=base_price
+            if base_price > 0
+            else (swing_leg_high if is_long else swing_leg_low),
+            direction="BULLISH" if is_long else "BEARISH",
+            rvol=1.5,
+            atr=atr,
+            base_price=base_price if base_price > 0 else None,
+        )
+        if breakout_eval.mode == BreakoutMode.CONTINUATION_RUNNER:
+            is_extended = False
+            entry_strategy = "CONFIRMATION_STOP_LIMIT"
+            optimal_entry_limit = ltp
+        else:
+            is_extended = bool(
+                breakout_eval.is_extended or dist_from_optimal > 0.40 * atr or extension_pct > 0.80
+            )
+            entry_strategy = "PULLBACK_OTE_LIMIT" if is_extended else "CONFIRMATION_STOP_LIMIT"
+    except Exception as e_bko:
+        logger.debug(f"[TradePlan] Breakout classification fallback: {e_bko}")
+        is_extended = bool(dist_from_optimal > 0.40 * atr or extension_pct > 0.80)
+        entry_strategy = "PULLBACK_OTE_LIMIT" if is_extended else "CONFIRMATION_STOP_LIMIT"
 
     # ── 12. Quantized Capital Position Sizing Blueprint ──────────────────────
     position_sizing: Optional[dict[str, Any]] = None
@@ -1202,6 +1338,11 @@ def calculate_trade_plan(
         stagnation_timeout_mins=stagnation_timeout_mins,
         stagnation_advice=stagnation_advice,
         optimal_entry_range=optimal_entry_range,
+        optimal_entry_limit=optimal_entry_limit,
+        entry_strategy=entry_strategy,
+        base_structure=base_structure,
+        is_extended=is_extended,
+        extension_pct=extension_pct,
         ref_dt=ref_dt,
         position_sizing=position_sizing,
     )
@@ -1610,7 +1751,7 @@ def calculate_option_execution_plan(
                             2,
                         )
                     else:
-                        t1_prem = max(round(option_ltp + (1.8 * opt_risk), 2), raw_t1_prem)
+                        t1_prem = max(round(option_ltp + (2.0 * opt_risk), 2), raw_t1_prem)
                         t2_prem = min(
                             t2_max_prem, max(round(t1_prem + (1.2 * opt_risk), 2), raw_t2_prem)
                         )

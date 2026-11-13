@@ -35,7 +35,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -143,6 +143,11 @@ class PatternTradeOutcome:
     factors_present: list[str] = field(default_factory=list)
     provenance: str = "LEGACY_UNVERIFIED"
     recorded_at: str = ""
+    # 5W Hierarchical Attribution Dimensions
+    alpha_thesis: Optional[str] = None
+    session_window: Optional[str] = None
+    structural_anchor: Optional[str] = None
+    trapped_counterparty: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.recorded_at:
@@ -231,6 +236,7 @@ class PatternLearningEngine:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 loaded: list[PatternTradeOutcome] = []
                 seen_ids: set[str] = set()
+                valid_fields = {f.name for f in fields(PatternTradeOutcome)}
                 for d in data:
                     if isinstance(d, dict):
                         # Canonicalize legacy INVALIDATED_ prefixes
@@ -241,7 +247,8 @@ class PatternLearningEngine:
                             if aid in seen_ids:
                                 continue
                             seen_ids.add(aid)
-                        loaded.append(PatternTradeOutcome(**d))
+                        filtered_d = {k: v for k, v in d.items() if k in valid_fields}
+                        loaded.append(PatternTradeOutcome(**filtered_d))
                 self._outcomes = loaded
             except Exception as e:
                 logger.debug(f"[PatternLearningEngine] Failed to load outcomes: {e}")
@@ -325,6 +332,10 @@ class PatternLearningEngine:
         realized_rr: float,
         factors_present: Optional[list[str]] = None,
         provenance: str = "ALERT_MILESTONE_OBSERVATION",
+        alpha_thesis: Optional[str] = None,
+        session_window: Optional[str] = None,
+        structural_anchor: Optional[str] = None,
+        trapped_counterparty: Optional[str] = None,
     ) -> PatternTradeOutcome:
         """
         Records an alert-path milestone for audit and controlled research.
@@ -356,6 +367,10 @@ class PatternLearningEngine:
             realized_rr=round(numeric_values[2], 2),
             factors_present=factors_present or [],
             provenance=provenance,
+            alpha_thesis=alpha_thesis,
+            session_window=session_window,
+            structural_anchor=structural_anchor,
+            trapped_counterparty=trapped_counterparty,
         )
 
         # Deduplication Guard (Rule 16 & Rule 17):
@@ -2099,6 +2114,53 @@ class PatternLearningEngine:
                         all_traps.append(dict(t))
         return all_traps
 
+    def get_5w_dimensional_attribution(self) -> dict[str, Any]:
+        """Aggregates tracked outcomes across all 5W dimensions (Why, When, Where, Who)."""
+        with self._lock:
+            dimensions: dict[str, dict[str, dict[str, Any]]] = {
+                "why_alpha_thesis": {},
+                "when_session_window": {},
+                "where_structural_anchor": {},
+                "who_trapped_counterparty": {},
+            }
+            for o in self._outcomes:
+                is_win = o.outcome in ("WIN_T1", "WIN_T2", "WIN", "PROFIT_TARGET") or (
+                    o.realized_rr is not None and o.realized_rr > 0.3
+                )
+                is_loss = o.outcome in ("STOPPED_OUT", "LOSS", "INVALIDATED") or (
+                    o.realized_rr is not None and o.realized_rr < -0.3
+                )
+                r_val = float(o.realized_rr or 0.0)
+
+                dim_mappings = [
+                    ("why_alpha_thesis", o.alpha_thesis or o.archetype or "UNSPECIFIED_THESIS"),
+                    ("when_session_window", o.session_window or "UNSPECIFIED_WINDOW"),
+                    ("where_structural_anchor", o.structural_anchor or "UNSPECIFIED_ANCHOR"),
+                    (
+                        "who_trapped_counterparty",
+                        o.trapped_counterparty or "UNSPECIFIED_COUNTERPARTY",
+                    ),
+                ]
+                for dim_name, dim_val in dim_mappings:
+                    st = dimensions[dim_name].setdefault(
+                        dim_val,
+                        {"total": 0, "wins": 0, "losses": 0, "net_r": 0.0, "win_rate_pct": 0.0},
+                    )
+                    st["total"] += 1
+                    if is_win:
+                        st["wins"] += 1
+                    elif is_loss:
+                        st["losses"] += 1
+                    st["net_r"] = round(st["net_r"] + r_val, 2)
+
+            for dim_name, d_dict in dimensions.items():
+                for k, v in d_dict.items():
+                    closed = v["wins"] + v["losses"]
+                    v["win_rate_pct"] = (
+                        round((v["wins"] / closed * 100.0), 1) if closed > 0 else 0.0
+                    )
+            return dimensions
+
     def get_learning_analytics(self) -> dict[str, Any]:
         """Returns comprehensive self-learning intelligence and factor attribution."""
         source_tagged_archetypes = [
@@ -2120,6 +2182,7 @@ class PatternLearningEngine:
             "outcome_event_counts": event_counts,
             "active_factor_weights": self._factor_weights,
             "factor_weight_source": self._factor_weight_source,
+            "dimensional_attribution_5ws": self.get_5w_dimensional_attribution(),
             "active_lockouts": self.get_locked_out_symbols(),
             "active_session_traps": self.get_active_session_traps(),
             "archetypes": [f.to_dict() for f in source_tagged_archetypes[:5]],

@@ -162,6 +162,13 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
             "PACKET FREEZE DETECTED",
             "PROACTIVELY DROPPED INVALID SYMBOL",
             "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
+            "CONNECTION CLOSED NORMALLY",
+            "CODE 1000",
+            "PING/PONG TIMED OUT",
+            "WINERROR 10053",
+            "WINERROR 10054",
+            "EVALUATION TIMEOUT",
+            "FILE LOCKED BEYOND RETRY BUDGET",
         )
     ):
         return "P3"
@@ -540,6 +547,17 @@ def get_telemetry_summary() -> dict[str, Any]:
     }
 
 
+def _compact_details(d: Any, max_str_len: int = 250) -> Any:
+    """Recursively truncate long strings in incident details to keep telemetry payload lightweight (<50 KB)."""
+    if isinstance(d, dict):
+        return {k: _compact_details(v, max_str_len) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_compact_details(v, max_str_len) for v in d[:10]]
+    if isinstance(d, str) and len(d) > max_str_len:
+        return d[:max_str_len] + "... [truncated]"
+    return d
+
+
 def get_prioritized_incidents(
     limit: int = 100,
     priority: Optional[str] = None,
@@ -572,6 +590,8 @@ def get_prioritized_incidents(
             continue
         ev_dict = ev.to_dict()
         ev_dict["priority"] = ev_prio
+        if isinstance(ev_dict.get("details"), dict):
+            ev_dict["details"] = _compact_details(ev_dict["details"])
         results.append(ev_dict)
         if len(results) >= limit:
             break
@@ -721,17 +741,17 @@ class TelemetryLogHandler(logging.Handler):
             msg = str(record.getMessage())
             rec_name = str(record.name or "")
 
-            # Deduplicate frequent identical log messages within 10 seconds
+            # Deduplicate frequent identical log messages within 60 seconds
             import hashlib
 
             h = hashlib.md5(f"{record.name}:{msg}".encode("utf-8")).hexdigest()
             now_ts = time.time()
             last_ts = self._seen_hashes.get(h, 0.0)
-            if now_ts - last_ts < 10.0:
+            if now_ts - last_ts < 60.0:
                 return
             self._seen_hashes[h] = now_ts
-            if len(self._seen_hashes) > 200:
-                cutoff = now_ts - 60.0
+            if len(self._seen_hashes) > 500:
+                cutoff = now_ts - 300.0
                 self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if v > cutoff}
 
             # Ignore routine process shutdown socket teardowns
@@ -763,8 +783,10 @@ class TelemetryLogHandler(logging.Handler):
                 "429" in msg or "RATE LIMIT" in msg.upper() or "TOO MANY REQUESTS" in msg.upper()
             )
 
+            prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, msg)
+
             if is_external_noise:
-                # Scraper ticker misses or routine socket drops are operational diagnostics
+                # Scraper ticker misses or normal code 1000 closures are P3 operational diagnostics
                 # Fyers broker socket invalid_symbols feedback is P3 informational audit
                 if any(
                     k in msg.upper()
@@ -776,6 +798,8 @@ class TelemetryLogHandler(logging.Handler):
                         "INVALID SYMBOL",
                         "INVALID SYMBOL PROVIDED",
                         "PLEASE PROVIDE A VALID SYMBOL",
+                        "CONNECTION CLOSED NORMALLY",
+                        "CODE 1000",
                     )
                 ):
                     severity = "INFO"
@@ -788,7 +812,6 @@ class TelemetryLogHandler(logging.Handler):
                     severity = "INFO" if record.levelno < logging.ERROR else "WARNING"
                     priority = "P3" if record.levelno < logging.ERROR else "P2"
             else:
-                prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, msg)
                 if any(
                     k in msg.upper()
                     for k in (

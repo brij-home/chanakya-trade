@@ -41,6 +41,16 @@ def get_discovery_policy() -> DiscoveryPolicy:
     return DiscoveryPolicy(profile)
 
 
+def set_discovery_policy(profile: str) -> DiscoveryPolicy:
+    """Dynamically update discovery policy profile (FNO_ONLY, FNO_PRIORITY, BALANCED)."""
+    prof = profile.strip().upper()
+    if prof not in _PROFILES:
+        raise ValueError(f"Unknown SESSION_FOCUS_MODE: {prof!r}; expected {sorted(_PROFILES)}")
+    os.environ["SESSION_FOCUS_MODE"] = prof
+    logger.info("[discovery_policy] Session focus mode dynamically updated to: %s", prof)
+    return DiscoveryPolicy(prof)
+
+
 def discovery_desk(desk: str):
     """Gate list-returning discovery functions before imports, feeds and AI work.
 

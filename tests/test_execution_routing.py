@@ -342,3 +342,55 @@ class TestIndependentPointers:
 
         assert session_mod._exec_key == "zerodha"  # moved to zerodha
         assert session_mod._data_key == "fyers"  # untouched
+
+
+class TestEnvironmentRoleOverrides:
+    """Verify DATA_BROKER and EXEC_BROKER environment variable auto-binding."""
+
+    def _setup(self):
+        session_mod._brokers = {
+            "fyers": MockBrokerAPI(),
+            "flattrade": MockBrokerAPI(),
+        }
+        session_mod._primary_key = "fyers"
+        session_mod._data_key = "fyers"
+        session_mod._exec_key = "fyers"
+
+    def test_env_exec_broker_override(self, monkeypatch):
+        from brokers.session import get_execution_broker, apply_env_broker_roles
+
+        self._setup()
+        monkeypatch.setenv("EXEC_BROKER", "flattrade")
+        apply_env_broker_roles()
+
+        assert session_mod._exec_key == "flattrade"
+        assert session_mod._data_key == "fyers"
+        assert get_execution_broker() is session_mod._brokers["flattrade"]
+
+    def test_env_data_broker_override(self, monkeypatch):
+        from brokers.session import get_data_broker, apply_env_broker_roles
+
+        self._setup()
+        monkeypatch.setenv("DATA_BROKER", "flattrade")
+        apply_env_broker_roles()
+
+        assert session_mod._data_key == "flattrade"
+        assert session_mod._exec_key == "fyers"
+        assert get_data_broker() is session_mod._brokers["flattrade"]
+
+    def test_env_dual_broker_symbiosis(self, monkeypatch):
+        from brokers.session import (
+            get_data_broker,
+            get_execution_broker,
+            apply_env_broker_roles,
+        )
+
+        self._setup()
+        monkeypatch.setenv("DATA_BROKER", "fyers")
+        monkeypatch.setenv("EXEC_BROKER", "flattrade")
+        apply_env_broker_roles()
+
+        assert get_data_broker() is session_mod._brokers["fyers"]
+        assert get_execution_broker() is session_mod._brokers["flattrade"]
+        assert session_mod.get_broker_role("fyers") == "data"
+        assert session_mod.get_broker_role("flattrade") == "execution"

@@ -550,6 +550,93 @@ async def get_fyers_status_endpoint():
     }
 
 
+@router.get("/api/flattrade/status", tags=["Flattrade Integration"])
+async def get_flattrade_status_endpoint():
+    """
+    Returns Flattrade Pi Connect institutional integration status:
+    authentication, profile, funds, and role assignment.
+    """
+    from brokers.session import get_all_brokers, get_data_broker_key, get_execution_broker_key
+
+    all_brokers = get_all_brokers()
+    flattrade = all_brokers.get("flattrade")
+    if not flattrade:
+        try:
+            from brokers.flattrade import FlattradeAPI
+            from brokers.session import register_broker
+
+            b = FlattradeAPI()
+            if b.is_authenticated():
+                register_broker("flattrade", b)
+                flattrade = b
+        except Exception as e_reg:
+            logger.debug("Flattrade lazy registration error: %s", e_reg)
+
+    if not flattrade:
+        return {
+            "connected": False,
+            "error": "Flattrade broker not registered or session not active",
+        }
+
+    is_auth = False
+    profile = {}
+    funds = {}
+    try:
+        is_auth = flattrade.is_authenticated()
+        if is_auth:
+            profile = await asyncio.to_thread(flattrade.get_profile)
+            funds = await asyncio.to_thread(flattrade.get_funds)
+    except Exception as e:
+        logger.debug("Flattrade diagnostics error: %s", e)
+
+    from market.streaming import market_streams
+
+    stream_status = market_streams.status("flattrade")
+    ws_sock = getattr(getattr(flattrade, "_ws", None), "sock", None)
+    ws_connected = bool(ws_sock and getattr(ws_sock, "connected", False))
+    subscriptions = list(getattr(flattrade, "_subscriptions", set()))
+
+    return {
+        "connected": True,
+        "authenticated": is_auth,
+        "roles": {
+            "is_data_primary": get_data_broker_key() == "flattrade",
+            "is_execution_primary": get_execution_broker_key() == "flattrade",
+        },
+        "websocket": {
+            "connected": ws_connected,
+            "state": stream_status.state,
+            "subscriptions_count": len(subscriptions),
+            "last_event_at": stream_status.last_event_at,
+            "dropped_events": stream_status.dropped_events,
+            "subscriptions": subscriptions[:50],
+        },
+        "profile": {
+            "name": getattr(profile, "name", "")
+            if hasattr(profile, "name")
+            else (profile.get("name", "") if isinstance(profile, dict) else ""),
+            "user_id": getattr(profile, "user_id", "")
+            if hasattr(profile, "user_id")
+            else (profile.get("user_id", "") if isinstance(profile, dict) else ""),
+            "account_id": getattr(flattrade, "account_id", ""),
+            "email": getattr(profile, "email", "")
+            if hasattr(profile, "email")
+            else (profile.get("email", "") if isinstance(profile, dict) else ""),
+        },
+        "funds": {
+            "available_cash": getattr(funds, "available_cash", 0.0)
+            if hasattr(funds, "available_cash")
+            else (funds.get("available_cash", 0.0) if isinstance(funds, dict) else 0.0),
+            "used_margin": getattr(funds, "used_margin", 0.0)
+            if hasattr(funds, "used_margin")
+            else (funds.get("used_margin", 0.0) if isinstance(funds, dict) else 0.0),
+            "total_balance": getattr(funds, "total_balance", 0.0)
+            if hasattr(funds, "total_balance")
+            else (funds.get("total_balance", 0.0) if isinstance(funds, dict) else 0.0),
+        },
+    }
+
+
 @router.get("/api/fyers/gtt", tags=["Fyers Advanced"])
 async def get_fyers_gtt_orders_endpoint():
     """Retrieve active Good-Till-Triggered (GTT) orders held on Fyers servers."""
@@ -1749,6 +1836,37 @@ async def prime_daily_levels_endpoint(payload: Optional[dict] = None):
         "status": "ok",
         "primed_count": len(results),
         "symbols": list(results.keys()),
+    }
+
+
+@router.get("/api/market/indicators", tags=["Quantitative Indicators"])
+@router.get("/api/market/indicators/{symbol}", tags=["Quantitative Indicators"])
+async def get_indicator_snapshot_endpoint(
+    symbol: Optional[str] = "NIFTY",
+    exchange: Optional[str] = "NSE",
+    time_horizon: Optional[str] = "INTRADAY",
+    force_refresh: bool = False,
+):
+    """
+    Single Source of Truth (SSOT) Institutional Indicator Snapshot Endpoint.
+    Aggregates ATR, ADX, ROC, Greeks, PDH/PDL/PDC, CMP, CPR, and Index Futures Volume
+    with strict per-field provenance tagging (REAL_LIVE, DEGRADED_CACHED, COMPUTED_ESTIMATE, UNAVAILABLE).
+    """
+    from engine.indicator_snapshot import get_indicator_snapshot
+
+    clean = (symbol or "NIFTY").upper().strip()
+    snap = await asyncio.to_thread(
+        get_indicator_snapshot,
+        symbol=clean,
+        exchange=exchange or "NSE",
+        time_horizon=time_horizon or "INTRADAY",
+        force_refresh=force_refresh,
+    )
+    return {
+        "status": "ok",
+        "symbol": clean,
+        "indicators": snap.to_flat_dict(),
+        "snapshot": snap.to_dict(),
     }
 
 

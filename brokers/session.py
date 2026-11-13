@@ -191,6 +191,41 @@ def unregister_broker(key: str) -> None:
 
 _last_auto_restore_attempt: float = 0.0
 _AUTO_RESTORE_COOLDOWN_SEC: float = 10.0
+_session_watchdog_thread: Optional[threading.Thread] = None
+_session_watchdog_lock = threading.Lock()
+
+
+def _ensure_session_watchdog() -> None:
+    """Spawns a resilient background watchdog to maintain broker connectivity."""
+    global _session_watchdog_thread
+    if (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    ):
+        return
+    with _session_watchdog_lock:
+        if _session_watchdog_thread is None or not _session_watchdog_thread.is_alive():
+
+            def _watchdog_loop():
+                while True:
+                    time.sleep(45.0)
+                    try:
+                        needs_recover = not _brokers or any(
+                            not b.is_authenticated() for b in _brokers.values() if b
+                        )
+                        if needs_recover:
+                            logger.info(
+                                "[SessionWatchdog] Unauthenticated or disconnected broker detected. Auto-recovering..."
+                            )
+                            _try_auto_restore_sessions()
+                    except Exception as e_wd:
+                        logger.debug(f"[SessionWatchdog] Watchdog loop note: {e_wd}")
+
+            _session_watchdog_thread = threading.Thread(
+                target=_watchdog_loop, name="broker-session-watchdog", daemon=True
+            )
+            _session_watchdog_thread.start()
 
 
 def _try_auto_restore_sessions() -> None:
@@ -199,8 +234,14 @@ def _try_auto_restore_sessions() -> None:
     if os.environ.get("CHANAKYA_TESTING") == "1":
         return
 
+    _ensure_session_watchdog()
+
     now = time.time()
-    if not _brokers and (now - _last_auto_restore_attempt) < _AUTO_RESTORE_COOLDOWN_SEC:
+    if (
+        (now - _last_auto_restore_attempt) < _AUTO_RESTORE_COOLDOWN_SEC
+        and _brokers
+        and all(b.is_authenticated() for b in _brokers.values() if b)
+    ):
         return
     _last_auto_restore_attempt = now
 
@@ -211,14 +252,14 @@ def _try_auto_restore_sessions() -> None:
     )
 
     # 0. Fyers (Primary Institutional Data & Execution Broker)
-    if "fyers" not in _brokers:
+    if "fyers" not in _brokers or not _brokers["fyers"].is_authenticated():
         try:
             from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
             if os.path.exists(_FT) or os.environ.get("FYERS_APP_ID"):
-                b = FyersAPI()
+                b = _brokers.get("fyers") or FyersAPI()
                 if b.is_authenticated():
-                    is_first = not _brokers
+                    is_first = not _brokers or _primary_key == "fyers"
                     register_broker(
                         "fyers", b, primary=is_first, role="both" if is_first else "data"
                     )
@@ -234,11 +275,8 @@ def _try_auto_restore_sessions() -> None:
         except Exception as e_suppressed:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
-    if _brokers:
-        return
-
     # 1. m.Stock (only if explicitly enabled in environment)
-    if os.environ.get("ENABLE_MSTOCK", "0") == "1":
+    if os.environ.get("ENABLE_MSTOCK", "0") == "1" and "mstock" not in _brokers:
         try:
             from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
@@ -247,69 +285,9 @@ def _try_auto_restore_sessions() -> None:
             ):
                 b = MStockAPI()
                 if b.is_authenticated():
-                    register_broker("mstock", b, role="both")
-                    if not is_testing:
-                        try:
-                            threading.Thread(
-                                target=_start_websocket, args=(b,), daemon=True
-                            ).start()
-                        except Exception as e_suppressed:
-                            logger.debug(
-                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                            )
-                    return
-        except Exception as e_suppressed:
-            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
-
-    # 2. Shoonya
-    try:
-        from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
-
-        if os.path.exists(_ST):
-            b = ShoonyaAPI()
-            if b.is_authenticated():
-                register_broker("shoonya", b, role="both")
-                if not is_testing:
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                return
-    except Exception as e_suppressed:
-        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
-
-    # 3. Kotak Neo
-    try:
-        from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
-
-        if os.path.exists(_KT):
-            b = KotakNeoAPI()
-            if b.is_authenticated():
-                register_broker("kotak", b, role="both")
-                if not is_testing:
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                return
-    except Exception as e_suppressed:
-        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
-
-    # 4. Flattrade (Secondary Backup Broker)
-    if "flattrade" not in _brokers:
-        try:
-            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
-
-            if os.path.exists(_FT_FLAT) or os.environ.get("FLATTRADE_API_KEY"):
-                b = FlattradeAPI()
-                if b.is_authenticated():
                     is_first = not _brokers
                     register_broker(
-                        "flattrade", b, primary=is_first, role="both" if is_first else "execution"
+                        "mstock", b, primary=is_first, role="both" if is_first else None
                     )
                     if not is_testing:
                         try:
@@ -323,10 +301,90 @@ def _try_auto_restore_sessions() -> None:
         except Exception as e_suppressed:
             logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
+    # 2. Shoonya
+    if "shoonya" not in _brokers:
+        try:
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+
+            if os.path.exists(_ST):
+                b = ShoonyaAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker(
+                        "shoonya", b, primary=is_first, role="both" if is_first else None
+                    )
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+
+    # 3. Kotak Neo
+    if "kotak" not in _brokers:
+        try:
+            from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
+
+            if os.path.exists(_KT):
+                b = KotakNeoAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker("kotak", b, primary=is_first, role="both" if is_first else None)
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+
+    # 4. Flattrade (Secondary Backup Broker)
+    if "flattrade" not in _brokers or not _brokers["flattrade"].is_authenticated():
+        try:
+            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
+
+            if (
+                os.path.exists(_FT_FLAT)
+                or os.environ.get("FLATTRADE_API_KEY")
+                or os.environ.get("FLATTRADE_USER_ID")
+            ):
+                b = _brokers.get("flattrade") or FlattradeAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker(
+                        "flattrade", b, primary=is_first, role="both" if is_first else None
+                    )
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+
+    apply_env_broker_roles()
+
 
 def get_broker() -> BrokerAPI:
     """Return the primary broker. Raises if login() has not been called."""
-    if not _primary_key or _primary_key not in _brokers:
+    if (
+        not _primary_key
+        or _primary_key not in _brokers
+        or not _brokers[_primary_key].is_authenticated()
+    ):
         _try_auto_restore_sessions()
     if not _primary_key or _primary_key not in _brokers:
         from .exceptions import BrokerAuthError
@@ -336,7 +394,15 @@ def get_broker() -> BrokerAPI:
             broker="SESSION",
             error_code="NOT_LOGGED_IN",
         )
-    return _brokers[_primary_key]
+    primary = _brokers[_primary_key]
+    if not primary.is_authenticated():
+        for key, alt in _brokers.items():
+            if key != _primary_key and alt.is_authenticated():
+                logger.info(
+                    f"[brokers.session] Primary broker '{_primary_key}' unauthenticated. Serving healthy '{key}' fallback."
+                )
+                return alt
+    return primary
 
 
 def get_all_brokers() -> dict[str, BrokerAPI]:
@@ -346,8 +412,9 @@ def get_all_brokers() -> dict[str, BrokerAPI]:
     return dict(_brokers)
 
 
-# Alias for backward-compatibility across all modules and stream endpoints
-get_registered_brokers = get_all_brokers
+def get_registered_brokers() -> dict[str, BrokerAPI]:
+    """Return currently registered brokers from in-memory session registry without auto-restore."""
+    return dict(_brokers)
 
 
 def is_multi_broker() -> bool:
@@ -358,6 +425,37 @@ def is_multi_broker() -> bool:
 # ── Role-based routing ───────────────────────────────────────────
 # Two independent pointers — can point to the same broker ("both").
 # Moving one never affects the other.
+
+
+def apply_env_broker_roles() -> None:
+    """
+    Apply DATA_BROKER and EXEC_BROKER environment overrides if configured.
+    Enables zero-touch institutional dual-broker division of labor:
+      - DATA_BROKER=fyers (Quotes, historical charts, and standard WebSocket streaming)
+      - EXEC_BROKER=flattrade (Zero-brokerage execution order routing and session tick stream)
+    """
+    global _data_key, _exec_key
+    preferred_exec = os.environ.get("EXEC_BROKER") or os.environ.get("EXECUTION_BROKER")
+    if preferred_exec:
+        canon_exec = _BROKER_NAMES.get(
+            preferred_exec.strip().lower(), preferred_exec.strip().lower()
+        )
+        if canon_exec in _brokers:
+            _exec_key = canon_exec
+            logger.info(
+                f"[brokers.session] Execution broker bound to '{canon_exec}' via environment override."
+            )
+
+    preferred_data = os.environ.get("DATA_BROKER") or os.environ.get("MARKET_DATA_BROKER")
+    if preferred_data:
+        canon_data = _BROKER_NAMES.get(
+            preferred_data.strip().lower(), preferred_data.strip().lower()
+        )
+        if canon_data in _brokers:
+            _data_key = canon_data
+            logger.info(
+                f"[brokers.session] Data broker bound to '{canon_data}' via environment override."
+            )
 
 
 def get_broker_role(key: str) -> str:
@@ -397,9 +495,10 @@ def set_broker_role(key: str, role: str) -> None:
 
 
 def get_data_broker() -> BrokerAPI:
-    """Return the current data broker. Falls back to primary if unset."""
+    """Return the current data broker. Falls back to primary if no explicit data broker."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
         return _brokers[_data_key]
     return get_broker()
@@ -409,6 +508,7 @@ def get_data_broker_key() -> str:
     """Return the selected data-provider key without exposing mutable state."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _data_key and _data_key in _brokers:
         return _data_key
     return _primary_key
@@ -418,6 +518,7 @@ def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Rejects data-only primary fallback (BRK-17)."""
     if not _brokers:
         _try_auto_restore_sessions()
+    apply_env_broker_roles()
     if _exec_key and _exec_key in _brokers:
         return _brokers[_exec_key]
     # Explicit role validation: if primary was registered as data-only, refuse execution fallback
@@ -887,14 +988,18 @@ def _oauth_local_server(
 
 
 def _recreate_broker_from_token(key: str):
-    """Re-create a broker instance from its saved token file (after sidecar OAuth or auto-login)."""
+    """Re-create a broker instance from its saved token file or headless credentials."""
     try:
         from config.credentials import get_credential
 
         if key == "fyers":
             from brokers.fyers import FyersAPI, TOKEN_FILE
 
-            if TOKEN_FILE.exists():
+            has_fyers_cred = TOKEN_FILE.exists() or bool(
+                get_credential("FYERS_APP_ID", secret=False, required=False)
+                or os.environ.get("FYERS_APP_ID")
+            )
+            if has_fyers_cred:
                 b = FyersAPI(
                     get_credential("FYERS_APP_ID", secret=False, required=False)
                     or os.environ.get("FYERS_APP_ID", ""),
@@ -1001,7 +1106,11 @@ def _recreate_broker_from_token(key: str):
         elif key == "flattrade":
             from brokers.flattrade import FlattradeAPI, TOKEN_FILE
 
-            if TOKEN_FILE.exists():
+            has_flat_cred = TOKEN_FILE.exists() or bool(
+                get_credential("FLATTRADE_USER_ID", secret=False, required=False)
+                or os.environ.get("FLATTRADE_USER_ID")
+            )
+            if has_flat_cred:
                 b = FlattradeAPI()
                 if b.is_authenticated():
                     return b
@@ -1160,6 +1269,58 @@ def _start_websocket(broker: BrokerAPI) -> None:
 
         if broker_name == "shoonya" and hasattr(broker, "start_websocket"):
             broker.start_websocket()
+            return
+
+        if (broker_name == "flattrade" or broker_cls_name == "FlattradeAPI") and hasattr(
+            broker, "start_websocket"
+        ):
+            from engine.market_matrix import get_market_matrix
+            from market.streaming import normalize_flattrade_tick
+
+            def _on_flattrade_tick(raw: dict) -> None:
+                try:
+                    event = normalize_flattrade_tick(raw)
+                    if event and event.last_price > 0:
+                        from market.streaming import market_streams
+                        from market.websocket import Tick, ws_manager
+
+                        market_streams.publish(event)
+                        get_market_matrix().on_tick(event)
+
+                        clean_sym = (
+                            event.canonical_instrument_id.split(":")[-1].split("-")[0].strip()
+                        )
+                        c_tick = Tick(
+                            symbol=event.canonical_instrument_id,
+                            ltp=event.last_price,
+                            open=getattr(event, "open", None) or event.last_price,
+                            high=getattr(event, "high", None) or event.last_price,
+                            low=getattr(event, "low", None) or event.last_price,
+                            close=getattr(event, "close", None) or event.last_price,
+                            volume=int(event.volume or 0),
+                            change=0.0,
+                            change_pct=0.0,
+                            timestamp=time.time(),
+                            bid=event.bid or 0.0,
+                            ask=event.ask or 0.0,
+                        )
+                        with ws_manager._lock:
+                            ws_manager._ticks[event.canonical_instrument_id] = c_tick
+                            ws_manager._ticks[clean_sym] = c_tick
+                            if event.provider_symbol:
+                                ws_manager._ticks[event.provider_symbol] = c_tick
+                except Exception as e_tick:
+                    logger.debug(f"[flattrade_ws] Tick handling error: {e_tick}")
+
+            broker.start_websocket(on_tick=_on_flattrade_tick)
+            try:
+                from market.symbol_facade import _FLATTRADE_INDEX_REGISTRY
+
+                # Subscribe Flattrade strictly to known index registry symbols to avoid 1380-symbol REST search storm
+                index_subs = list(_FLATTRADE_INDEX_REGISTRY.keys())
+                broker.subscribe(index_subs)
+            except Exception as e_sub:
+                logger.debug(f"[brokers.session] Flattrade ws subscription seed notice: {e_sub}")
             return
 
         if broker_name == "fyers" or broker_cls_name == "FyersAPI":

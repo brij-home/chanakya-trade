@@ -258,6 +258,62 @@ async def get_alert_audit_detail_api(alert_id: str):
     }
 
 
+@router.get("/api/alerts/auto/{alert_id}/hierarchical")
+async def get_alert_hierarchical_breakdown_api(alert_id: str):
+    """
+    Get full 3-Tier Hierarchical breakdown (Level 1: 3Cs Context -> Level 2: 5Ws Setup -> Level 3: Execution How)
+    for a specific alert. Provides complete mathematical and institutional provenance for the terminal UI.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+    from engine.pipeline.hierarchical_engine import hierarchical_pipeline
+
+    alert = await asyncio.to_thread(auto_alert_engine.get_alert_by_id, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+    metrics = getattr(alert, "metrics", {}) or {}
+    h_data = metrics.get("hierarchical_pipeline")
+    if not h_data:
+        verdict = await asyncio.to_thread(hierarchical_pipeline.evaluate, alert)
+        h_data = verdict.to_dict()
+
+    return {
+        "status": "ok",
+        "data": {
+            "alert_id": alert.alert_id,
+            "symbol": alert.symbol,
+            "headline": alert.headline,
+            "summary": alert.summary,
+            "stage": alert.stage,
+            "confidence": alert.confidence,
+            "hierarchical_breakdown": h_data,
+        },
+    }
+
+
+@router.get("/api/pipeline/hierarchical-market-context")
+async def get_hierarchical_market_context_api(symbol: str = "NIFTY", exchange: str = "NSE"):
+    """
+    Get real-time Level 1 Market Context (Modernized 3Cs) snapshot:
+    - C1 Customers: Participant OI bias, Order Book Imbalance (OBI-50), TOD-RVOL
+    - C2 Competitors: Global Macro posture, GIFT Nifty gap, Sector RRG quadrant
+    - C3 Company: Volatility regime, India VIX edgeless chop, CPR geometry & ADR runway
+    """
+    from engine.pipeline.hierarchical_engine import hierarchical_pipeline
+
+    ctx = await asyncio.to_thread(
+        hierarchical_pipeline.evaluate_market_context_3cs,
+        symbol=symbol,
+        exchange=exchange,
+    )
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "exchange": exchange,
+        "market_context_3cs": ctx.to_dict(),
+    }
+
+
 @router.get("/api/alerts/auto/telegram-destinations")
 async def get_telegram_destinations_api():
     """

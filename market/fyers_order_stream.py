@@ -195,6 +195,12 @@ class FyersOrderStreamManager:
                 on_error=self._handle_error,
                 reconnect=False,  # Autonomous control: ensures on_close triggers our self-healing reconnect
             )
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[OrderStream] SDK log rotation unavailable: {exc}")
             # Ensure background thread is daemon
             setattr(self._ws, "background_flag", True)
             self._ws.connect()

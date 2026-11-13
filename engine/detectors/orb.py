@@ -141,15 +141,15 @@ def detect_opening_range_breakout(
     else:
         now_dt = now_dt.astimezone(IST)
 
-    # 1. Market Hours & Time Gate (09:30 to 11:30 IST)
+    # 1. Market Hours & Time Gate (09:30 to 12:00 IST)
     # The opening range is strictly forming from 09:15 to 09:30.
-    # Breakout execution runs between 09:30 and 11:30 IST.
+    # Breakout execution runs between 09:30 and 12:00 IST (covering morning session & European open prep).
     curr_t = now_dt.time()
     if not ignore_time_gate:
         if curr_t < dtime(9, 30):
             # Range still discovering, do not fire prematurely
             return None
-        if curr_t > dtime(11, 30):
+        if curr_t > dtime(12, 0):
             # Past active morning ORB window
             return None
 
@@ -187,24 +187,75 @@ def detect_opening_range_breakout(
         "BANKEX",
     )
 
-    # 4. Evaluate Breakout Direction
+    # 4. Evaluate Breakout Direction with Context-Adaptive Market Dynamics Governor
     is_bullish = False
     is_bearish = False
 
+    # Dynamic Calibration from Governor
+    min_rvol = 1.30 if is_index else 1.45
     no_chase_buffer = round(0.35 * orb_range, 2)
+    is_breakout_allowed = True
+    try:
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        calib = get_market_dynamics_governor().get_calibration(
+            symbol, strategy="ORB", as_of_time=now_dt
+        )
+        min_rvol = calib.min_required_rvol
+        is_breakout_allowed = calib.is_breakout_allowed if not ignore_time_gate else True
+    except Exception as e_calib:
+        logger.debug(f"[ORB] Market Dynamics Governor calibration fallback for {symbol}: {e_calib}")
+
     max_bull_chase = round(orb_high + no_chase_buffer, 2)
     max_bear_chase = round(orb_low - no_chase_buffer, 2)
 
-    min_rvol = 1.30 if is_index else 1.45
+    vol_confirmed = None
     if rvol is not None:
         rvol_val = float(rvol)
+        vol_confirmed = rvol_val >= min_rvol
     elif df is not None and len(df) >= 3:
-        from engine.daily_levels import calculate_intraday_rvol
+        try:
+            from engine.daily_levels import compute_institutional_volume_profile
 
-        rvol_val = calculate_intraday_rvol(df)
+            dir_hint = (
+                "BULLISH" if ltp >= orb_high else ("BEARISH" if ltp <= orb_low else "NEUTRAL")
+            )
+            prof = compute_institutional_volume_profile(
+                df, required_rvol=min_rvol, direction=dir_hint
+            )
+            rvol_val = prof.hybrid_rvol
+            vol_confirmed = prof.volume_surge_confirmed
+        except Exception:
+            from engine.daily_levels import calculate_intraday_rvol
+
+            rvol_val = calculate_intraday_rvol(df)
+            vol_confirmed = rvol_val >= min_rvol
     else:
         # Zero hallucination invariant: Missing volume must NOT assume 1.5x expansion (Rule 10 & 11)
         rvol_val = 1.0
+        vol_confirmed = False
+
+    if vol_confirmed is None:
+        vol_confirmed = rvol_val >= min_rvol
+
+    # Institutional Rolling 5-bar volume check: Prevent opening 09:15 spike from suppressing midday breakouts
+    if df is not None and len(df) >= 3:
+        try:
+            col_v = (
+                "volume"
+                if "volume" in df.columns
+                else ("Volume" if "Volume" in df.columns else None)
+            )
+            if col_v:
+                v_arr = df[col_v].astype(float).values
+                if len(v_arr) >= 3:
+                    recent_prior = v_arr[-6:-1] if len(v_arr) >= 6 else v_arr[:-1]
+                    rec_mean = float(np.mean(recent_prior)) if len(recent_prior) > 0 else 0.0
+                    if rec_mean > 0:
+                        rolling_rvol = round(float(v_arr[-1]) / rec_mean, 2)
+                        rvol_val = max(rvol_val, rolling_rvol)
+        except Exception as e_rvol:
+            logger.debug(f"[ORB] Rolling RVOL evaluation failed for {symbol}: {e_rvol}")
 
     vwap_tol = 0.0 if is_index else 0.002
     if ltp >= orb_high:
@@ -214,7 +265,10 @@ def detect_opening_range_breakout(
         elif ltp > max_bull_chase:
             # Extended past no-chase boundary
             is_bullish = False
-        elif rvol_val < min_rvol:
+        elif not is_breakout_allowed and not vol_confirmed:
+            # Midday chop or MOC freeze suppresses unconfirmed breakouts
+            is_bullish = False
+        elif rvol_val < min_rvol and not vol_confirmed:
             # Insufficient volume expansion
             is_bullish = False
         else:
@@ -227,7 +281,9 @@ def detect_opening_range_breakout(
         elif ltp < max_bear_chase:
             # Extended past short no-chase boundary
             is_bearish = False
-        elif rvol_val < min_rvol:
+        elif not is_breakout_allowed and not vol_confirmed:
+            is_bearish = False
+        elif rvol_val < min_rvol and not vol_confirmed:
             is_bearish = False
         else:
             is_bearish = True
@@ -410,8 +466,6 @@ def detect_opening_range_breakout(
     atr_val = round(ltp * (0.002 if is_idx_sym else 0.015), 2)
     if df is not None and len(df) >= 2:
         try:
-            import numpy as np
-
             highs = df["high"] if "high" in df.columns else df["High"]
             lows = df["low"] if "low" in df.columns else df["Low"]
             closes = df["close"] if "close" in df.columns else df["Close"]
@@ -664,6 +718,7 @@ def detect_opening_range_breakout(
     )
 
     if opt_plan:
+        opt_no_chase = round(opt_plan.entry_premium * 1.045, 2)
         opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
         act_plan = {
             "action": f"BUY {opt_plan.option_type}",
@@ -678,6 +733,9 @@ def detect_opening_range_breakout(
             "target_2": f"₹{opt_plan.t2_premium:,.1f}",
             "target_3": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
             "runner_target": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
+            "no_chase_boundary": f"₹{opt_no_chase:,.2f}",
+            "option_no_chase_boundary": f"₹{opt_no_chase:,.2f}",
+            "spot_no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
             "risk_reward": f"1:{rr_ratio:.1f}",
             "underlying_spot": f"₹{ltp:,.1f}",
             "underlying_sl": f"₹{stop_loss:,.1f}",
@@ -718,7 +776,8 @@ def detect_opening_range_breakout(
             underlying_spot=ltp,
             lot_size=opt_plan.lot_size,
             segment="FNO_INDEX",
-            no_chase_boundary=no_chase_lvl,
+            no_chase_boundary=opt_no_chase,
+            spot_no_chase_boundary=no_chase_lvl,
             confidence=confidence,
             created_at=now_iso,
             is_live=True,
@@ -743,6 +802,8 @@ def detect_opening_range_breakout(
                 "spot": ltp,
                 "underlying_ltp": ltp,
                 "underlying_symbol": clean_sym,
+                "no_chase_boundary": opt_no_chase,
+                "spot_no_chase_boundary": no_chase_lvl,
                 "cpr": cpr_gate.cpr_data,
                 "cpr_type": cpr_gate.cpr_type,
                 "is_narrow_cpr": cpr_gate.is_narrow,

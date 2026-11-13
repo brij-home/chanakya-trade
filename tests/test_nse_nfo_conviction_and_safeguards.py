@@ -25,6 +25,22 @@ from engine.alert_expiry import (
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def _pinned_datetime(fixed_now):
+    """Returns a datetime subclass with now() pinned to fixed_now.
+
+    Subclassing (rather than a hand-built attribute bag) keeps every other
+    attribute the production code may touch - fromtimestamp, combine, utcnow -
+    available, so a new call site cannot break the test with AttributeError.
+    """
+
+    class _PinnedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    return _PinnedDateTime
+
+
 # ── 1. Index Minimum Stop-Loss Volatility Floor Tests ─────────────
 
 
@@ -228,14 +244,7 @@ def test_options_momentum_0dte_afternoon_otm_rejection(monkeypatch):
     # Mock datetime.now(IST) to 13:45 IST
     monkeypatch.setattr(
         "engine.auto_alert_engine.datetime",
-        type(
-            "MockDT",
-            (),
-            {
-                "now": classmethod(lambda cls, tz=None: now_afternoon),
-                "strptime": datetime.strptime,
-            },
-        ),
+        _pinned_datetime(now_afternoon),
     )
 
     # Set watched indices to NIFTY only
@@ -540,14 +549,7 @@ def test_options_scanner_auto_routes_stock_options_to_next_month_in_expiry_week(
     now_exp_week = datetime(2026, 9, 25, 10, 15, tzinfo=IST)
     monkeypatch.setattr(
         "engine.auto_alert_engine.datetime",
-        type(
-            "MockDT",
-            (),
-            {
-                "now": classmethod(lambda cls, tz=None: now_exp_week),
-                "strptime": datetime.strptime,
-            },
-        ),
+        _pinned_datetime(now_exp_week),
     )
 
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: spot)

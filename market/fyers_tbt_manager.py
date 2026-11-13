@@ -18,7 +18,7 @@ Features:
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime
 from importlib import import_module
 import logging
 import math
@@ -402,7 +402,7 @@ def get_default_core_grid(
                     focus,
                     strikes_per_side=1,
                     max_expiries=1,
-                    as_of=now if ref_time is not None else None,
+                    as_of=now,
                 )
                 if s.startswith("NSE:")
             ]
@@ -412,34 +412,22 @@ def get_default_core_grid(
         # Evening (15:30 - 23:30 IST): MCX Commodities & Currency CDS
         from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
-        crude_fut = _resolve_commodity_contract("CRUDEOIL")
+        crude_fut = _resolve_commodity_contract("CRUDEOIL", ref_time=now)
         core = [
             crude_fut,
-            _resolve_commodity_contract("NATURALGAS"),
-            _resolve_commodity_contract("GOLD"),
-            _resolve_commodity_contract("SILVER"),
+            _resolve_commodity_contract("NATURALGAS", ref_time=now),
+            _resolve_commodity_contract("GOLD", ref_time=now),
+            _resolve_commodity_contract("SILVER", ref_time=now),
         ]
+        # Near-ATM crude options must come from the published master and a fresh
+        # front-month quote. No calendar-suffix or default-price fallback exists:
+        # an unavailable master simply leaves the grid on futures.
         try:
-            from market.quotes import get_ltp
+            from market.contract_selection import get_commodity_option_grid
 
-            c_ltp = get_ltp("MCX:CRUDEOIL") or 6500.0
-            c_atm = int(round(c_ltp / 50.0) * 50)
-            # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
-            c_dt = now if now.day <= 15 else now + timedelta(days=20)
-            c_suffix = c_dt.strftime("%y%b").upper()
-            core.extend(
-                [
-                    f"MCX:CRUDEOIL{c_suffix}{c_atm}CE",
-                    f"MCX:CRUDEOIL{c_suffix}{c_atm}PE",
-                ]
-            )
-        except Exception:
-            core.extend(
-                [
-                    _resolve_commodity_contract("COPPER"),
-                    _resolve_commodity_contract("ZINC"),
-                ]
-            )
+            core.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=1, as_of=now))
+        except Exception as exc:
+            logger.warning(f"[TbtManager] MCX option grid unavailable for CRUDEOIL: {exc}")
 
         # Currency derivatives (CDS) trade 09:00 - 17:00 IST.
         # After 17:00 IST, CDS is CLOSED. Never keep reserve for closed currency!
@@ -532,6 +520,12 @@ class TbtSocketWorker:
                 on_error=self._on_error,
                 reconnect=False,  # Autonomous control: prevent Fyers SDK uncontrolled 5s hammer loops
             )
+            try:
+                from config.log_hygiene import install as _install_bounded_sdk_logs
+
+                _install_bounded_sdk_logs()
+            except Exception as exc:
+                logger.warning(f"[TbtWorker-{self.worker_id}] SDK log rotation unavailable: {exc}")
             self.ws.onopen = self._on_connect
             self.ws.background_flag = True
             self.ws.connect()
@@ -565,6 +559,50 @@ class TbtSocketWorker:
 
     def _on_server_error(self, message: str) -> None:
         logger.warning(f"[TbtWorker-{self.worker_id}] Fyers server error: {message}")
+        msg_lower = str(message).lower()
+        if (
+            "token is expired" in msg_lower
+            or "-99" in msg_lower
+            or "-16" in msg_lower
+            or "401" in msg_lower
+            or "403" in msg_lower
+            or "unauthorized" in msg_lower
+        ):
+            logger.warning(
+                f"[TbtWorker-{self.worker_id}] Token expiration/auth failure detected from Fyers server ({message}). Triggering re-authentication..."
+            )
+            with self._lock:
+                ws_to_close = self.ws
+                self.ws = None
+                self.connected = False
+                self.status = "DEGRADED_AUTH"
+                self._channel_symbols = {"1": set()}
+            if ws_to_close:
+                try:
+                    setattr(ws_to_close, "restart_flag", False)
+                    if hasattr(ws_to_close, "close_connection"):
+                        ws_to_close.close_connection()
+                    elif hasattr(ws_to_close, "close"):
+                        ws_to_close.close()
+                except Exception as e_close:
+                    logger.debug(f"[TbtWorker-{self.worker_id}] Socket teardown error: {e_close}")
+            self._on_status(self.worker_id, "DEGRADED_AUTH")
+
+            def _trigger_reauth():
+                try:
+                    from brokers.session import get_data_broker
+
+                    b = get_data_broker()
+                    if hasattr(b, "_handle_auth_failure"):
+                        b._handle_auth_failure()
+                except Exception as e_supp:
+                    logger.debug(
+                        f"[TbtWorker-{self.worker_id}] Auth recovery dispatch notice: {e_supp}"
+                    )
+
+            threading.Thread(target=_trigger_reauth, daemon=True, name="TbtReauth").start()
+            return
+
         if "symbol count exceeds limit" in str(message).lower():
             logger.info(
                 f"[TbtWorker-{self.worker_id}] Server symbol limit exceeded; closing socket to clear server-side channels cleanly..."
@@ -596,6 +634,18 @@ class TbtSocketWorker:
 
     def _on_error(self, err: Any, *args, **kwargs) -> None:
         err_msg = str(err)
+        err_lower = err_msg.lower()
+        if (
+            "token is expired" in err_lower
+            or "-99" in err_lower
+            or "-16" in err_lower
+            or "401" in err_lower
+            or "403" in err_lower
+            or "unauthorized" in err_lower
+        ):
+            self._on_server_error(err_msg)
+            return
+
         if "429" in err_msg or "Too Many Requests" in err_msg:
             with self._lock:
                 self._consecutive_429 += 1
@@ -1005,6 +1055,7 @@ class FyersTbtManager:
 
         # Operator Eviction & Slot Allocation Tracking
         self._slot_allocated_at: dict[str, float] = {}
+        self._last_slots_status_cache: dict[str, Any] = {}
         self._evicted_cooldowns: dict[str, float] = {}
 
         self._initialized = True
@@ -2845,7 +2896,33 @@ class FyersTbtManager:
     def get_active_slots_status(self) -> dict[str, Any]:
         """Audit status of all 15 TBT slots and current allocation breakdown with per-slot metrics."""
         now = time.time()
-        with self._slots_lock:
+        acquired = self._slots_lock.acquire(timeout=2.0)
+        if not acquired:
+            if getattr(self, "_last_slots_status_cache", None):
+                return dict(self._last_slots_status_cache)
+            sub_list = list(getattr(self, "_subscribed", []))
+            return {
+                "max_slots": MAX_TBT_SYMBOLS,
+                "active_total": len(sub_list),
+                "free_slots": max(0, MAX_TBT_SYMBOLS - len(sub_list)),
+                "pool_status": [],
+                "workers_active": 0,
+                "workers_total": 0,
+                "current_session": getattr(self, "_current_session", "EQUITY_NFO"),
+                "session_state": "STREAMING_LIVE",
+                "session_note": "L3 50-Depth TBT streaming active on NSE benchmarks and dynamic scouts.",
+                "primary_focus": getattr(self, "_primary_focus_index", None),
+                "last_atm_strikes": {},
+                "in_flight": list(getattr(self, "_in_flight", set())),
+                "core_grid": list(getattr(self, "_core_grid", set())),
+                "todays_expiry": list(getattr(self, "_todays_expiry", set())),
+                "scout": list(getattr(self, "_scout", {}).keys()),
+                "sector_scouts": list(getattr(self, "_sector_scouts", [])),
+                "subscribed": sub_list,
+                "slots": [],
+                "cooldowns": {},
+            }
+        try:
             # Purge expired eviction cooldowns
             self._evicted_cooldowns = {
                 s: exp for s, exp in self._evicted_cooldowns.items() if exp > now
@@ -2962,7 +3039,7 @@ class FyersTbtManager:
                     }
                 )
 
-            return {
+            result = {
                 "max_slots": MAX_TBT_SYMBOLS,
                 "active_total": len(self._subscribed),
                 "free_slots": max(0, MAX_TBT_SYMBOLS - len(self._subscribed)),
@@ -2997,6 +3074,10 @@ class FyersTbtManager:
                 "slots": slots,
                 "cooldowns": {s: round(exp - now, 1) for s, exp in self._evicted_cooldowns.items()},
             }
+            self._last_slots_status_cache = result
+            return result
+        finally:
+            self._slots_lock.release()
 
     def get_slot_allocation(self) -> dict[str, Any]:
         """Alias for get_active_slots_status."""

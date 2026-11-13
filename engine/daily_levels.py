@@ -58,6 +58,9 @@ INDEX_INSTRUMENT_MAP: dict[str, str] = {
     "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
     "SENSEX": "BSE:SENSEX",
     "BANKEX": "BSE:BANKEX",
+    "NIFTYNXT50": "NSE:NIFTY NEXT 50",
+    "NIFTY NEXT 50": "NSE:NIFTY NEXT 50",
+    "NEXT50": "NSE:NIFTY NEXT 50",
 }
 
 
@@ -1427,45 +1430,97 @@ def prime_daily_levels(symbols: Optional[list[str]] = None) -> dict[str, DailyLe
     return daily_levels_store.prime_universe(symbols)
 
 
-def calculate_intraday_rvol(
+@dataclass(frozen=True)
+class InstitutionalVolumeProfile:
+    """Institutional Multi-Tier Volume Profile & Microstructure Breakdown."""
+
+    bar_rvol: float  # Immediate breakout impulse RVOL (vs rolling 5-bar / 20-bar baseline)
+    tod_rvol: float  # Time-of-Day cumulative RVOL vs 90-day institutional U-curve
+    hybrid_rvol: float  # Calibrated institutional blend (0.60 impulse + 0.40 TOD)
+    cvd_val: float  # Cumulative Volume Delta (net buying vs selling pressure)
+    cvd_slope: float  # 5-bar CVD momentum trajectory
+    cvd_divergence: str  # 'BULLISH_ABSORPTION' | 'BEARISH_EXHAUSTION' | 'NEUTRAL'
+    volume_surge_confirmed: bool  # True if volume dynamics mathematically validate setup
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def compute_institutional_volume_profile(
     df_5m: Optional[pd.DataFrame],
     df_daily: Optional[pd.DataFrame] = None,
     current_vol: Optional[float] = None,
-) -> float:
+    required_rvol: float = 1.4,
+    direction: str = "BULLISH",
+) -> InstitutionalVolumeProfile:
     """
-    Calculates genuine Relative Volume (RVOL) using real intraday volume bars.
-    Combines Bar-Level Volume Expansion and Time-of-Day (TOD) Relative Volume.
-    Returns verified RVOL (e.g. 1.85 for 1.85x volume).
-    If volume data is completely absent or 0, returns 1.0 (unexpanded baseline)
-    with no synthetic exaggeration.
+    Computes unified multi-tier volume profile blending:
+      1. Immediate 5-bar breakout impulse RVOL (detects instant explosive volume injections)
+      2. 20-bar rolling baseline (sustained momentum)
+      3. Time-of-Day (TOD) cumulative RVOL against institutional 90-day U-curve
+      4. Cumulative Volume Delta (CVD) divergence (catches absorption traps & exhaustion blow-offs)
     """
     if df_5m is None or len(df_5m) < 2:
-        return 1.0
+        return InstitutionalVolumeProfile(
+            bar_rvol=1.0,
+            tod_rvol=1.0,
+            hybrid_rvol=1.0,
+            cvd_val=0.0,
+            cvd_slope=0.0,
+            cvd_divergence="NEUTRAL",
+            volume_surge_confirmed=False,
+        )
 
     col_v = (
         "volume" if "volume" in df_5m.columns else ("Volume" if "Volume" in df_5m.columns else None)
     )
     if not col_v:
-        return 1.0
+        return InstitutionalVolumeProfile(
+            bar_rvol=1.0,
+            tod_rvol=1.0,
+            hybrid_rvol=1.0,
+            cvd_val=0.0,
+            cvd_slope=0.0,
+            cvd_divergence="NEUTRAL",
+            volume_surge_confirmed=False,
+        )
 
     vols = df_5m[col_v].astype(float).values
     if len(vols) == 0 or vols.sum() <= 0:
-        return 1.0
+        return InstitutionalVolumeProfile(
+            bar_rvol=1.0,
+            tod_rvol=1.0,
+            hybrid_rvol=1.0,
+            cvd_val=0.0,
+            cvd_slope=0.0,
+            cvd_divergence="NEUTRAL",
+            volume_surge_confirmed=False,
+        )
 
     latest_v = (
         float(current_vol) if (current_vol is not None and current_vol > 0) else float(vols[-1])
     )
 
-    # 1. Bar-level RVOL vs rolling 20-bar SMA on 5m
-    lookback = min(20, len(vols) - 1)
-    if lookback >= 1:
-        ma_20 = float(np.mean(vols[-lookback - 1 : -1]))
+    # 1. Immediate 5-bar impulse RVOL vs rolling 5-bar mean
+    lookback_5 = min(5, len(vols) - 1)
+    if lookback_5 >= 1:
+        ma_5 = float(np.mean(vols[-lookback_5 - 1 : -1]))
+    else:
+        ma_5 = float(vols[0])
+    impulse_rvol_5 = round(latest_v / max(1.0, ma_5), 2) if ma_5 > 0 else 1.0
+
+    # 2. 20-bar baseline RVOL vs rolling 20-bar SMA on 5m
+    lookback_20 = min(20, len(vols) - 1)
+    if lookback_20 >= 1:
+        ma_20 = float(np.mean(vols[-lookback_20 - 1 : -1]))
     else:
         ma_20 = float(vols[0])
+    bar_rvol_20 = round(latest_v / max(1.0, ma_20), 2) if ma_20 > 0 else 1.0
 
-    bar_rvol = round(latest_v / max(1.0, ma_20), 2) if ma_20 > 0 else 1.0
+    bar_rvol = max(impulse_rvol_5, bar_rvol_20)
 
-    # 2. Time-of-Day (TOD) cumulative RVOL if df_daily is present
+    # 3. Time-of-Day (TOD) cumulative RVOL if df_daily is present
+    tod_rvol = bar_rvol
     if df_daily is not None and len(df_daily) >= 10:
         col_vd = (
             "volume"
@@ -1478,7 +1533,6 @@ def calculate_intraday_rvol(
                 float(np.mean(d_vols[-20:])) if len(d_vols) >= 20 else float(np.mean(d_vols))
             )
             if avg_daily_vol > 0:
-                # Time-of-Day (TOD) Relative Volume calibrated against 90-day institutional Fyers volume U-curve
                 from engine.index_calibration import get_empirical_tod_volume_fraction
 
                 intraday_bars = len(df_5m)
@@ -1486,9 +1540,59 @@ def calculate_intraday_rvol(
                 expected_tod_vol = avg_daily_vol * expected_tod_fraction
                 cum_today_vol = float(vols.sum())
                 tod_rvol = round(cum_today_vol / max(1.0, expected_tod_vol), 2)
-                return round(0.60 * bar_rvol + 0.40 * tod_rvol, 2)
 
-    return bar_rvol
+    # 4. Hybrid RVOL blend
+    if tod_rvol != bar_rvol:
+        hybrid_rvol = round(0.60 * bar_rvol + 0.40 * tod_rvol, 2)
+    else:
+        hybrid_rvol = bar_rvol
+
+    # 5. CVD Microstructure & Divergence
+    cvd_val, cvd_slope, cvd_divergence = calculate_intraday_cvd(df_5m)
+
+    # 6. Institutional Surge Confirmation
+    dir_clean = str(direction or "BULLISH").upper()
+    confirmed = False
+    if hybrid_rvol >= required_rvol:
+        # Standard threshold cleared, verify against institutional absorption traps
+        if dir_clean in ("BULLISH", "CALL", "LONG") and cvd_divergence == "BEARISH_EXHAUSTION":
+            confirmed = False  # Retail chasing into smart money sell orders
+        elif dir_clean in ("BEARISH", "PUT", "SHORT") and cvd_divergence == "BULLISH_ABSORPTION":
+            confirmed = False  # Retail selling into smart money absorption
+        else:
+            confirmed = True
+    elif impulse_rvol_5 >= max(2.0, required_rvol):
+        # Explosive single-bar volume impulse (e.g. news breakout or opening gap fill)
+        if dir_clean in ("BULLISH", "CALL", "LONG") and cvd_divergence != "BEARISH_EXHAUSTION":
+            confirmed = True
+        elif dir_clean in ("BEARISH", "PUT", "SHORT") and cvd_divergence != "BULLISH_ABSORPTION":
+            confirmed = True
+
+    return InstitutionalVolumeProfile(
+        bar_rvol=bar_rvol,
+        tod_rvol=tod_rvol,
+        hybrid_rvol=hybrid_rvol,
+        cvd_val=cvd_val,
+        cvd_slope=cvd_slope,
+        cvd_divergence=cvd_divergence,
+        volume_surge_confirmed=confirmed,
+    )
+
+
+def calculate_intraday_rvol(
+    df_5m: Optional[pd.DataFrame],
+    df_daily: Optional[pd.DataFrame] = None,
+    current_vol: Optional[float] = None,
+) -> float:
+    """
+    Calculates genuine Relative Volume (RVOL) using real intraday volume bars.
+    Combines Bar-Level Volume Expansion and Time-of-Day (TOD) Relative Volume.
+    Returns verified RVOL (e.g. 1.85 for 1.85x volume).
+    If volume data is completely absent or 0, returns 1.0 (unexpanded baseline)
+    with no synthetic exaggeration.
+    """
+    prof = compute_institutional_volume_profile(df_5m, df_daily, current_vol)
+    return prof.hybrid_rvol
 
 
 def calculate_intraday_cvd(

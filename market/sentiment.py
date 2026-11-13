@@ -292,7 +292,11 @@ class MarketBreadth:
     declines: int
     unchanged: int
     ad_ratio: float  # advances / declines
-    verdict: str  # "BROAD_RALLY" | "BROAD_DECLINE" | "MIXED"
+    verdict: str  # "BROAD_RALLY" | "BROAD_DECLINE" | "MIXED" | "INTRADAY_LIQUIDATION" | "INTRADAY_EXPANSION"
+    above_vwap: int = 0
+    below_vwap: int = 0
+    vwap_ratio: float = 0.0
+    intraday_verdict: str = "UNAVAILABLE"
 
 
 _BREADTH_CACHE: MarketBreadth | None = None
@@ -304,10 +308,51 @@ _BREADTH_TTL: float = 60.0
 def get_market_breadth(use_cache: bool = True, force_refresh: bool = False) -> MarketBreadth:
     """
     Advance/Decline ratio from NSE with thread-safe 60s in-memory and persistent caching.
-    Prevents repetitive network hammer across parallel batch scanning.
+    Prioritizes real-time In-RAM MarketMatrix rolling breadth (spot vs VWAP & Open) to
+    eliminate the morning gap-up distortion trap.
     """
     global _BREADTH_CACHE, _BREADTH_CACHE_TS
     now = time.time()
+
+    # 1. First priority: Check real-time In-RAM MarketMatrix for live rolling breadth
+    try:
+        from engine.market_matrix import get_market_matrix
+
+        mm = get_market_matrix()
+        ib = mm.get_intraday_breadth()
+        if ib.get("total_symbols", 0) >= 15:
+            # We have live in-RAM streaming ticks!
+            # Map intraday verdict cleanly with Advance/Decline sanity
+            raw_verdict = ib.get("verdict", "INTRADAY_CHOP")
+            ad_ratio_val = float(ib.get("ad_ratio", 0.0) or ib.get("open_ratio", 0.0))
+            if (
+                raw_verdict == "INTRADAY_LIQUIDATION" and ad_ratio_val <= 0.75
+            ) or ad_ratio_val <= 0.60:
+                eff_verdict = "BROAD_DECLINE"
+            elif (
+                raw_verdict == "INTRADAY_EXPANSION" and ad_ratio_val >= 1.25
+            ) or ad_ratio_val >= 1.60:
+                eff_verdict = "BROAD_RALLY"
+            else:
+                eff_verdict = "MIXED"
+
+            mb = MarketBreadth(
+                advances=int(ib.get("advances", 0) or ib.get("above_open", 0)),
+                declines=int(ib.get("declines", 0) or ib.get("below_open", 0)),
+                unchanged=int(ib.get("unchanged", 0)),
+                ad_ratio=ad_ratio_val,
+                verdict=eff_verdict,
+                above_vwap=int(ib.get("above_vwap", 0)),
+                below_vwap=int(ib.get("below_vwap", 0)),
+                vwap_ratio=float(ib.get("vwap_ratio", 0.0)),
+                intraday_verdict=raw_verdict,
+            )
+            with _BREADTH_LOCK:
+                _BREADTH_CACHE = mb
+                _BREADTH_CACHE_TS = now
+            return mb
+    except Exception as e_mm:
+        logger.debug(f"[market.sentiment] MarketMatrix breadth query non-fatal: {e_mm}")
 
     if use_cache and not force_refresh:
         with _BREADTH_LOCK:
