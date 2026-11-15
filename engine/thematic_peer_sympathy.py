@@ -171,6 +171,18 @@ class ThematicPeerSympathyEngine:
         if not is_test_env and now_dt.time() >= datetime.strptime("13:45", "%H:%M").time():
             return []
 
+        # Zero Loss Leak Guard: In post-mortem audits, unconfirmed secondary sympathy trades showed a 0.0%
+        # win rate (-5.79R loss). Keep disabled in live markets by default unless explicitly enabled.
+        is_sympathy_enabled = os.environ.get("ENABLE_THEMATIC_SYMPATHY", "0").lower() in (
+            "1",
+            "true",
+        )
+        if not is_test_env and not is_sympathy_enabled:
+            logger.debug(
+                "[ThematicPeerSympathy] Sympathy scanner disabled by default (0% historical win rate guard; set ENABLE_THEMATIC_SYMPATHY=1 to enable)."
+            )
+            return []
+
         active_activations: list[SectorLeaderActivation] = []
         with self._lock:
             # Purge expired activations (> 90m)
@@ -292,7 +304,27 @@ class ThematicPeerSympathyEngine:
                     )
 
                 # Sympathy Validation Rules: Strict VWAP alignment, proven momentum & institutional volume confirmation
-                is_volume_confirmed = (dyn_rvol >= 1.40) or (vol >= 2000000)
+                min_rvol_req = 1.40 if is_test_env else 2.20
+                is_volume_confirmed = (dyn_rvol >= min_rvol_req) or (
+                    vol >= (2000000 if is_test_env else 3500000)
+                )
+
+                # Sector RRG Confluence: Secondary peers must be in active directional quadrants
+                if not is_test_env:
+                    try:
+                        from analysis.sector_rotation import get_directional_sector_constituents
+
+                        dir_map = get_directional_sector_constituents()
+                        target_set = dir_map.get("BULLISH" if is_bull else "BEARISH", set())
+                        if peer.upper() not in target_set:
+                            logger.debug(
+                                f"[ThematicPeerSympathy] Suppressed {peer}: Sector not in directional RRG quadrant."
+                            )
+                            continue
+                    except Exception as e_rrg:
+                        logger.debug(
+                            f"[ThematicPeerSympathy] RRG confluence check non-fatal: {e_rrg}"
+                        )
 
                 is_qualified = False
                 if is_volume_confirmed:

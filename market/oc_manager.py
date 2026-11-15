@@ -58,10 +58,12 @@ class OptionsChainManager:
         logger.debug(f"[OCM] Subscribed {clean} to options chain refresh manager")
 
     def unsubscribe(self, underlying: str) -> None:
-        """Unsubscribe an underlying symbol."""
+        """Unsubscribe an underlying symbol (indices are permanently protected)."""
         clean = (
             underlying.upper().replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").strip()
         )
+        if clean in _DEFAULT_INDEX_SUBSCRIPTIONS:
+            return
         with self._lock:
             self._subscribed.discard(clean)
         logger.debug(f"[OCM] Unsubscribed {clean} from options chain refresh manager")

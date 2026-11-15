@@ -524,6 +524,53 @@ async def scan_swing_trades(
     }
 
 
+@router.post("/api/alerts/auto/scan-fno-swing")
+async def scan_fno_stock_swings(
+    min_score: int = 65,
+    limit: int = 25,
+    min_turnover_cr: float = 1.0,
+    bypass_cache: bool = False,
+    exchange: str = "NSE",
+):
+    """
+    On-demand sweep for institutional F&O Stock Swing & Positional setups under FNO_STOCK desk authority.
+    Scans liquid NSE F&O underlying equities and resolves actionable monthly options (product='NRML') and futures.
+    Permitted under strict SESSION_FOCUS_MODE='FNO_ONLY'.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alerts = await asyncio.to_thread(
+        auto_alert_engine.scan_fno_stock_swing_setups,
+        min_score=min_score,
+        top_n=limit,
+        min_turnover_cr=min_turnover_cr,
+        use_local_cache=not bypass_cache,
+        bypass_inflection_cache=bypass_cache,
+        exchange=exchange,
+    )
+
+    try:
+        from web.sse import event_bus
+
+        for a in alerts:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alert_new",
+                    "alert": a.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
+
+    return {
+        "status": "ok",
+        "universe": "fno",
+        "count": len(alerts),
+        "data": [a.to_dict() for a in alerts],
+    }
+
+
 @router.post("/api/alerts/auto/eod-review")
 async def trigger_eod_session_review(force: bool = True, broadcast: bool = True):
     """

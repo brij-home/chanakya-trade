@@ -46,6 +46,7 @@ class ConfluenceCluster:
     is_prime_cluster: bool = False  # >= 3 confluences or score >= 75
     invalidation_stop: float = 0.0
     distance_to_ltp_pct: float = 0.0  # (LTP - midpoint) / midpoint * 100
+    fractal_blueprint: Optional[dict[str, Any]] = None
     summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,6 +68,7 @@ class ConfluenceCluster:
             "is_prime_cluster": self.is_prime_cluster,
             "invalidation_stop": round(self.invalidation_stop, 2),
             "distance_to_ltp_pct": round(self.distance_to_ltp_pct, 2),
+            "fractal_blueprint": self.fractal_blueprint,
             "summary": self.summary,
         }
 
@@ -404,6 +406,27 @@ def find_confluence_clusters(
                 f"Supply Cluster ₹{c.bottom:.1f}–₹{c.top:.1f} (Score {c.confluence_score}/100, {c.factors_count} factors): "
                 + "; ".join(c.confluence_factors[:3])
             )
+
+        if c.is_prime_cluster and df is not None and len(df) >= 5:
+            try:
+                from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+                target_approx = (
+                    c.midpoint + 3.0 * abs(c.midpoint - c.invalidation_stop)
+                    if is_bullish
+                    else c.midpoint - 3.0 * abs(c.midpoint - c.invalidation_stop)
+                )
+                bp = coordinate_fractal_entry(
+                    symbol=clean_sym,
+                    direction="BULLISH" if is_bullish else "BEARISH",
+                    htf_zone=(c.top, c.bottom),
+                    htf_target=target_approx,
+                    df_ltf=df,
+                    ltp=ltp,
+                )
+                c.fractal_blueprint = bp.to_dict()
+            except Exception as _e_bp:
+                logger.debug(f"[confluence_engine] Fractal blueprint non-fatal: {_e_bp}")
 
         finalized.append(c)
 

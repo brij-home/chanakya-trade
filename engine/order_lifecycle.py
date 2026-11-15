@@ -506,6 +506,8 @@ def preview_order_intent(
     target: Optional[float] = None,
     trigger_price: Optional[float] = None,
     auto_gtt_oco: bool = True,
+    allow_override: bool = False,
+    double_confirmed: bool = False,
 ) -> OrderIntent:
     """
     Generate an order preview with statutory Indian charges, concurrency-safe idempotency check,
@@ -521,7 +523,11 @@ def preview_order_intent(
 
     try:
         risk_limits.check(
-            symbol=symbol, action=side, quantity=quantity, price=price, allow_override=False
+            symbol=symbol,
+            action=side,
+            quantity=quantity,
+            price=price,
+            allow_override=(allow_override or double_confirmed),
         )
     except RiskLimitError as rle:
         raise ValueError(f"Order intent violates risk limits: {rle}") from rle
@@ -1229,7 +1235,7 @@ def clear_emergency_lockout() -> None:
     _emergency_lockout_until = None
 
 
-def execute_order_intent(order_id: str) -> OrderIntent:
+def execute_order_intent(order_id: str, *, allow_override: bool = False) -> OrderIntent:
     """
     Transition a server-CONFIRMED order into execution.
 
@@ -1271,7 +1277,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             action=d["side"],
             quantity=int(d["quantity"]),
             price=float(d["price"]),
-            allow_override=False,
+            allow_override=allow_override,
         )
     except RiskLimitError as rle:
         raise PermissionError(f"Order execution violates risk limits: {rle}") from rle

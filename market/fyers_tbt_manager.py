@@ -215,7 +215,7 @@ def _tbt_symbol_priority(
         if "SENSEX" in s:
             return 45  # SENSEX Option
         if "FINNIFTY" in s or "BANKEX" in s:
-            return 35  # Deprecated non-weekly index options
+            return 35  # Monthly index options (single exchange weekly mandate)
         if is_mcx:
             return 32  # Commodity Option
         return 28  # High-Conviction Stock Option
@@ -231,7 +231,7 @@ def _tbt_symbol_priority(
         if "SENSEX" in s:
             return 38  # SENSEX Future
         if "FINNIFTY" in s or "BANKEX" in s:
-            return 25  # Deprecated index futures
+            return 25  # Monthly index futures (single exchange weekly mandate)
         if is_mcx or is_cds:
             return 32  # Commodity / Currency Future
         return 22  # High-Conviction Stock Future

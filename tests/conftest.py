@@ -28,8 +28,7 @@ if _sym_fixtures.exists():
 
     for _f in _sym_fixtures.glob("*.json"):
         _target = _TEST_DATA_DIR / "sym_master" / _f.name
-        if not _target.exists():
-            shutil.copyfile(_f, _target)
+        shutil.copyfile(_f, _target)
 os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")

@@ -1049,6 +1049,7 @@ def evaluate_alert_targets_and_trailing(
     if current_ltp is None or current_ltp <= 0:
         return None
 
+    is_option_sell = False
     if is_option:
         # Check if option buyer or option writer/seller:
         act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
@@ -2524,6 +2525,105 @@ def evaluate_alert_targets_and_trailing(
                         f"[AlertEvaluator] Velocity time-stop evaluation failed for {getattr(alert, 'alert_id', 'unknown')}: {e}",
                         exc_info=True,
                     )
+
+    # ── Rule 4E: 60-Minute "Dead-Money" Dynamic Ratchet to Breakeven ──
+    # For directional trades (option buyers, cash equity, futures breakouts):
+    # If a trade stalls in low-amplitude drift (r_multiple >= 0.35 or pnl_pct >= 3.0) for >= 60 minutes
+    # without reaching T0.5 or T1, holding exposes it to severe theta decay or midday reversal.
+    # Automatically ratchet stop-loss to Breakeven (+0.2% fee cushion) to permanently eliminate downside risk.
+    # Non-directional option sellers & defined-risk neutral spreads are strictly exempted.
+    atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+    is_non_directional = is_option_sell or atype_u in (
+        "DEFINED_RISK_NEUTRAL",
+        "IRON_CONDOR",
+        "SHORT_STRADDLE",
+        "SHORT_STRANGLE",
+    )
+    if (
+        not is_non_directional
+        and not getattr(alert, "is_breakeven_ratcheted", False)
+        and "DEAD_MONEY_BREAKEVEN" not in achieved
+        and "BREAKEVEN_LOCKED" not in achieved
+        and "T0_5_ACHIEVED" not in achieved
+        and "T1_ACHIEVED" not in achieved
+        and "T2_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+        and (r_multiple >= (0.25 if is_option else 0.35) or pnl_pct >= (2.5 if is_option else 3.0))
+    ):
+        is_test_runner = (
+            (getattr(alert, "environment", "LIVE") == "TEST")
+            or (not getattr(alert, "is_live", True))
+            or (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        created_str = (
+            getattr(alert, "original_call_time", None)
+            or getattr(alert, "triggered_at", None)
+            or getattr(alert, "created_at", "")
+        )
+        if created_str:
+            clean_ts = created_str.replace(" IST", "").strip()[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    c_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                    now_ist = datetime.now(IST)
+                    if is_test_runner:
+                        elapsed_s = (now_ist - c_dt).total_seconds()
+                    else:
+                        from market.calendar import get_trading_minutes_elapsed
+
+                        elapsed_s = get_trading_minutes_elapsed(c_dt, now_ist, exchange=exch) * 60.0
+
+                    # 45-minute cutoff for options (to defeat theta decay); 60-minute cutoff for cash/futures
+                    min_dead_money_s = 2700.0 if is_option else 3600.0
+                    if elapsed_s >= min_dead_money_s:
+                        be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
+                        cur_trail = getattr(alert, "trailing_stop", None) or stop
+                        if (is_bullish and be_stop > cur_trail) or (
+                            not is_bullish and be_stop < cur_trail
+                        ):
+                            locked_pts = abs(be_stop - entry)
+                            curr_sym = (
+                                "$"
+                                if (
+                                    getattr(alert, "segment", "") == "CRYPTO"
+                                    or "CRYPTO" in str(getattr(alert, "alert_type", "")).upper()
+                                    or str(getattr(alert, "symbol", ""))
+                                    .upper()
+                                    .endswith(("USDT", "USDC", "BTC"))
+                                )
+                                else "₹"
+                            )
+                            period_label = (
+                                "45-minute option momentum time-stop"
+                                if is_option
+                                else "60-minute consolidation dead-money ratchet"
+                            )
+                            rationale = (
+                                f"{period_label}: Position active for {int(elapsed_s // 60)}m "
+                                f"with modest profit (+{r_multiple:.1f}R / +{pnl_pct:.1f}%). "
+                                f"DECISION: RATCHET STOP TO BREAKEVEN ({curr_sym}{be_stop:,.2f}) to eliminate downside ruin risk and theta drain."
+                            )
+                            return TargetTrailingEvaluation(
+                                new_milestone="DEAD_MONEY_BREAKEVEN",
+                                target_status=getattr(alert, "target_status", None)
+                                or "BREAKEVEN_LOCKED",
+                                should_trail=True,
+                                trailing_decision="TRAIL_DEAD_MONEY_BREAKEVEN",
+                                recommended_stop=be_stop,
+                                trailing_rationale=rationale,
+                                locked_profit_pts=round(locked_pts, 2),
+                                locked_profit_pct=0.2,
+                                r_multiple=round(r_multiple, 2),
+                                pnl_pct=round(pnl_pct, 2),
+                                is_superperforming=is_superperforming,
+                                is_risk_compression=True,
+                                risk_reduction_pct=100.0,
+                            )
+                    break
+                except Exception as e_dead_money:
+                    logger.debug(f"[AlertEvaluator] Dead-money evaluation note: {e_dead_money}")
 
     # Fallback: Early Sub-Target Phase (< 1.5R, No compression conditions met)
     rationale = (

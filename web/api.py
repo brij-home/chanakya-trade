@@ -119,9 +119,12 @@ async def _background_cache_warmer():
                 get_ohlcv("BANKNIFTY", days=500)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-            # 3. Warm sector rotation matrix
+            # 3. Warm sector rotation matrix & directional constituents
             try:
+                from analysis.sector_rotation import get_directional_sector_constituents
+
                 get_sector_rrg_matrix(use_cache=True)
+                get_directional_sector_constituents()
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 4. Warm options chain for key index benchmarks via OptionsChainManager
@@ -219,6 +222,54 @@ async def _background_code_staleness_sentinel():
             logger.debug(f"[web.api] Code staleness sentinel exception: {e_suppressed}")
 
 
+async def _background_broker_health_sentinel():
+    """
+    Background sentinel monitoring configured headless broker connectivity and circuit breaker recovery.
+    Runs every 60s.
+    - If a headless broker (e.g. Fyers) is configured but unauthenticated, attempts automatic session restoration
+      as soon as rate-limit / OTP backoff elapses.
+    - If the Fyers circuit breaker has transitioned to HALF_OPEN, actively dispatches a lightweight live probe
+      (funds check) to verify gateway connectivity and reset the circuit to CLOSED.
+    """
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
+
+    await asyncio.sleep(45)  # Grace window after boot
+    while True:
+        try:
+            await asyncio.sleep(60)
+            cb = get_fyers_circuit_breaker()
+            fyers_brk = get_registered_brokers().get("fyers")
+            is_fyers_auth = bool(fyers_brk and fyers_brk.is_authenticated())
+
+            # 1. Headless auto-restore when unauthenticated and backoff elapsed
+            if _has_fyers() and not is_fyers_auth:
+                try:
+                    from brokers.fyers import _get_auth_backoff_remaining
+
+                    if _get_auth_backoff_remaining() == 0:
+                        logger.info(
+                            "[BrokerHealthSentinel] Fyers unauthenticated with backoff cleared; attempting auto-restore..."
+                        )
+                        await asyncio.to_thread(_auto_restore_brokers_sync)
+                except Exception as e_restore:
+                    logger.debug(f"[BrokerHealthSentinel] Auto-restore attempt note: {e_restore}")
+
+            # 2. Active probe if circuit breaker is HALF_OPEN and broker authenticated
+            if cb.state == CircuitState.HALF_OPEN and fyers_brk and fyers_brk.is_authenticated():
+                try:
+                    await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+                    logger.info(
+                        "[BrokerHealthSentinel] Proactive probe succeeded; circuit breaker returned to CLOSED"
+                    )
+                except Exception as e_probe:
+                    logger.warning(f"[BrokerHealthSentinel] Proactive probe failed: {e_probe}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e_suppressed:
+            logger.debug(f"[BrokerHealthSentinel] Sentinel loop note: {e_suppressed}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -281,6 +332,7 @@ async def lifespan(app: FastAPI):
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     staleness_task = asyncio.create_task(_background_code_staleness_sentinel())
+    broker_health_task = asyncio.create_task(_background_broker_health_sentinel())
 
     # Start the autonomous periodic data synchronization engine
     try:
@@ -320,6 +372,7 @@ async def lifespan(app: FastAPI):
     warmer_task.cancel()
     maintenance_task.cancel()
     staleness_task.cancel()
+    broker_health_task.cancel()
     try:
         from engine.recovery_worker import stop_recovery_worker
 
@@ -1694,15 +1747,38 @@ async def reset_circuit_breaker_endpoint():
 
 @app.post("/api/maintenance/circuit-breaker/probe", tags=["Maintenance", "Operations"])
 async def probe_circuit_breaker_endpoint():
-    """Manually transition the Fyers API circuit breaker to HALF_OPEN to permit immediate probe call."""
-    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    """Manually transition the Fyers API circuit breaker to HALF_OPEN and immediately dispatch an active probe."""
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
 
     cb = get_fyers_circuit_breaker()
     cb.probe()
+
+    msg = "Circuit breaker set to HALF_OPEN for probing"
+    fyers_brk = get_registered_brokers().get("fyers")
+    if fyers_brk and fyers_brk.is_authenticated():
+        try:
+            await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+            msg = "Live probe succeeded: funds verified and circuit breaker reset to CLOSED"
+        except Exception as exc:
+            msg = f"Live probe call failed: {exc}"
+            logger.warning("[probe_circuit_breaker] Live probe failed: %s", exc)
+    elif _has_fyers():
+        try:
+            await asyncio.to_thread(_auto_restore_brokers_sync)
+            b2 = get_registered_brokers().get("fyers")
+            if b2 and b2.is_authenticated():
+                cb.record_auth_success()
+                msg = "Fyers session auto-restored successfully and circuit breaker reset to CLOSED"
+            else:
+                msg = "Fyers unauthenticated: auto-restore attempted but session could not be established"
+        except Exception as exc:
+            msg = f"Auto-restore failed: {exc}"
+
     return JSONResponse(
         {
-            "status": "SUCCESS",
-            "message": "Circuit breaker set to HALF_OPEN for probing",
+            "status": "SUCCESS" if cb.state == CircuitState.CLOSED else "HALF_OPEN",
+            "message": msg,
             "diagnostics": cb.get_diagnostics(),
         }
     )
@@ -1866,7 +1942,7 @@ async def get_data_sync_status():
 
 
 @app.post("/api/maintenance/sync-premarket", tags=["Maintenance"])
-async def trigger_premarket_sync(force: bool = False):
+async def trigger_premarket_sync(force: bool = False, session_date: Optional[str] = None):
     """
     On-demand or scheduled Pre-Market Level Priming (CPR, Camarilla, Classic Pivots, ATR-14, Straddle Bounds).
     Pre-computes and caches levels across benchmark indices and F&O universe into L1 RAM and disk.
@@ -1874,7 +1950,9 @@ async def trigger_premarket_sync(force: bool = False):
     import asyncio
     from engine.data_sync_scheduler import data_sync_scheduler
 
-    result = await asyncio.to_thread(data_sync_scheduler.sync_premarket_levels, force=force)
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_premarket_levels, force=force, session_date=session_date
+    )
     return JSONResponse(result)
 
 
@@ -1882,17 +1960,23 @@ async def trigger_premarket_sync(force: bool = False):
 async def get_benchmark_daily_levels(session_date: Optional[str] = None):
     """
     Returns pre-computed Daily Levels for all 5 core benchmark indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX).
-    Sub-millisecond retrieval from L1 RAM.
+    Sub-millisecond retrieval from L1 RAM. Computes missing benchmark levels on-demand.
     """
+    import asyncio
     from engine.daily_levels import get_daily_levels_store
 
     store = get_daily_levels_store()
     indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-    res = {}
-    for idx in indices:
-        dl = store.get_levels(idx, session_date=session_date, compute_if_missing=False)
-        if dl:
-            res[idx] = dl.to_dict()
+
+    def _fetch_all():
+        out = {}
+        for idx in indices:
+            dl = store.get_levels(idx, session_date=session_date, compute_if_missing=True)
+            if dl:
+                out[idx] = dl.to_dict()
+        return out
+
+    res = await asyncio.to_thread(_fetch_all)
     return JSONResponse(
         {"session_date": session_date or store._get_today_session_date(), "indices": res}
     )
@@ -4488,19 +4572,62 @@ async def api_paper_square_off(req: PaperSquareOffRequest, request: Request):
 @app.get("/api/v1/market/rrg", tags=["Analysis"])
 async def get_market_rrg():
     """
-    Get Relative Rotation Graph (RRG) sector momentum matrix for all NSE sectors.
+    Get Relative Rotation Graph (RRG) sector momentum matrix for all NSE sectors
+    with bidirectional constituents classification.
     """
     try:
-        from analysis.sector_rotation import get_sector_rrg_matrix
+        from analysis.sector_rotation import (
+            get_directional_sector_constituents,
+            get_sector_rrg_matrix,
+        )
 
         points = await asyncio.to_thread(get_sector_rrg_matrix)
+        dir_const = await asyncio.to_thread(get_directional_sector_constituents, points)
         return {
             "status": "success",
             "sectors": [p.as_dict() for p in points],
             "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
             "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
+            "lagging_sectors": [p.sector for p in points if p.quadrant == "LAGGING"],
+            "weakening_sectors": [p.sector for p in points if p.quadrant == "WEAKENING"],
+            "directional_constituents": {
+                "BULLISH": sorted(list(dir_const.get("BULLISH", set()))),
+                "BEARISH": sorted(list(dir_const.get("BEARISH", set()))),
+            },
         }
     except Exception as exc:
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/rs-rw-radar", tags=["Analysis", "Market"])
+async def get_rs_rw_radar(
+    universe: Optional[str] = None,
+    benchmark: str = "NSE:NIFTY50-INDEX",
+    top_n: int = 15,
+    bypass_cache: bool = False,
+):
+    """
+    Get real-time Intraday Relative Strength (RS) and Relative Weakness (RW) Radar
+    comparing liquid underlying stocks against the benchmark index.
+    """
+    try:
+        from analysis.relative_strength import compute_intraday_rs_rw
+        from analysis.universe import resolve_dynamic_universe
+
+        univ_list = None
+        if universe:
+            univ_list, _ = resolve_dynamic_universe(universe)
+
+        report = await asyncio.to_thread(
+            compute_intraday_rs_rw,
+            universe=univ_list,
+            benchmark_symbol=benchmark,
+            top_n=top_n,
+            bypass_cache=bypass_cache,
+        )
+        return {"status": "success", "data": report.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute RS/RW radar: {exc}", exc_info=True)
         raise _HTTPException(status_code=500, detail=str(exc))
 
 

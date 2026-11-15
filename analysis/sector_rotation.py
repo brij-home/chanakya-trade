@@ -370,6 +370,8 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "GESHIP": "INFRA",
     "SCI": "INFRA",
     "GVT&D": "INFRA",
+    "ENRIN": "INFRA",
+    "AMBER": "FMCG",
     # Telecom & Logistics
     "BHARTIARTL": "INFRA",
     "DELHIVERY": "INFRA",
@@ -418,7 +420,7 @@ SECTOR_CONSTITUENTS: dict[str, list[str]] = {
     "METAL": ["TATASTEEL", "JSWSTEEL", "HINDALCO", "JINDALSTEL"],
     "REALTY": ["DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE"],
     "ENERGY": ["RELIANCE", "NTPC", "ONGC", "POWERGRID", "COALINDIA", "SUZLON"],
-    "INFRA": ["LT", "HAL", "BEL", "TITAGARH", "SIEMENS", "ULTRACEMCO", "RVNL"],
+    "INFRA": ["LT", "HAL", "BEL", "TITAGARH", "SIEMENS", "ULTRACEMCO", "RVNL", "POWERINDIA", "ABB"],
     "BROAD_MARKET": ["RELIANCE", "TCS", "HDFCBANK", "INFY", "BHARTIARTL"],
 }
 
@@ -877,3 +879,98 @@ def get_stock_sector_alignment(
         StockTailwind object (compatible with dict access and attribute access).
     """
     return get_stock_tailwind(symbol, rrg_matrix=rrg_matrix)
+
+
+def get_directional_sector_constituents(
+    rrg_matrix: Optional[list[SectorRRGPoint] | dict[str, Any]] = None,
+    include_all_mapped: bool = True,
+    min_rs_momentum: float = 98.0,
+) -> dict[str, set[str]]:
+    """
+    Returns a dictionary mapping directional biases to constituent stock symbols:
+      - 'BULLISH': Stocks in LEADING or IMPROVING sectors (RS-Momentum >= min_rs_momentum).
+      - 'BEARISH': Stocks in LAGGING or WEAKENING sectors (RS-Momentum < 102.0).
+
+    Enables bidirectional institutional sector tailwind confluence for both long breakout
+    hunters and short/put breakdown detectors.
+    """
+    bullish: set[str] = set()
+    bearish: set[str] = set()
+    try:
+        if rrg_matrix is not None:
+            points = rrg_matrix
+        else:
+            points = get_sector_rrg_matrix(use_cache=True)
+
+        if isinstance(points, dict):
+            pts = list(points.values())
+        else:
+            pts = points or []
+
+        for pt in pts:
+            quad = (
+                getattr(pt, "quadrant", "") if hasattr(pt, "quadrant") else pt.get("quadrant", "")
+            )
+            mom = float(
+                getattr(pt, "rs_momentum", 100.0)
+                if hasattr(pt, "rs_momentum")
+                else pt.get("rs_momentum", 100.0)
+            )
+            sec = getattr(pt, "sector", "") if hasattr(pt, "sector") else pt.get("sector", "")
+
+            # Bullish expansion (outperforming or turning up with positive momentum)
+            if quad in ("LEADING", "IMPROVING") and mom >= min_rs_momentum:
+                for sym in SECTOR_CONSTITUENTS.get(sec, []):
+                    bullish.add(sym.upper())
+
+                if include_all_mapped:
+                    for sym, s_name in STOCK_SECTOR_MAP.items():
+                        if s_name == sec:
+                            bullish.add(sym.upper())
+
+            # Bearish breakdown (underperforming or rolling over with negative momentum)
+            elif quad in ("LAGGING", "WEAKENING") and mom < 102.0:
+                for sym in SECTOR_CONSTITUENTS.get(sec, []):
+                    bearish.add(sym.upper())
+
+                if include_all_mapped:
+                    for sym, s_name in STOCK_SECTOR_MAP.items():
+                        if s_name == sec:
+                            bearish.add(sym.upper())
+
+    except Exception as e_rrg:
+        logger.debug(
+            f"[analysis.sector_rotation] Error resolving directional constituents: {e_rrg}"
+        )
+
+    return {"BULLISH": bullish, "BEARISH": bearish}
+
+
+def get_leading_sector_constituents(
+    rrg_matrix: Optional[list[SectorRRGPoint] | dict[str, Any]] = None,
+    include_all_mapped: bool = True,
+    min_rs_momentum: float = 98.0,
+) -> set[str]:
+    """
+    Returns a set of canonical equity symbols belonging to sectors in the
+    LEADING or IMPROVING RRG quadrants with RS-Momentum >= min_rs_momentum.
+    """
+    return get_directional_sector_constituents(
+        rrg_matrix=rrg_matrix,
+        include_all_mapped=include_all_mapped,
+        min_rs_momentum=min_rs_momentum,
+    )["BULLISH"]
+
+
+def get_lagging_sector_constituents(
+    rrg_matrix: Optional[list[SectorRRGPoint] | dict[str, Any]] = None,
+    include_all_mapped: bool = True,
+) -> set[str]:
+    """
+    Returns a set of canonical equity symbols belonging to sectors in the
+    LAGGING or WEAKENING RRG quadrants (bearish tailwind for shorts / put buying).
+    """
+    return get_directional_sector_constituents(
+        rrg_matrix=rrg_matrix,
+        include_all_mapped=include_all_mapped,
+    )["BEARISH"]

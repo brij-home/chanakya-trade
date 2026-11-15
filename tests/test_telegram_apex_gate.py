@@ -806,3 +806,71 @@ def test_fii_selling_and_index_vwap_bearish_regime_suppresses_longs():
     }
     passed_p, reason_p = engine._eval_telegram_apex_gate(alert_pass, in_market=True)
     assert passed_p, f"Expected decoupled defensive leader to pass, but got: {reason_p}"
+
+
+def test_telegram_catalyst_runner_delta_override_bidirectional(monkeypatch):
+    """Verifies that high-momentum catalyst runners (Bullish or Bearish) with Delta in 0.22-0.29
+
+    pass the Telegram Apex Gate, preventing false negative suppression on big gainers/losers.
+    """
+    engine = AutoAlertEngine()
+    monkeypatch.setenv("TELEGRAM_APEX_ONLY", "1")
+    monkeypatch.setenv("CHANAKYA_TESTING", "0")
+
+    # 1. Routine non-catalyst stock with Delta 0.25 -> REJECTED (insufficient directional speed)
+    alert_routine = _make_dummy_alert(
+        "stk-routine-delta",
+        "INFY",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=90,
+    )
+    alert_routine.metrics = {
+        "delta": 0.25,
+        "spot_change_pct": 0.8,
+        "is_opening_drive": False,
+    }
+    passed_r, reason_r = engine._eval_telegram_apex_gate(alert_routine, in_market=True)
+    assert not passed_r
+    assert "below 0.30 floor" in reason_r
+
+    # 2. Bullish Catalyst (e.g. POWERINDIA +5% Open=Low) with Delta 0.25 -> PASSES
+    alert_power = _make_dummy_alert(
+        "stk-powerindia-catalyst",
+        "POWERINDIA",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=96,
+    )
+    alert_power.is_opening_drive = True
+    alert_power.opening_drive_type = "BULLISH_OPEN_EQUALS_LOW"
+    alert_power.metrics = {
+        "delta": 0.25,
+        "spot_change_pct": 5.06,
+        "is_opening_drive": True,
+        "opening_drive_type": "BULLISH_OPEN_EQUALS_LOW",
+    }
+    passed_pw, reason_pw = engine._eval_telegram_apex_gate(alert_power, in_market=True)
+    assert passed_pw, f"Expected POWERINDIA catalyst to pass, but got: {reason_pw}"
+
+    # 3. Bearish Catalyst (e.g. -4% gap down, Open=High liquidation) with Put Delta -0.25 -> PASSES
+    alert_bear_cat = _make_dummy_alert(
+        "stk-bear-catalyst",
+        "TCS",
+        direction="BEARISH",
+        segment="FNO_STOCK",
+        opt_type="PE",
+        confidence=94,
+    )
+    alert_bear_cat.is_opening_drive = True
+    alert_bear_cat.opening_drive_type = "BEARISH_OPEN_EQUALS_HIGH"
+    alert_bear_cat.metrics = {
+        "delta": -0.25,
+        "spot_change_pct": -4.20,
+        "is_opening_drive": True,
+        "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH",
+    }
+    passed_bc, reason_bc = engine._eval_telegram_apex_gate(alert_bear_cat, in_market=True)
+    assert passed_bc, f"Expected Bearish catalyst to pass, but got: {reason_bc}"

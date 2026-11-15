@@ -23,8 +23,11 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,13 +67,18 @@ class GiftNiftySnapshot:
 _YF_TICKERS = ["^NSEI", "NIFTY.NS", "^BSESN"]
 
 
-def get_gift_nifty(nifty_spot: Optional[float] = None) -> Optional[GiftNiftySnapshot]:
+def get_gift_nifty(
+    nifty_spot: Optional[float] = None,
+    allow_composite_fallback: bool = False,
+) -> Optional[GiftNiftySnapshot]:
     """
     Fetch GIFT NIFTY (NSE IFSC) futures price.
 
     Args:
         nifty_spot: Current NIFTY 50 spot price (to compute premium/discount).
                     If None, premium_pts and premium_pct will be None.
+        allow_composite_fallback: If True, falls back to multi-asset global macro
+                    composite predictor when direct IFSC feeds are off-market or unavailable.
 
     Returns:
         GiftNiftySnapshot or None if all sources fail.
@@ -78,6 +86,35 @@ def get_gift_nifty(nifty_spot: Optional[float] = None) -> Optional[GiftNiftySnap
     snap = _from_yfinance(nifty_spot)
     if snap is not None:
         return snap
+    if allow_composite_fallback and nifty_spot and nifty_spot > 0:
+        return _from_global_macro(nifty_spot)
+    return None
+
+
+def _from_global_macro(nifty_spot: Optional[float]) -> Optional[GiftNiftySnapshot]:
+    """Fallback: synthesize GIFT NIFTY gap using verified multi-asset global macro composite."""
+    if not nifty_spot or nifty_spot <= 0:
+        return None
+    try:
+        from market.global_macro import fetch_global_macro_report
+
+        macro = fetch_global_macro_report(nifty_spot=nifty_spot, use_cache=True)
+        if macro and macro.implied_nifty_gap_pct is not None:
+            gap_pct = float(macro.implied_nifty_gap_pct)
+            implied_ltp = round(nifty_spot * (1.0 + gap_pct / 100.0), 1)
+            gap_pts = round(implied_ltp - nifty_spot, 1)
+            return GiftNiftySnapshot(
+                ltp=implied_ltp,
+                change=gap_pts,
+                change_pct=gap_pct,
+                high=max(implied_ltp, nifty_spot),
+                low=min(implied_ltp, nifty_spot),
+                premium_pts=gap_pts,
+                premium_pct=gap_pct,
+                source="global_macro_composite",
+            )
+    except Exception as e_comp:
+        logger.debug(f"[gift_nifty] Composite inference failed: {e_comp}")
     return None
 
 

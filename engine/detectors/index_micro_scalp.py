@@ -442,3 +442,312 @@ def detect_index_micro_scalp(
             )
 
     return results
+
+
+def detect_fno_micro_scalp(
+    underlying: str,
+    spot: float,
+    chain: list[Any],
+    ohlcv_1m: Optional[pd.DataFrame] = None,
+    ohlcv_3m: Optional[pd.DataFrame] = None,
+    ohlcv_5m: Optional[pd.DataFrame] = None,
+    vwap: Optional[float] = None,
+    day_high: Optional[float] = None,
+    day_low: Optional[float] = None,
+    spot_open: Optional[float] = None,
+    spot_change_pct: Optional[float] = None,
+    ref_time: Optional[datetime] = None,
+    ignore_time_gate: bool = False,
+) -> list[AutoAlert]:
+    """
+    Scans liquid single-stock F&O ATM/ITM option strikes for high-velocity 1m/3m micro-breakout setups.
+    Specializes in opening catalyst runners (09:16–09:25 IST) such as Open=Low / Open=High or surge stocks
+    (e.g., APOLLOHOSP, POWERINDIA, PNB).
+
+    Returns AutoAlert objects with alert_type="INDEX_MICRO_SCALP" and segment="FNO_STOCK".
+    """
+    clean_sym = canonical_alert_symbol(underlying)
+    if spot <= 0 or not chain:
+        return []
+
+    # Verify single-stock F&O qualification
+    from engine.position_sizer import get_lot_size
+
+    try:
+        lot_sz = get_lot_size(clean_sym) or 1
+    except Exception:
+        lot_sz = 1
+
+    if lot_sz <= 1:
+        return []
+
+    now_dt = ref_time or datetime.now(IST)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=IST)
+    else:
+        now_dt = now_dt.astimezone(IST)
+    curr_time = now_dt.time()
+
+    is_test_runner = (
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+    )
+    if not is_test_runner and not ignore_time_gate:
+        if curr_time < dtime(9, 16) or curr_time > dtime(15, 15):
+            return []
+        # Midday Chop Gate (11:15 - 13:15 IST)
+        if dtime(11, 15) <= curr_time <= dtime(13, 15):
+            return []
+
+    # Opening Catalyst Gate: In 09:16-09:25 IST opening tape, require strong catalyst drive
+    is_opening_tape = dtime(9, 16) <= curr_time <= dtime(9, 25)
+    is_open_low_drive = bool(
+        spot_open
+        and day_low
+        and abs(day_low - spot_open) / max(1.0, spot_open) <= 0.0020
+        and (spot_change_pct is None or spot_change_pct >= 0.3)
+    )
+    is_open_high_drive = bool(
+        spot_open
+        and day_high
+        and abs(day_high - spot_open) / max(1.0, spot_open) <= 0.0020
+        and (spot_change_pct is None or spot_change_pct <= -0.3)
+    )
+    is_surge_mover = bool(spot_change_pct and abs(spot_change_pct) >= 1.5)
+
+    if is_opening_tape and not is_test_runner and not ignore_time_gate:
+        if not (is_open_low_drive or is_open_high_drive or is_surge_mover):
+            return []
+
+    effective_vwap = vwap if (vwap and vwap > 0) else spot
+
+    # Dynamic strike step resolution
+    strikes = sorted(
+        {float(getattr(c, "strike", 0.0)) for c in chain if getattr(c, "strike", 0.0) > 0}
+    )
+    step_val = (strikes[1] - strikes[0]) if len(strikes) >= 2 else max(5.0, round(spot * 0.01, 1))
+
+    # Early session liquidity thresholds
+    _session_minute = (curr_time.hour * 60 + curr_time.minute) - (9 * 60 + 15)
+    base_vol = 50 if _session_minute <= 10 else 100
+    min_prem = max(4.0, spot * 0.004)
+
+    valid_contracts = [
+        c
+        for c in chain
+        if abs(getattr(c, "strike", 0.0) - spot) / max(1.0, spot) <= 0.030
+        and getattr(c, "last_price", 0.0) >= min_prem
+        and getattr(c, "volume", 0) >= base_vol
+    ]
+    if not valid_contracts:
+        # Fallback to looser volume if top catalyst
+        valid_contracts = [
+            c
+            for c in chain
+            if abs(getattr(c, "strike", 0.0) - spot) / max(1.0, spot) <= 0.025
+            and getattr(c, "last_price", 0.0) >= min_prem
+            and getattr(c, "volume", 0) >= max(10, base_vol // 3)
+        ]
+    if not valid_contracts:
+        return []
+
+    # Sort candidates
+    def _rank_stock_contract(c: Any) -> float:
+        c_strk = float(getattr(c, "strike", 0.0) or 0.0)
+        c_v = int(getattr(c, "volume", 0) or 0)
+        c_o = int(getattr(c, "oi", 0) or 1)
+        dist = abs(c_strk - spot)
+        v_oi = c_v / max(1, c_o)
+        opt_t = getattr(c, "option_type", "")
+
+        itm_bonus = 0.0
+        if opt_t == "PE" and c_strk > spot and dist <= (step_val * 1.5):
+            itm_bonus = 25.0
+        elif opt_t == "CE" and c_strk < spot and dist <= (step_val * 1.5):
+            itm_bonus = 25.0
+        elif dist <= (step_val * 0.6):
+            itm_bonus = 20.0
+
+        return (
+            itm_bonus + (v_oi * 10.0) + min(15.0, c_v / 100.0) - (dist / max(1.0, step_val) * 4.0)
+        )
+
+    valid_contracts.sort(key=_rank_stock_contract, reverse=True)
+
+    top_ces = [c for c in valid_contracts if getattr(c, "option_type", "") == "CE"][:2]
+    top_pes = [c for c in valid_contracts if getattr(c, "option_type", "") == "PE"][:2]
+    candidate_contracts = top_ces + top_pes
+
+    results: list[AutoAlert] = []
+
+    # Check recent momentum
+    bars_df = (
+        ohlcv_1m
+        if (ohlcv_1m is not None and len(ohlcv_1m) >= 2)
+        else (
+            ohlcv_3m
+            if (ohlcv_3m is not None and len(ohlcv_3m) >= 2)
+            else (ohlcv_5m if (ohlcv_5m is not None and len(ohlcv_5m) >= 2) else None)
+        )
+    )
+    is_bullish_mom = is_open_low_drive or (spot_change_pct is not None and spot_change_pct >= 0.8)
+    is_bearish_mom = is_open_high_drive or (spot_change_pct is not None and spot_change_pct <= -0.8)
+    if bars_df is not None and len(bars_df) >= 2:
+        try:
+            last_two = bars_df.iloc[-2:]
+            c1, c2 = float(last_two.iloc[0]["close"]), float(last_two.iloc[1]["close"])
+            o2 = float(last_two.iloc[1]["open"])
+            if c2 > o2 and c2 >= c1:
+                is_bullish_mom = True
+            elif c2 < o2 and c2 <= c1:
+                is_bearish_mom = True
+        except Exception as e_mom:
+            logger.debug(f"[index_micro_scalp] Momentum bar check skipped: {e_mom}")
+
+    for c in candidate_contracts:
+        try:
+            c_strk = float(getattr(c, "strike", 0.0) or 0.0)
+            c_opt = str(getattr(c, "option_type", "")).upper()
+            c_ltp = float(getattr(c, "last_price", 0.0) or 0.0)
+            c_vol = int(getattr(c, "volume", 0) or 0)
+            c_oi = int(getattr(c, "oi", 0) or 1)
+            c_pch = float(getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0)
+            c_vol_oi = round(c_vol / max(1, c_oi), 2)
+            c_sym = getattr(c, "symbol", f"{clean_sym}{int(c_strk)}{c_opt}")
+
+            if c_opt == "PE" and not is_bearish_mom:
+                continue
+            if c_opt == "CE" and not is_bullish_mom:
+                continue
+
+            # Fast Scalp Blueprint:
+            # Risk 8% to 10%
+            risk_pts = max(1.5, round(c_ltp * 0.09, 1))
+            trigger_level = round(c_ltp, 1)
+            sl_level = round(max(0.5, trigger_level - risk_pts), 1)
+            no_chase = round(trigger_level + (risk_pts * 0.35), 1)
+            tgt1 = round(trigger_level + (risk_pts * 1.5), 1)
+            tgt2 = round(trigger_level + (risk_pts * 2.8), 1)
+            tgt3 = round(trigger_level + (risk_pts * 4.5), 1)
+
+            rr_val = round((tgt1 - trigger_level) / max(0.1, trigger_level - sl_level), 2)
+            if rr_val < 1.3:
+                continue
+
+            direction = "BEARISH" if c_opt == "PE" else "BULLISH"
+            variant_slug = f"{c_opt.lower()}-{int(c_strk)}"
+            alert_id = generate_alert_id(
+                clean_sym,
+                "fno-micro-scalp",
+                session_date=now_dt.date(),
+                variant=variant_slug,
+            )
+
+            # Spot invalidation anchor
+            if c_opt == "PE":
+                spot_sl = round(max(spot * 1.003, effective_vwap), 1)
+            else:
+                spot_sl = round(min(spot * 0.997, effective_vwap), 1)
+
+            opt_action = "BUY PE" if c_opt == "PE" else "BUY CE"
+            headline = f"⚡ {clean_sym} {int(c_strk)} {c_opt} 1m Micro Scalp"
+            summary = (
+                f"{clean_sym} {int(c_strk)} {c_opt} opening catalyst scalp ignited at ₹{c_ltp:,.1f}. "
+                f"Buy above ₹{trigger_level:,.1f} (1-min close confirmation). SL ₹{sl_level:,.1f}, "
+                f"T1 (+1.5R) ₹{tgt1:,.1f}, T2 (+2.8R) ₹{tgt2:,.1f}, Runner ₹{tgt3:,.1f}. High-Delta catalyst torque."
+            )
+
+            disaster_floor = round(max(0.5, trigger_level * 0.68), 1)
+            actionable_blueprint = ActionableBlueprint(
+                action=opt_action,
+                entry_range=f"₹{trigger_level:,.1f} – ₹{no_chase:,.1f}",
+                trigger_level=trigger_level,
+                invalidation_stop=sl_level,
+                target_1=tgt1,
+                target_2=tgt2,
+                runner_target=tgt3,
+                risk_reward=f"1:{rr_val:.1f}",
+                no_chase_boundary=no_chase,
+                execution_style="BREAKOUT_STOP",
+                lot_size=lot_sz,
+                tactical_sl=f"₹{sl_level:,.1f} (1m close basis)",
+                structural_spot_sl=f"{clean_sym} ₹{spot_sl:,.1f} Spot Invalidation",
+                disaster_stop_floor=f"-32% (₹{disaster_floor:,.1f} hard exit)",
+                dual_invalidation={
+                    "tactical_option_sl": sl_level,
+                    "structural_spot_sl": spot_sl,
+                    "underlying_sl": spot_sl,
+                    "disaster_floor": disaster_floor,
+                },
+                when_to_buy=f"Buy above ₹{trigger_level:,.1f} on 1-min candle close confirmation or limit bid into ₹{trigger_level:,.1f}–₹{no_chase:,.1f}.",
+                when_to_wait=f"DO NOT CHASE above ₹{no_chase:,.1f}. Wait for 1m pullback into entry zone.",
+                profit_rule=f"Institutional Scalp: Book 50% at Target 1 (+1.5R: ₹{tgt1:,.1f}) and trail SL to Cost/Breakeven (+0.2%). Book 25% at Target 2 (+2.8R: ₹{tgt2:,.1f}). Hold 25% runner on 1m 9-EMA.",
+            )
+
+            now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+            alert = AutoAlert(
+                alert_id=alert_id,
+                alert_type="INDEX_MICRO_SCALP",
+                stage="IGNITED",
+                symbol=clean_sym,
+                exchange="NFO",
+                direction=direction,
+                derivative_type="OPTION",
+                is_live=not is_test_runner,
+                environment="TEST" if is_test_runner else "LIVE",
+                market_status="LIVE",
+                headline=headline,
+                summary=summary,
+                ltp=c_ltp,
+                trigger_level=trigger_level,
+                target_level=tgt1,
+                stop_loss=sl_level,
+                initial_entry_premium=trigger_level,
+                initial_stop_loss=sl_level,
+                confidence=86,
+                created_at=now_iso,
+                actionable_plan=actionable_blueprint.to_dict(),
+                metrics={
+                    "strategy": "INDEX_MICRO_SCALP",
+                    "catalyst_type": "OPENING_MICRO_MOMENTUM",
+                    "contract": c_sym,
+                    "strike": c_strk,
+                    "option_type": c_opt,
+                    "entry_premium": trigger_level,
+                    "stop_loss_premium": sl_level,
+                    "target_1_premium": tgt1,
+                    "target_2_premium": tgt2,
+                    "target_3_premium": tgt3,
+                    "risk_points": risk_pts,
+                    "vol_oi_ratio": c_vol_oi,
+                    "option_pchange": c_pch,
+                    "underlying_spot": spot,
+                    "underlying_sl": spot_sl,
+                    "structural_spot_sl": spot_sl,
+                    "spot_invalidation_anchor": spot_sl,
+                    "lot_size": lot_sz,
+                    "is_institutional_thrust": True,
+                },
+                contract_symbol=c_sym,
+                strike=c_strk,
+                option_type=c_opt,
+                underlying_spot=spot,
+                underlying_sl=spot_sl,
+                structural_spot_sl=spot_sl,
+                tactical_sl=sl_level,
+                disaster_stop_floor=disaster_floor,
+                option_premium=c_ltp,
+                lot_size=lot_sz,
+                segment="FNO_STOCK",
+                time_horizon="SCALP",
+                entry_type="MOMENTUM_STOP_LIMIT",
+                no_chase_boundary=no_chase,
+            )
+            results.append(alert)
+        except Exception as e_c:
+            logger.debug(
+                f"[FnoMicroScalp] Error evaluating contract {getattr(c, 'symbol', '')}: {e_c}"
+            )
+
+    return results

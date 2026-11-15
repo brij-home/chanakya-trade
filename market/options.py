@@ -290,6 +290,23 @@ def enrich_options_chain_deltas(
         except Exception as e_greeks:
             logger.debug(f"[market.options] Dynamic Greeks enrichment exception: {e_greeks}")
 
+    # 4. Canonical Lot Size Verification (SSOT):
+    # Ensure all option contracts carry the authoritative SEBI contract lot size
+    try:
+        from market.symbol_master import get_lot_size as _master_lot
+        from market.instruments import get_fno_lot_size as _inst_lot
+
+        for c in chain:
+            sym = getattr(c, "symbol", "")
+            und = getattr(c, "underlying", "") or clean_und
+            canon_lot = _master_lot(sym)
+            if canon_lot <= 1:
+                canon_lot = _inst_lot(und)
+            if canon_lot > 0:
+                c.lot_size = canon_lot
+    except Exception as e_lot:
+        logger.debug(f"[market.options] Canonical lot size verification note: {e_lot}")
+
     return chain
 
 

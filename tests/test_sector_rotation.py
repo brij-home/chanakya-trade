@@ -165,3 +165,100 @@ class TestStockSectorAlignment:
         assert tw.tailwind_score > 0
         assert tw.alignment != "UNAVAILABLE"
         assert "INFRA" in tw.analysis or "railway" in tw.analysis.lower()
+
+    def test_get_leading_sector_constituents_with_mock_matrix(self):
+        from analysis.sector_rotation import SectorRRGPoint, get_leading_sector_constituents
+
+        mock_pts = [
+            SectorRRGPoint(
+                sector="PSU_BANK",
+                symbol="^CNXPSUBANK",
+                rs_ratio=102.5,
+                rs_momentum=103.8,
+                quadrant="LEADING",
+            ),
+            SectorRRGPoint(
+                sector="IT",
+                symbol="^CNXIT",
+                rs_ratio=98.5,
+                rs_momentum=101.2,
+                quadrant="IMPROVING",
+            ),
+            SectorRRGPoint(
+                sector="METAL",
+                symbol="^CNXMETAL",
+                rs_ratio=97.0,
+                rs_momentum=95.0,
+                quadrant="LAGGING",
+            ),
+        ]
+
+        leading_syms = get_leading_sector_constituents(
+            rrg_matrix=mock_pts, include_all_mapped=False
+        )
+        # Should include PSU_BANK and IT constituents
+        assert "PNB" in leading_syms
+        assert "SBIN" in leading_syms
+        assert "INFY" in leading_syms
+        assert "TCS" in leading_syms
+        # Should NOT include LAGGING metal constituents
+        assert "TATASTEEL" not in leading_syms
+
+    def test_get_leading_sector_constituents_fallback_safe(self, monkeypatch):
+        from analysis.sector_rotation import get_leading_sector_constituents
+
+        monkeypatch.setattr("analysis.sector_rotation.get_sector_rrg_matrix", lambda: [])
+        res = get_leading_sector_constituents()
+        assert isinstance(res, set)
+
+    def test_get_directional_sector_constituents_bidirectional(self):
+        from analysis.sector_rotation import (
+            SectorRRGPoint,
+            get_directional_sector_constituents,
+            get_lagging_sector_constituents,
+        )
+
+        mock_pts = [
+            SectorRRGPoint(
+                sector="PSU_BANK",
+                symbol="^CNXPSUBANK",
+                rs_ratio=102.5,
+                rs_momentum=103.8,
+                quadrant="LEADING",
+            ),
+            SectorRRGPoint(
+                sector="METAL",
+                symbol="^CNXMETAL",
+                rs_ratio=96.0,
+                rs_momentum=94.5,
+                quadrant="LAGGING",
+            ),
+            SectorRRGPoint(
+                sector="IT",
+                symbol="^CNXIT",
+                rs_ratio=101.5,
+                rs_momentum=97.0,
+                quadrant="WEAKENING",
+            ),
+        ]
+
+        dir_res = get_directional_sector_constituents(rrg_matrix=mock_pts, include_all_mapped=False)
+        bullish = dir_res["BULLISH"]
+        bearish = dir_res["BEARISH"]
+
+        # Bullish should have PSU_BANK
+        assert "PNB" in bullish
+        assert "SBIN" in bullish
+        assert "TATASTEEL" not in bullish
+
+        # Bearish should have METAL and IT (WEAKENING/LAGGING)
+        assert "TATASTEEL" in bearish
+        assert "INFY" in bearish
+        assert "PNB" not in bearish
+
+        # Direct lagging getter
+        lagging_only = get_lagging_sector_constituents(
+            rrg_matrix=mock_pts, include_all_mapped=False
+        )
+        assert "TATASTEEL" in lagging_only
+        assert "PNB" not in lagging_only

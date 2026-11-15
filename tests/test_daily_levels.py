@@ -492,3 +492,53 @@ def test_niftynxt50_index_mapping_and_daily_levels():
     assert dl.pdl == 73099.05
     assert dl.pdc == 73486.20
     assert dl.cpr["regime"] != ""
+
+
+def test_preloaded_df_divergence_triggers_direct_ohlcv_recovery(monkeypatch):
+    """
+    RCA Verification: If preloaded_df contains corrupted/divergent data (>22% divergence from live LTP),
+    DailyLevelsStore rejects the preloaded bar and recovers authentic levels via direct get_ohlcv fallback.
+    """
+    from engine.daily_levels import DailyLevelsStore
+    from types import SimpleNamespace
+
+    store = DailyLevelsStore()
+    corrupt_df = pd.DataFrame(
+        {
+            "open": [168.0, 168.5],
+            "high": [169.5, 169.0],
+            "low": [166.0, 166.5],
+            "close": [167.6, 168.19],
+            "volume": [2000000, 1900000],
+        },
+        index=pd.to_datetime(["2026-11-10", "2026-11-11"]),
+    )
+
+    authentic_df = pd.DataFrame(
+        {
+            "open": [2720.0, 2730.0],
+            "high": [2750.0, 2760.0],
+            "low": [2710.0, 2720.0],
+            "close": [2740.0, 2745.0],
+            "volume": [1000000, 1200000],
+        },
+        index=pd.to_datetime(["2026-11-10", "2026-11-11"]),
+    )
+
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *args, **kwargs: authentic_df)
+
+    # Live LTP is 2741.5, preloaded close is 168.19 (93.9% divergent)
+    q = SimpleNamespace(last_price=2741.5, close=2745.0)
+
+    dl = store.compute_and_store(
+        "ADANIENT",
+        session_date="2026-11-12",
+        persist=False,
+        preloaded_quote=q,
+        preloaded_df=corrupt_df,
+    )
+
+    assert dl is not None
+    assert dl.pdc == 2745.0
+    assert dl.pdh == 2760.0
+    assert dl.pdl == 2720.0

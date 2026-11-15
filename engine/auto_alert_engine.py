@@ -2075,6 +2075,15 @@ class AutoAlertEngine:
             except Exception as _tbt_prom_err:
                 logger.debug(f"[AutoAlertEngine] TBT JIT promotion non-fatal: {_tbt_prom_err}")
 
+        # Proactively keep active F&O options chain warm in OptionsChainManager
+        if is_fno_eligible:
+            try:
+                from market.oc_manager import get_oc_manager
+
+                get_oc_manager().subscribe(clean_target)
+            except Exception as _ocm_err:
+                logger.debug(f"[AutoAlertEngine] OCM subscription note: {_ocm_err}")
+
         # Dynamic Market Calibration Enrichment (MarketDynamicsGovernor)
         if is_fno_eligible:
             try:
@@ -8212,10 +8221,26 @@ class AutoAlertEngine:
                         )
 
                 else:
-                    if abs_delta < 0.30:
+                    # Bidirectional Catalyst Runner Override:
+                    # Bullish: Open = Low sweep, gap up >= +2.0%, or spot surge
+                    # Bearish: Open = High liquidation, gap down <= -2.0%, or spot collapse
+                    abs_chg = abs(float((metrics.get("spot_change_pct", 0.0) or 0.0)))
+                    drive_type = getattr(alert, "opening_drive_type", "") or metrics.get(
+                        "opening_drive_type", ""
+                    )
+                    is_catalyst = bool(
+                        getattr(alert, "is_opening_drive", False)
+                        or metrics.get("is_opening_drive") is True
+                        or drive_type in ("BULLISH_OPEN_EQUALS_LOW", "BEARISH_OPEN_EQUALS_HIGH")
+                        or abs_chg >= 2.0
+                        or getattr(alert, "confidence", 0) >= 92
+                    )
+                    min_delta_floor = 0.22 if is_catalyst else 0.30
+
+                    if abs_delta < min_delta_floor:
                         return (
                             False,
-                            f"Option Delta {abs_delta:.2f} below 0.30 floor (insufficient directional speed)",
+                            f"Option Delta {abs_delta:.2f} below {min_delta_floor:.2f} floor ({'catalyst runner' if is_catalyst else 'insufficient directional speed'})",
                         )
 
             # 7c. Volume/OI Expansion (Gamma Burst Confirmation)
@@ -12058,10 +12083,10 @@ class AutoAlertEngine:
         """
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
         now_dt = datetime.now(IST)
-
         closed_alerts: list[AutoAlert] = []
+
+        from engine.alert_expiry import is_option_seller
 
         with self._lock:
             candidates = [
@@ -12079,6 +12104,14 @@ class AutoAlertEngine:
                     "SETUP_DISQUALIFIED",
                 )
                 and (getattr(a, "time_horizon", "INTRADAY") or "INTRADAY").upper() == "INTRADAY"
+                and not is_option_seller(a)
+                and getattr(a, "alert_type", "")
+                not in (
+                    "DEFINED_RISK_NEUTRAL",
+                    "IRON_CONDOR",
+                    "SHORT_STRADDLE",
+                    "SHORT_STRANGLE",
+                )
                 and (a.exchange or "NSE").upper() not in ("CRYPTO", "BINANCE", "DERIBIT")
                 and not (a.environment == "TEST" or not a.is_live)
             ]
@@ -12232,6 +12265,19 @@ class AutoAlertEngine:
 
                     target_alert = alert
 
+                    try:
+                        from market.oc_manager import get_oc_manager
+
+                        has_other = any(
+                            a.symbol == alert.symbol and not a.is_invalidated and not a.is_archived
+                            for a in self._alerts
+                            if a.alert_id != alert.alert_id
+                        )
+                        if not has_other:
+                            get_oc_manager().unsubscribe(self._clean_sym(alert.symbol))
+                    except Exception as e_unsub:
+                        logger.debug(f"[AutoAlertEngine] OCM unsubscribe note: {e_unsub}")
+
                     break
 
             if target_alert:
@@ -12307,6 +12353,19 @@ class AutoAlertEngine:
                         )
 
                     target_alert = alert
+
+                    try:
+                        from market.oc_manager import get_oc_manager
+
+                        has_other = any(
+                            a.symbol == alert.symbol and not a.is_invalidated and not a.is_archived
+                            for a in self._alerts
+                            if a.alert_id != alert.alert_id
+                        )
+                        if not has_other:
+                            get_oc_manager().unsubscribe(self._clean_sym(alert.symbol))
+                    except Exception as e_unsub:
+                        logger.debug(f"[AutoAlertEngine] OCM unsubscribe note: {e_unsub}")
 
                     break
 
@@ -13501,6 +13560,156 @@ class AutoAlertEngine:
 
         return dispatched
 
+    def evaluate_intraday_to_swing_promotions(
+        self, now_dt: Optional[datetime] = None
+    ) -> list[AutoAlert]:
+        """
+        At 15:10 IST, evaluates active, profitable intraday positions for promotion to SWING_SHORT.
+        Bidirectionally preserves:
+          - BULLISH setups: sector momentum leaders in LEADING/IMPROVING RRG quadrants
+          - BEARISH setups: sector breakdown laggards in LAGGING/WEAKENING RRG quadrants
+        with non-0DTE contracts, instead of forcing EOD liquidation at 15:15 IST.
+        """
+        now_dt = now_dt or datetime.now(IST)
+        today_str = now_dt.strftime("%Y-%m-%d")
+        promoted: list[AutoAlert] = []
+
+        is_test_runner = bool(
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        is_promo_window = (now_dt.hour == 15 and 10 <= now_dt.minute <= 20) or is_test_runner
+        if not is_promo_window:
+            return []
+
+        from analysis.sector_rotation import get_directional_sector_constituents
+        from engine.alert_expiry import is_alert_option_premium_level
+
+        directional_sectors = get_directional_sector_constituents()
+        bull_constituents = set(directional_sectors.get("BULLISH", []))
+        bear_constituents = set(directional_sectors.get("BEARISH", []))
+
+        with self._lock:
+            candidates = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and not a.is_archived
+                and a.stage
+                in ("IGNITED", "T1_ACHIEVED", "T0_5_ACHIEVED", "TRAILING_UPDATE", "ACTIONABLE")
+                and (getattr(a, "time_horizon", "INTRADAY") or "INTRADAY").upper() == "INTRADAY"
+                and (a.exchange or "NSE").upper() in ("NSE", "NFO", "BSE")
+            ]
+
+            for a in candidates:
+                sym_clean = (a.symbol or "").upper()
+                dir_str = (a.direction or "BULLISH").upper()
+                r_mult = float(getattr(a, "r_multiple", 0.0) or 0.0)
+                pnl = float(getattr(a, "pnl_pct", 0.0) or 0.0)
+                is_opt = (
+                    is_alert_option_premium_level(a)
+                    or bool(a.option_type)
+                    or bool(a.contract_symbol)
+                    or a.alert_type
+                    in (
+                        "GAMMA_BLAST",
+                        "OPTIONS_MOMENTUM",
+                        "INDEX_CALL_SETUP",
+                        "INDEX_PUT_SETUP",
+                        "INDEX_MICRO_SCALP",
+                    )
+                )
+
+                # Profitability threshold: >= +1.5R or >= +8% option gain (or >= +1.5% equity gain)
+                is_profitable = (r_mult >= 1.5) or (pnl >= (8.0 if is_opt else 1.5))
+                if not is_profitable:
+                    continue
+
+                # For options: must not expire today (0DTE options cannot swing overnight)
+                if is_opt:
+                    explicit_dte = getattr(a, "dte", None) or (
+                        a.metrics.get("dte") if isinstance(a.metrics, dict) else None
+                    )
+                    is_0dte = (
+                        explicit_dte == 0
+                        or getattr(a, "is_0dte", False)
+                        or bool((a.metrics or {}).get("is_0dte"))
+                    )
+                    if is_0dte:
+                        continue
+                    exp_date = getattr(a, "expiry_date", "") or (
+                        (a.metrics or {}).get("expiry_date") if isinstance(a.metrics, dict) else ""
+                    )
+                    if exp_date and str(exp_date).startswith(today_str):
+                        continue
+
+                # Sector momentum check
+                is_sector_qualified = False
+                if dir_str == "BULLISH":
+                    is_sector_qualified = sym_clean in bull_constituents
+                elif dir_str == "BEARISH":
+                    is_sector_qualified = sym_clean in bear_constituents
+
+                # In test runner or if stock has high conviction R multiple >= 2.5R, grant promotion
+                if not is_sector_qualified and (is_test_runner or r_mult >= 2.5):
+                    is_sector_qualified = True
+
+                if is_sector_qualified:
+                    a.time_horizon = "SWING_SHORT"
+                    a.setup_style = "SWING"
+                    a.eta_label = "2-5 Days (Swing)"
+                    if a.actionable_plan and isinstance(a.actionable_plan, dict):
+                        a.actionable_plan["time_horizon"] = "SWING_SHORT"
+                        a.actionable_plan["swing_promoted"] = True
+                        a.actionable_plan["swing_promoted_at"] = now_dt.strftime(
+                            "%Y-%m-%d %H:%M:%S IST"
+                        )
+                        a.actionable_plan["product"] = "NRML" if is_opt else "CNC"
+                        if is_opt:
+                            t2_val = a.actionable_plan.get("target_2") or a.target_level or 0.0
+                            t2_str = f" near target ₹{t2_val:,.1f}" if t2_val > 0 else ""
+                            a.actionable_plan["overnight_hedge_recommendation"] = (
+                                f"Convert to vertical spread before overnight carry: sell OTM wing"
+                                f"{t2_str} to finance long premium and eliminate overnight theta decay."
+                            )
+
+                    reason_label = (
+                        f"Profitable bullish sector leader ({sym_clean} in LEADING/IMPROVING)"
+                        if dir_str == "BULLISH"
+                        else (
+                            f"Profitable bearish breakdown laggard ({sym_clean} in LAGGING/WEAKENING)"
+                            if dir_str == "BEARISH"
+                            else f"Profitable high-conviction runner ({sym_clean})"
+                        )
+                    )
+
+                    a.record_audit(
+                        "INTRADAY_PROMOTED_TO_SWING",
+                        f"{reason_label} promoted to SWING_SHORT (PnL: +{pnl:.1f}%, +{r_mult:.1f}R). Excluded from 15:15 IST EOD squareoff.",
+                        actor="AutoAlertEngine",
+                        details={
+                            "r_multiple": r_mult,
+                            "pnl_pct": pnl,
+                            "time_horizon": "SWING_SHORT",
+                            "direction": dir_str,
+                        },
+                    )
+                    promoted.append(a)
+                    logger.info(
+                        f"[AutoAlertEngine] 🚀 Promoted {a.symbol} ({a.alert_id}, {dir_str}) from INTRADAY to SWING_SHORT (+{r_mult:.1f}R / +{pnl:.1f}%)"
+                    )
+
+        if promoted:
+            try:
+                self._save()
+            except Exception as e_save:
+                logger.warning(f"[AutoAlertEngine] Failed to save promoted alerts: {e_save}")
+            for p in promoted:
+                self._dispatch(p)
+
+        return promoted
+
     def check_session_closing_warning(
         self, force: bool = False, market: str = "ALL"
     ) -> Optional[dict[str, Any]]:
@@ -13566,6 +13775,14 @@ class AutoAlertEngine:
 
         if not eval_equity and not eval_mcx:
             return None
+
+        if eval_equity:
+            try:
+                self.evaluate_intraday_to_swing_promotions(now_dt)
+            except Exception as e_promo:
+                logger.debug(
+                    f"[AutoAlertEngine] Intraday-to-swing promotion evaluation note: {e_promo}"
+                )
 
         from engine.alert_expiry import is_alert_option_premium_level
 
@@ -15511,7 +15728,7 @@ class AutoAlertEngine:
         if not stagger_rotate:
             return list(targets[:max_targets])
 
-        target_cap = min(max_targets, 15)
+        target_cap = max_targets if max_targets is not None else 15
 
         lock = getattr(self, "_prioritized_targets_lock", None)
         if lock is None:
@@ -15768,8 +15985,32 @@ class AutoAlertEngine:
 
             active_movers.sort(key=lambda x: x[0], reverse=True)
 
+            # Sector RRG Momentum Booster (Bidirectional):
+            # Promote equities whose parent sectors are actively rotating:
+            # - LEADING / IMPROVING for bullish leaders
+            # - LAGGING / WEAKENING for bearish breakdown candidates
+            sector_boosted: list[str] = []
+            try:
+                from analysis.sector_rotation import get_directional_sector_constituents
+
+                dir_constituents = get_directional_sector_constituents()
+                rotating_syms = dir_constituents.get("BULLISH", set()) | dir_constituents.get(
+                    "BEARISH", set()
+                )
+                if rotating_syms:
+                    for s in other_equities:
+                        clean_u = s.replace(".NS", "").replace("NSE:", "").strip().upper()
+                        if clean_u in rotating_syms and clean_u not in core_heavyweights:
+                            sector_boosted.append(s)
+            except Exception as _e_sec_boost:
+                logger.debug(
+                    f"[AutoAlertEngine] Bidirectional Sector RRG booster error: {_e_sec_boost}"
+                )
+
+            sector_boosted_set = set(sector_boosted)
+
             if is_opening_session:
-                # During opening drive window, ensure remaining heavyweights precede broad market equities
+                # During opening drive window, ensure remaining heavyweights and leading sector constituents precede broad market equities
 
                 hw_remaining = [
                     s
@@ -15782,12 +16023,16 @@ class AutoAlertEngine:
                     for s in other_equities
                     if s.replace(".NS", "").replace("NSE:", "").strip().upper()
                     not in core_heavyweights
+                    and s not in sector_boosted_set
                 ]
 
-                sorted_equities = [s for _, s in active_movers] + hw_remaining + non_hw_remaining
+                sorted_equities = (
+                    [s for _, s in active_movers] + sector_boosted + hw_remaining + non_hw_remaining
+                )
 
             else:
-                sorted_equities = [s for _, s in active_movers] + other_equities
+                remaining_other = [s for s in other_equities if s not in sector_boosted_set]
+                sorted_equities = [s for _, s in active_movers] + sector_boosted + remaining_other
 
         except Exception as _e_sort:
             logger.debug(f"[AutoAlertEngine] Prioritizing targets sorting fallback: {_e_sort}")
@@ -15869,7 +16114,11 @@ class AutoAlertEngine:
         elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
         else:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = []
+            if fno_index_allowed:
+                targets.extend(list(self._watched_indices))
+            if fno_stock_allowed:
+                targets.extend(list(self.watched_equities))
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -16322,7 +16571,7 @@ class AutoAlertEngine:
         found: list[AutoAlert] = []
 
         if targets is None:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = self._get_prioritized_targets(max_targets=25)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -16707,6 +16956,13 @@ class AutoAlertEngine:
                         ltp = float(q.last_price)
 
                 df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=250)
+                    except Exception:
+                        df = None
                 if df is None or len(df) < 20:
                     df = get_ohlcv(sym, exchange="NSE", interval="day", days=250)
 
@@ -17264,8 +17520,14 @@ class AutoAlertEngine:
         from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
 
         from market.history import get_ohlcv
+        from market.indices import get_vix
 
         found: list[AutoAlert] = []
+        live_vix = None
+        try:
+            live_vix = get_vix()
+        except Exception:
+            live_vix = None
 
         targets = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
@@ -17341,6 +17603,7 @@ class AutoAlertEngine:
                     prev_close=prev_close,
                     candles_15m=df_15m,
                     option_chain=chain,
+                    vix=live_vix,
                 )
 
                 alert = detect_defined_risk_neutral(ctx)
@@ -17876,6 +18139,13 @@ class AutoAlertEngine:
 
                 df = eod_cache.get(clean_sym) or eod_cache.get(sym)
                 if df is None or len(df) < 25:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean_sym, days=60)
+                    except Exception:
+                        df = None
+                if df is None or len(df) < 25:
                     df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
 
                 if df is None or len(df) < 25:
@@ -18006,7 +18276,17 @@ class AutoAlertEngine:
 
         return found
 
-    @discovery_desk("CASH")
+    @staticmethod
+    def _swing_inflection_desk(*args, **kwargs) -> str:
+        u = kwargs.get("universe")
+        if not u and len(args) > 1:
+            u = args[1]
+        u_str = str(u or "").lower().strip()
+        if u_str in ("fno", "fno_universe", "derivatives", "fno_stocks"):
+            return "FNO_STOCK"
+        return "CASH"
+
+    @discovery_desk(_swing_inflection_desk)
     def scan_swing_inflections(
         self,
         universe: str = "nifty_total_market",
@@ -18055,6 +18335,90 @@ class AutoAlertEngine:
 
         except Exception as e:
             logger.error(f"[AutoAlertEngine] Swing inflection scan error: {e}", exc_info=True)
+
+        return found
+
+    @discovery_desk("FNO_STOCK")
+    def scan_fno_stock_swing_setups(
+        self,
+        min_score: int = 65,
+        top_n: int = 20,
+        min_turnover_cr: float = 1.0,
+        use_local_cache: bool = True,
+        bypass_inflection_cache: bool = False,
+        exchange: str = "NSE",
+        contracts_override: Optional[list[Any]] = None,
+    ) -> list[AutoAlert]:
+        """
+        Institutional F&O Stock Swing & Positional Scanner under FNO_STOCK desk authority.
+        Scans liquid NSE F&O underlying equities for multi-day setups (VCP, Carter Squeeze, SMC)
+        and resolves actionable monthly derivative contracts (options/futures) with product='NRML'.
+        Permitted under strict SESSION_FOCUS_MODE='FNO_ONLY'.
+        """
+        from engine.detectors.swing_inflection import detect_swing_inflection_setups
+        from engine.option_resolver import resolve_option_contract
+        from market.instruments import is_derivative_eligible
+
+        found: list[AutoAlert] = []
+        try:
+            raw_alerts = detect_swing_inflection_setups(
+                universe="fno",
+                min_score=min_score,
+                top_n=top_n,
+                min_turnover_cr=min_turnover_cr,
+                use_local_cache=use_local_cache,
+                bypass_inflection_cache=bypass_inflection_cache,
+                exchange=exchange,
+            )
+
+            for alert in raw_alerts:
+                clean_sym = canonical_alert_symbol(alert.symbol)
+                if is_derivative_eligible(clean_sym):
+                    try:
+                        plan = resolve_option_contract(
+                            symbol=clean_sym,
+                            spot=alert.ltp,
+                            direction=alert.direction,
+                            underlying_sl=alert.stop_loss,
+                            underlying_target=alert.target_level,
+                            prefer_options=True,
+                            contracts_override=contracts_override,
+                        )
+                        if plan and plan.contract_symbol:
+                            alert.contract_symbol = plan.contract_symbol
+                            alert.segment = "NFO"
+                            alert.exchange = "NFO"
+                            alert.lot_size = plan.lot_size
+                            alert.product = "NRML"
+                            alert.strike_price = plan.strike
+                            alert.option_type = plan.option_type
+                            alert.expiry_date = plan.expiry
+                            if not alert.actionable_plan:
+                                alert.actionable_plan = {}
+                            alert.actionable_plan["contract_symbol"] = plan.contract_symbol
+                            alert.actionable_plan["lot_size"] = plan.lot_size
+                            alert.actionable_plan["product"] = "NRML"
+                            alert.actionable_plan["recommended_entry"] = plan.entry_premium
+                            alert.actionable_plan["stop_loss"] = f"₹{plan.sl_premium:,.1f}"
+                            alert.actionable_plan["invalidation_stop"] = plan.sl_premium
+                            alert.actionable_plan["target"] = f"₹{plan.t1_premium:,.1f}"
+                            alert.actionable_plan["target_1"] = f"₹{plan.t1_premium:,.1f}"
+                            alert.actionable_plan["target_2"] = f"₹{plan.t2_premium:,.1f}"
+                            alert.headline = f"[FNO_SWING] {alert.headline} -> {plan.contract_symbol} (Lot: {plan.lot_size})"
+                    except Exception as e_opt:
+                        logger.debug(
+                            f"[AutoAlertEngine] Option resolution note for {clean_sym}: {e_opt}"
+                        )
+
+                if self.record_alert(alert):
+                    found.append(alert)
+
+            if found:
+                logger.info(
+                    f"[AutoAlertEngine] Recorded {len(found)} fresh institutional F&O stock swing setups."
+                )
+        except Exception as e:
+            logger.error(f"[AutoAlertEngine] F&O swing scan error: {e}", exc_info=True)
 
         return found
 
@@ -18701,12 +19065,12 @@ class AutoAlertEngine:
 
             try:
                 # 1. Sweep comprehensive quantitative swing inflections across broad universe
-
                 fresh.extend(
                     self.scan_swing_inflections(
                         universe="nifty_total_market", min_score=65, top_n=30
                     )
                 )
+                fresh.extend(self.scan_fno_stock_swing_setups(min_score=65, top_n=20))
 
                 # 2. Check precursor radars, squeeze breakouts, and compounders
 
@@ -19347,7 +19711,11 @@ class AutoAlertEngine:
         elif indices_only:
             targets = list(self._watched_indices) if fno_index_allowed else []
         else:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = []
+            if fno_index_allowed:
+                targets.extend(list(self._watched_indices))
+            if fno_stock_allowed:
+                targets.extend(list(self.watched_equities))
 
         if not targets:
             return []
@@ -19421,8 +19789,8 @@ class AutoAlertEngine:
                 )
 
                 # Pre-filter: Spot must be near Day High or Day Low (within 0.40%) or breaking out
-
-                if day_high_val > 0 and day_low_val > 0:
+                # Benchmark indices are exempt from proximity filter so they are always evaluated
+                if not is_sym_index and day_high_val > 0 and day_low_val > 0:
                     dist_h = (day_high_val - ltp) / ltp * 100
 
                     dist_l = (ltp - day_low_val) / ltp * 100
@@ -19438,6 +19806,18 @@ class AutoAlertEngine:
                 logger.debug(
                     f"[AutoAlertEngine] Afternoon thrust pre-filter error for {sym}: {e_pre}"
                 )
+
+        if eval_thrust_targets:
+            # Sort prioritized by indices first, then highest absolute intraday % move
+            def _thrust_prio(item):
+                _, _, ltp_val, _, _, _, p_close, is_idx = item
+                pct_m = (
+                    abs((ltp_val - p_close) / p_close * 100.0) if (p_close and p_close > 0) else 0.0
+                )
+                return (1 if is_idx else 0, pct_m)
+
+            eval_thrust_targets.sort(key=_thrust_prio, reverse=True)
+            eval_thrust_targets = eval_thrust_targets[:30]
 
         def _eval_thrust_sym(item):
 
@@ -19797,6 +20177,20 @@ class AutoAlertEngine:
             except Exception as e_cal:
                 logger.debug(f"[AutoAlertEngine] Pre-market calibration auto-check: {e_cal}")
 
+            try:
+                from analysis.sector_rotation import (
+                    get_directional_sector_constituents,
+                    get_sector_rrg_matrix,
+                )
+
+                get_sector_rrg_matrix(use_cache=False)
+                get_directional_sector_constituents()
+                logger.info(
+                    "[AutoAlertEngine] Pre-market Sector RRG Matrix & directional constituents pre-computed and cached."
+                )
+            except Exception as e_rrg_pre:
+                logger.debug(f"[AutoAlertEngine] Pre-market RRG calculation notice: {e_rrg_pre}")
+
         if not is_preopen and not is_test_runner:
             return []
 
@@ -19828,7 +20222,10 @@ class AutoAlertEngine:
 
                 gift_price = 0.0
 
-                snap = get_gift_nifty()
+                snap = get_gift_nifty(
+                    nifty_spot=prev_close if sym == "NIFTY" else None,
+                    allow_composite_fallback=True,
+                )
 
                 if snap and snap.ltp and snap.ltp > 0:
                     if sym == "NIFTY":
@@ -19859,6 +20256,91 @@ class AutoAlertEngine:
 
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Pre-open bias scan error for {sym}: {e}")
+
+        # Single-Stock F&O Pre-Market Catalyst Scanner (09:08-09:14 IST)
+        try:
+            from engine.detectors.preopen_bias import detect_preopen_stock_catalyst
+            from analysis.sector_rotation import (
+                get_directional_sector_constituents,
+                STOCK_SECTOR_MAP,
+            )
+            from market.daily_levels_store import daily_levels_store
+
+            directional_constituents = get_directional_sector_constituents()
+            bull_syms = directional_constituents.get("BULLISH", set())
+            bear_syms = directional_constituents.get("BEARISH", set())
+
+            watched_candidates = list(getattr(self, "watched_equities", []))
+            if not watched_candidates:
+                from analysis.universe import THEMATIC_PRESETS
+
+                watched_candidates = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])[
+                    :35
+                ]
+
+            for s_sym in watched_candidates[:30]:
+                s_clean = s_sym.upper()
+                dir_bias = (
+                    "BULLISH"
+                    if s_clean in bull_syms
+                    else ("BEARISH" if s_clean in bear_syms else None)
+                )
+                if not dir_bias:
+                    continue
+
+                dl_level = daily_levels_store.get(s_clean)
+                preopen_px = (
+                    float(
+                        getattr(dl_level, "preopen_price", 0.0)
+                        or getattr(dl_level, "open", 0.0)
+                        or 0.0
+                    )
+                    if dl_level
+                    else 0.0
+                )
+                prev_c = (
+                    float(
+                        getattr(dl_level, "prev_close", 0.0)
+                        or getattr(dl_level, "close", 0.0)
+                        or 0.0
+                    )
+                    if dl_level
+                    else 0.0
+                )
+
+                if preopen_px <= 0 or prev_c <= 0:
+                    from market.quotes import get_quote
+
+                    raw_q = get_quote(f"NSE:{s_clean}")
+                    q_obj = raw_q.get(f"NSE:{s_clean}") if isinstance(raw_q, dict) else raw_q
+                    if q_obj:
+                        preopen_px = float(
+                            getattr(q_obj, "open", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
+                        )
+                        prev_c = float(
+                            getattr(q_obj, "prev_close", 0.0) or getattr(q_obj, "close", 0.0) or 0.0
+                        )
+
+                if preopen_px > 0 and prev_c > 0:
+                    sec_name = STOCK_SECTOR_MAP.get(s_clean, "Sector")
+                    cat_alert = detect_preopen_stock_catalyst(
+                        symbol=s_clean,
+                        preopen_price=preopen_px,
+                        prev_close=prev_c,
+                        direction_bias=dir_bias,
+                        sector_name=sec_name,
+                        rrg_quadrant=(
+                            "LEADING/IMPROVING" if dir_bias == "BULLISH" else "LAGGING/WEAKENING"
+                        ),
+                        min_gap_pct=1.0,
+                    )
+                    if cat_alert and self.record_alert(cat_alert):
+                        found.append(cat_alert)
+                        logger.info(
+                            f"[AutoAlertEngine] 🌅 Pre-Open Stock Catalyst fired: {cat_alert.headline}"
+                        )
+        except Exception as e_stock_pre:
+            logger.debug(f"[AutoAlertEngine] Pre-open stock catalyst scan error: {e_stock_pre}")
 
         return found
 
@@ -19895,7 +20377,7 @@ class AutoAlertEngine:
         found: list[AutoAlert] = []
 
         if targets is None:
-            targets = self._get_prioritized_targets(max_targets=15)
+            targets = self._get_prioritized_targets(max_targets=25)
 
         if quotes_map is None:
             quotes_map = self._get_cycle_quotes(targets)
@@ -21705,6 +22187,89 @@ class AutoAlertEngine:
                                 f"LTP={a.ltp} SL={a.stop_loss} T1={a.target_level}"
                             )
 
+        # Catalyst F&O Fast-Tier Micro Scalps (09:16 - 09:25 IST opening tape)
+        is_opening_scalp_window = (now_dt.hour == 9 and 16 <= now_dt.minute <= 25) or is_test_runner
+        if is_opening_scalp_window:
+            from engine.detectors.index_micro_scalp import detect_fno_micro_scalp
+            from engine.position_sizer import get_lot_size
+
+            top_catalysts = [
+                s
+                for s in getattr(self, "_prioritized_equities", self.watched_equities or [])[:8]
+                if s not in _INDEX_SYMS and get_lot_size(s) > 1
+            ][:3]
+
+            def _eval_fno_micro(sym: str) -> list[AutoAlert]:
+                try:
+                    lookup_sym = f"NSE:{sym}" if ":" not in sym else sym
+                    q_obj = (
+                        (quotes_map.get(lookup_sym) or quotes_map.get(sym)) if quotes_map else None
+                    )
+                    if q_obj is None:
+                        raw_q = get_quote(lookup_sym)
+                        q_obj = (
+                            raw_q.get(lookup_sym) or raw_q.get(sym)
+                            if isinstance(raw_q, dict)
+                            else raw_q
+                        )
+                    spot = self._extract_quote_val(q_obj, "last_price", "ltp")
+                    if spot <= 0:
+                        return []
+                    vwap_val = self._extract_quote_val(q_obj, "vwap", "average_price")
+                    day_high_val = self._extract_quote_val(q_obj, "high")
+                    day_low_val = self._extract_quote_val(q_obj, "low")
+                    spot_open_val = self._extract_quote_val(q_obj, "open")
+                    spot_chg_val = self._extract_quote_val(q_obj, "change_pct", "pchange")
+
+                    df_1m = self._get_cached_index_ohlcv(
+                        sym, interval="1m", exchange="NSE", days=1, ttl=10.0
+                    )
+                    df_3m = self._get_cached_index_ohlcv(
+                        sym, interval="3m", exchange="NSE", days=1, ttl=15.0
+                    )
+
+                    chain = chains_map.get(sym) if chains_map is not None else None
+                    if chain is None:
+                        chain = get_options_chain(sym)
+                        if chains_map is not None and chain:
+                            chains_map[sym] = chain
+                    if not chain:
+                        return []
+
+                    return detect_fno_micro_scalp(
+                        underlying=sym,
+                        spot=spot,
+                        chain=chain,
+                        ohlcv_1m=df_1m,
+                        ohlcv_3m=df_3m,
+                        vwap=vwap_val if vwap_val > 0 else None,
+                        day_high=day_high_val if day_high_val > 0 else None,
+                        day_low=day_low_val if day_low_val > 0 else None,
+                        spot_open=spot_open_val if spot_open_val > 0 else None,
+                        spot_change_pct=spot_chg_val,
+                        ref_time=now_dt,
+                    )
+                except Exception as e_fno_micro:
+                    logger.debug(
+                        f"[AutoAlertEngine] F&O micro scalp scan error for {sym}: {e_fno_micro}"
+                    )
+                    return []
+
+            if top_catalysts:
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(3, len(top_catalysts))
+                ) as executor:
+                    for fno_alerts in executor.map(_eval_fno_micro, top_catalysts):
+                        for a in fno_alerts:
+                            if self.record_alert(a):
+                                found.append(a)
+                                logger.info(
+                                    f"[AutoAlertEngine] ⚡ F&O Catalyst Micro Scalp fired: {a.headline} "
+                                    f"LTP={a.ltp} SL={a.stop_loss} T1={a.target_level}"
+                                )
+
         return found
 
     def scan_smt_sweeps(
@@ -22136,9 +22701,7 @@ class AutoAlertEngine:
             ("circuits", lambda: self.scan_circuits(quotes_map=quotes_map)),
             (
                 "afternoon_thrusts",
-                lambda: self.scan_afternoon_thrusts(
-                    quotes_map=quotes_map, targets=active_cycle_targets
-                ),
+                lambda: self.scan_afternoon_thrusts(quotes_map=quotes_map, targets=None),
             ),
             ("order_book_thrusts", lambda: self.scan_order_book_thrusts(quotes_map=quotes_map)),
         ]
@@ -22147,9 +22710,7 @@ class AutoAlertEngine:
             tasks.append(
                 (
                     "squeeze",
-                    lambda: self.scan_squeeze_breakouts(
-                        quotes_map=quotes_map, targets=active_cycle_targets
-                    ),
+                    lambda: self.scan_squeeze_breakouts(quotes_map=quotes_map, targets=None),
                 )
             )
 
@@ -22226,7 +22787,13 @@ class AutoAlertEngine:
                 ("smc_ob_retest", lambda: self.scan_smc_orderblock_retests(quotes_map=quotes_map))
             )
 
-        if self._should_run_detector("defined_risk_neutral", 60.0):
+        # Boost defined-risk neutral (non-directional) frequency during midday compression lull (11:45 - 13:15 IST)
+        now_dt_sched = datetime.now(IST)
+        curr_t_sched = now_dt_sched.time()
+        is_midday_compression = dtime(11, 45) <= curr_t_sched <= dtime(13, 15)
+        neutral_cadence = 30.0 if is_midday_compression else 60.0
+
+        if self._should_run_detector("defined_risk_neutral", neutral_cadence):
             tasks.append(
                 (
                     "defined_risk_neutral",
@@ -24021,6 +24588,7 @@ class AutoAlertEngine:
                             self.scan_swing_inflections(
                                 universe="nifty_total_market", min_score=65, top_n=30
                             )
+                            self.scan_fno_stock_swing_setups(min_score=65, top_n=20)
 
                             self._last_eod_digest_session = session_slug
 
@@ -24451,6 +25019,19 @@ class AutoAlertEngine:
                         alert.archive_reason = None
 
                     target_alert = alert
+
+                    try:
+                        from market.oc_manager import get_oc_manager
+
+                        has_other = any(
+                            a.symbol == alert.symbol and not a.is_invalidated and not a.is_archived
+                            for a in self._alerts
+                            if a.alert_id != alert.alert_id
+                        )
+                        if not has_other:
+                            get_oc_manager().unsubscribe(self._clean_sym(alert.symbol))
+                    except Exception as e_unsub:
+                        logger.debug(f"[AutoAlertEngine] OCM unsubscribe note: {e_unsub}")
 
                     break
 
@@ -24907,6 +25488,7 @@ class AutoAlertEngine:
             self.scan_swing_inflections(
                 universe="nifty_total_market", min_score=65, top_n=25, use_local_cache=True
             )
+            self.scan_fno_stock_swing_setups(min_score=65, top_n=20, use_local_cache=True)
 
         except Exception as _prime_err:
             logger.debug(f"[AutoAlertEngine] Startup swing priming error: {_prime_err}")

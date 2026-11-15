@@ -104,10 +104,15 @@ def test_is_fyers_auth_error_classifier():
     assert _is_fyers_auth_error({"s": "ok", "data": {}}) is False
 
 
-def test_get_profile_raises_on_code_minus_16_without_totp():
+def test_get_profile_raises_on_code_minus_16_without_totp(tmp_path, monkeypatch):
     """
     RCA Verification: get_profile must raise PermissionError on -16 and NEVER cache an empty UserProfile.
+    Isolate TOKEN_FILE to tmp_path to prevent deleting real developer credentials on disk.
     """
+    fake_token = tmp_path / "fyers.json"
+    fake_token.write_text('{"access_token": "stale_token", "timestamp": 12345}')
+    monkeypatch.setattr("brokers.fyers.TOKEN_FILE", fake_token)
+
     api = FyersAPI(app_id="TEST-100", secret_key="secret")
     api._access_token = "stale_token"
     api._token_ts = time.time()
@@ -125,6 +130,7 @@ def test_get_profile_raises_on_code_minus_16_without_totp():
     assert "rejected" in str(exc_info.value).lower() or "expired" in str(exc_info.value).lower()
     assert api._profile is None
     assert api._access_token == ""
+    assert not fake_token.exists()
 
 
 def test_get_profile_auto_reauths_with_totp():
@@ -260,7 +266,10 @@ def test_fyers_headless_auto_login_429_triggers_cooldown_and_suppresses_repeat_c
     cb = get_fyers_circuit_breaker()
     cb.record_success()
 
-    with patch.object(api, "_auto_login_totp") as mock_totp:
+    with (
+        patch.object(api, "_load_token"),
+        patch.object(api, "_auto_login_totp") as mock_totp,
+    ):
         mock_totp.side_effect = RuntimeError(
             'Fyers auto-login step 1 failed (HTTP 429): {"s": "error", "code": 429, "message": "Too many requests. Please try again later."}'
         )
@@ -297,6 +306,7 @@ def test_fyers_headless_auto_login_success_clears_backoff():
     mock_profile.user_id = "FAK999"
 
     with (
+        patch.object(api, "_load_token"),
         patch.object(api, "_auto_login_totp", return_value="fresh_token_123"),
         patch.object(api, "_save_token"),
         patch.object(api, "get_profile", return_value=mock_profile),

@@ -33,6 +33,8 @@ class OrderPreviewRequest(BaseModel):
     stop_loss: Optional[float] = None
     target: Optional[float] = None
     auto_gtt_oco: bool = True
+    allow_override: bool = False
+    double_confirmed: bool = False
 
     @field_validator("symbol")
     @classmethod
@@ -69,6 +71,8 @@ class OrderExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str
+    allow_override: bool = False
+    double_confirmed: bool = False
 
 
 class OrderCancelRequest(BaseModel):
@@ -145,6 +149,8 @@ async def api_order_preview(req: OrderPreviewRequest, request: Request):
             stop_loss=req.stop_loss,
             target=req.target,
             auto_gtt_oco=req.auto_gtt_oco,
+            allow_override=(req.allow_override or req.double_confirmed),
+            double_confirmed=(req.allow_override or req.double_confirmed),
         )
 
         await asyncio.to_thread(
@@ -207,7 +213,11 @@ async def api_order_execute(req: OrderExecuteRequest, request: Request):
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
-        order = await asyncio.to_thread(execute_order_intent, order_id=req.order_id)
+        order = await asyncio.to_thread(
+            execute_order_intent,
+            order_id=req.order_id,
+            allow_override=(req.allow_override or req.double_confirmed),
+        )
         await asyncio.to_thread(
             record_audit_event,
             event_type="ORDER_EXECUTE_REQUESTED",

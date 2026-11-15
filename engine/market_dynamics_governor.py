@@ -221,21 +221,23 @@ class MarketDynamicsGovernor:
         logger.info("[MarketDynamicsGovernor] Initialized context-adaptive calibration governor.")
 
     def _fetch_live_vix(self) -> float:
-        """Fetch current India VIX with bounded 30s cache."""
+        """Fetch current India VIX with bounded 120s cache."""
         now_ts = time.time()
         with self._lock:
             ts, val = self._vix_cache
-            if now_ts - ts < 30.0 and val > 0.0:
+            if now_ts - ts < 120.0 and val > 0.0:
                 return val
 
         try:
             from market.indices import get_vix
 
             raw_vix = get_vix()
-            vix_val = float(raw_vix) if raw_vix and float(raw_vix) > 0.0 else 14.0
+            vix_val = (
+                float(raw_vix) if raw_vix and float(raw_vix) > 0.0 else (val if val > 0.0 else 14.0)
+            )
         except Exception as e_vix:
             logger.debug(f"[MarketDynamicsGovernor] VIX fetch fallback: {e_vix}")
-            vix_val = 14.0
+            vix_val = val if val > 0.0 else 14.0
 
         with self._lock:
             self._vix_cache = (now_ts, vix_val)

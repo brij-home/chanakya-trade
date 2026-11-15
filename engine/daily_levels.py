@@ -454,29 +454,66 @@ class DailyLevelsStore:
                 pdh, pdl, pdc, pdo = 0.0, 0.0, 0.0, 0.0
 
         if pdh <= 0 or pdl <= 0 or pdc <= 0:
-            # Check previous persisted daily levels if available in memory cache,
-            # verifying session recency (within 5 days) and spot coherence (<=5% divergence).
-            with self._lock:
-                for k, v in self._memory_cache.items():
-                    if k.endswith(f":{clean}") and v.pdh > 0 and v.pdl > 0 and v.pdc > 0:
-                        parts = k.split(":")
-                        cached_date_str = parts[0]
-                        try:
-                            cached_date = datetime.strptime(cached_date_str, "%Y-%m-%d").date()
-                            cache_age = (s_dt - cached_date).days
-                        except Exception:
-                            cache_age = 999
-                        is_test_env = (
-                            os.environ.get("CHANAKYA_TESTING") == "1"
-                            or os.environ.get("DEPLOY_MODE") == "test"
-                            or ("PYTEST_CURRENT_TEST" in os.environ)
+            # Fallback 1: If preloaded batch was stale/divergent, attempt fresh direct OHLCV fetch
+            if preloaded_df is not None:
+                try:
+                    fresh_df = get_ohlcv(clean, exchange=exch, interval="day", days=100)
+                    if fresh_df is not None and len(fresh_df) >= 2:
+                        col_h = "high" if "high" in fresh_df.columns else "High"
+                        col_l = "low" if "low" in fresh_df.columns else "Low"
+                        col_c = "close" if "close" in fresh_df.columns else "Close"
+                        col_o = "open" if "open" in fresh_df.columns else "Open"
+
+                        last_dt = fresh_df.index[-1]
+                        last_dt_str = (
+                            last_dt.strftime("%Y-%m-%d")
+                            if hasattr(last_dt, "strftime")
+                            else str(last_dt)[:10]
                         )
-                        if is_test_env or (0 <= cache_age <= 5):
-                            if ltp <= 0 or abs(ltp - v.pdc) / ltp <= max_allowed_div:
-                                pdh, pdl, pdc = v.pdh, v.pdl, v.pdc
-                                pdo = v.pdo
-                                atr_14 = v.atr_14
-                                break
+                        b_idx = -2 if last_dt_str == s_date else -1
+                        f_pdc = float(fresh_df[col_c].iloc[b_idx])
+                        if ltp <= 0 or abs(ltp - f_pdc) / ltp <= max_allowed_div:
+                            pdh = float(fresh_df[col_h].iloc[b_idx])
+                            pdl = float(fresh_df[col_l].iloc[b_idx])
+                            pdc = f_pdc
+                            pdo = float(fresh_df[col_o].iloc[b_idx])
+                            df_day = fresh_df
+                            if len(fresh_df) >= 15:
+                                tr1 = fresh_df[col_h] - fresh_df[col_l]
+                                tr2 = (fresh_df[col_h] - fresh_df[col_c].shift()).abs()
+                                tr3 = (fresh_df[col_l] - fresh_df[col_c].shift()).abs()
+                                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                                atr_14 = float(tr.rolling(14).mean().iloc[-1])
+                            logger.info(
+                                f"[DailyLevels] Successfully recovered levels for {clean} via direct OHLCV fallback (pdc={pdc})"
+                            )
+                except Exception as e_fb:
+                    logger.debug(f"[DailyLevels] Direct OHLCV fallback notice for {clean}: {e_fb}")
+
+            # Fallback 2: Check previous persisted daily levels if available in memory cache,
+            # verifying session recency (within 5 days) and spot coherence (<=5% divergence).
+            if pdh <= 0 or pdl <= 0 or pdc <= 0:
+                with self._lock:
+                    for k, v in self._memory_cache.items():
+                        if k.endswith(f":{clean}") and v.pdh > 0 and v.pdl > 0 and v.pdc > 0:
+                            parts = k.split(":")
+                            cached_date_str = parts[0]
+                            try:
+                                cached_date = datetime.strptime(cached_date_str, "%Y-%m-%d").date()
+                                cache_age = (s_dt - cached_date).days
+                            except Exception:
+                                cache_age = 999
+                            is_test_env = (
+                                os.environ.get("CHANAKYA_TESTING") == "1"
+                                or os.environ.get("DEPLOY_MODE") == "test"
+                                or ("PYTEST_CURRENT_TEST" in os.environ)
+                            )
+                            if is_test_env or (0 <= cache_age <= 5):
+                                if ltp <= 0 or abs(ltp - v.pdc) / ltp <= max_allowed_div:
+                                    pdh, pdl, pdc = v.pdh, v.pdl, v.pdc
+                                    pdo = v.pdo
+                                    atr_14 = v.atr_14
+                                    break
 
         # Fail-closed: Never fabricate arbitrary synthetic price ranges (Rule 11 Invariant)
         if pdh <= 0 or pdl <= 0 or pdc <= 0:
