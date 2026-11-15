@@ -11,7 +11,7 @@ from engine.detectors.currency import detect_currency_breakouts
 from engine.detectors.gamma_blast import detect_gamma_blast
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
-from engine.detectors.index_micro_scalp import detect_index_micro_scalp
+from engine.detectors.index_micro_scalp import detect_index_micro_scalp, detect_fno_micro_scalp
 from engine.detectors.smt_sweep import detect_smt_sweep
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
@@ -22,7 +22,7 @@ from engine.detectors.orb import detect_opening_range_breakout
 from engine.detectors.order_flow import detect_order_flow_divergence, OrderFlowDivergenceDetector
 from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
 from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
-from engine.detectors.preopen_bias import detect_preopen_bias
+from engine.detectors.preopen_bias import detect_preopen_bias, detect_preopen_stock_catalyst
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
@@ -60,10 +60,12 @@ __all__ = [
     "detect_index_call_setup",
     "detect_index_put_setup",
     "detect_index_micro_scalp",
+    "detect_fno_micro_scalp",
     "detect_smt_sweep",
     "detect_opening_drive",
     "detect_afternoon_thrust",
     "detect_preopen_bias",
+    "detect_preopen_stock_catalyst",
     "detect_squeeze_breakout",
     "detect_circuit_proximity",
     "detect_learned_pattern_coiling",

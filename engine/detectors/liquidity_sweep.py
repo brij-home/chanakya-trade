@@ -381,6 +381,26 @@ def detect_predator_liquidity_sweep(
 
     conf_val = min(96, conf_val)
 
+    # Coordinate lower-timeframe fractal entry and 3-tier scale-out plan
+    fractal_dict = {}
+    try:
+        from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+        fractal_bp = coordinate_fractal_entry(
+            symbol=clean_sym,
+            direction=direction,
+            htf_zone=(max(sweep_level, sweep_wick_ext), min(sweep_level, sweep_wick_ext)),
+            htf_target=target_1,
+            df_ltf=df,
+            ltp=curr_ltp,
+        )
+        fractal_dict = fractal_bp.to_dict()
+        if isinstance(blueprint, ActionableBlueprint):
+            blueprint.extra_details["scale_out_plan"] = fractal_bp.scale_out_plan
+            blueprint.extra_details["fractal_entry_type"] = fractal_bp.entry_type
+    except Exception as _e_frac:
+        logger.debug(f"[liquidity_sweep] Fractal coordination non-fatal: {_e_frac}")
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type="PREDATOR_SWEEP",
@@ -421,6 +441,7 @@ def detect_predator_liquidity_sweep(
             "has_flow": has_flow,
             "vsa_signal": vsa_sig,
             "obv_regime": obv_div,
+            "fractal_blueprint": fractal_dict,
         },
     )
 

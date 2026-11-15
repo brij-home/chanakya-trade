@@ -2881,11 +2881,45 @@ async def handle_alert_callback(update, context=None) -> None:
                     execute_order_intent,
                 )
 
-                sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+                # Resolve exact tradable contract symbol (derivative contract if option/future)
+                sym = (
+                    getattr(alert, "contract_symbol", None)
+                    or plan.get("contract_symbol")
+                    or plan.get("contract")
+                    or getattr(alert, "canonical_symbol", None)
+                    or getattr(alert, "symbol", "NIFTY")
+                )
                 act = (plan.get("action") or "BUY").upper()
                 side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
-                qty = int(getattr(alert, "lot_size", 1) or 1)
-                px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+                qty = int(getattr(alert, "lot_size", 1) or plan.get("quantity") or 1)
+                px = float(
+                    plan.get("limit_price")
+                    or getattr(alert, "entry_price", getattr(alert, "ltp", 100.0))
+                    or 100.0
+                )
+
+                # Standardize product routing (MIS vs NRML vs CNC)
+                th_upper = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+                is_swing = th_upper in (
+                    "SWING_SHORT",
+                    "SWING_MID",
+                    "SWING",
+                    "POSITIONAL",
+                    "LONG_TERM",
+                    "MULTIBAGGER",
+                )
+                is_deriv = bool(
+                    getattr(alert, "option_type", None)
+                    or getattr(alert, "contract_symbol", None)
+                    or (getattr(alert, "segment", "") or "").upper()
+                    in ("FNO", "OPTIONS", "FUTURES")
+                    or (plan.get("instrument_type") in ("OPTION", "FUTURE"))
+                    or str(sym).upper().endswith(("CE", "PE", "FUT"))
+                )
+                product = plan.get("product") or (
+                    "NRML" if (is_swing and is_deriv) else ("CNC" if is_swing else "MIS")
+                )
+                order_type = plan.get("order_type") or "LIMIT"
                 import uuid
 
                 intent = preview_order_intent(
@@ -2893,6 +2927,8 @@ async def handle_alert_callback(update, context=None) -> None:
                     side=side,
                     quantity=qty,
                     price=px,
+                    order_type=order_type,
+                    product=product,
                     idempotency_key=f"TG-PAPER-{alert_id}-{uuid.uuid4().hex[:8]}",
                 )
                 conf = confirm_order_intent(intent.order_id, intent.preview_hash)
@@ -2954,11 +2990,44 @@ async def handle_alert_callback(update, context=None) -> None:
                 execute_order_intent,
             )
 
-            sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+            # Resolve exact tradable contract symbol (derivative contract if option/future)
+            sym = (
+                getattr(alert, "contract_symbol", None)
+                or plan.get("contract_symbol")
+                or plan.get("contract")
+                or getattr(alert, "canonical_symbol", None)
+                or getattr(alert, "symbol", "NIFTY")
+            )
             act = (plan.get("action") or "BUY").upper()
             side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
-            qty = int(getattr(alert, "lot_size", 1) or 1)
-            px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+            qty = int(getattr(alert, "lot_size", 1) or plan.get("quantity") or 1)
+            px = float(
+                plan.get("limit_price")
+                or getattr(alert, "entry_price", getattr(alert, "ltp", 100.0))
+                or 100.0
+            )
+
+            # Standardize product routing (MIS vs NRML vs CNC)
+            th_upper = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+            is_swing = th_upper in (
+                "SWING_SHORT",
+                "SWING_MID",
+                "SWING",
+                "POSITIONAL",
+                "LONG_TERM",
+                "MULTIBAGGER",
+            )
+            is_deriv = bool(
+                getattr(alert, "option_type", None)
+                or getattr(alert, "contract_symbol", None)
+                or (getattr(alert, "segment", "") or "").upper() in ("FNO", "OPTIONS", "FUTURES")
+                or (plan.get("instrument_type") in ("OPTION", "FUTURE"))
+                or str(sym).upper().endswith(("CE", "PE", "FUT"))
+            )
+            product = plan.get("product") or (
+                "NRML" if (is_swing and is_deriv) else ("CNC" if is_swing else "MIS")
+            )
+            order_type = plan.get("order_type") or "LIMIT"
             import uuid
 
             intent = preview_order_intent(
@@ -2966,6 +3035,8 @@ async def handle_alert_callback(update, context=None) -> None:
                 side=side,
                 quantity=qty,
                 price=px,
+                order_type=order_type,
+                product=product,
                 idempotency_key=f"TG-LIVE-{alert_id}-{uuid.uuid4().hex[:8]}",
             )
             conf = confirm_order_intent(intent.order_id, intent.preview_hash)

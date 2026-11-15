@@ -316,6 +316,9 @@ class AutoAlert:
     details: dict[str, Any] = field(default_factory=dict)
     decoupler_status: str = "CORRELATED"  # "VERIFIED_DECOUPLER" | "CORRELATED" | "INDEX_DRAGGED"
     preferred_vehicle: str = "NAKED_OPTION"  # "NAKED_OPTION" | "SPREAD_ONLY" | "CREDIT_SPREAD"
+    is_breakeven_ratcheted: bool = (
+        False  # Set to True when 60-min dead-money or T1 ratchets stop to BE
+    )
 
     def record_audit(
         self,
@@ -835,6 +838,33 @@ class AutoAlert:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
+
+        # Standardize Smart Limit-with-Protection (LWP) on option tickets (Zero Slippage Drag)
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            is_opt_order = (
+                bool(self.option_type)
+                or self.actionable_plan.get("instrument_type") == "OPTION"
+                or self.alert_type
+                in (
+                    "GAMMA_BLAST",
+                    "OPTIONS_MOMENTUM",
+                    "INDEX_CALL_SETUP",
+                    "INDEX_PUT_SETUP",
+                    "INDEX_MICRO_SCALP",
+                )
+            )
+            if is_opt_order:
+                if "order_type" not in self.actionable_plan:
+                    self.actionable_plan["order_type"] = "LIMIT"
+                if "execution_strategy" not in self.actionable_plan:
+                    self.actionable_plan["execution_strategy"] = "LIMIT_WITH_PROTECTION"
+                entry_val = float(self.option_premium or self.trigger_level or self.ltp or 0.0)
+                if entry_val > 0 and "limit_price" not in self.actionable_plan:
+                    self.actionable_plan["limit_price"] = round(entry_val * 1.005, 1)
+                if entry_val > 0 and "protection_ceiling" not in self.actionable_plan:
+                    self.actionable_plan["protection_ceiling"] = round(entry_val * 1.025, 1)
+                if "tif" not in self.actionable_plan:
+                    self.actionable_plan["tif"] = "DAY"
         # Auto-resolve market_status if not explicitly provided or defaulted to closed
         if not self.market_status or (
             self.market_status == "SESSION_CLOSED" and self.environment == "LIVE"
@@ -920,6 +950,18 @@ class AutoAlert:
                 "PRECURSOR_RADAR",
             ):
                 self.time_horizon = "SWING_SHORT"
+            elif atype in (
+                "DEFINED_RISK_NEUTRAL",
+                "IRON_CONDOR",
+                "CREDIT_SPREAD",
+                "SHORT_STRADDLE",
+                "SHORT_STRANGLE",
+            ):
+                explicit_dte = getattr(self, "dte", None)
+                if explicit_dte is not None and explicit_dte == 0:
+                    self.time_horizon = "INTRADAY"
+                else:
+                    self.time_horizon = "SWING_SHORT"
             elif atype == "ASYMMETRIC_OPPORTUNITY":
                 setup_action = str((self.actionable_plan or {}).get("action", "")).upper()
                 if "POCKET_PIVOT" in setup_action:
@@ -1009,6 +1051,39 @@ class AutoAlert:
                 self.eta_label = "24h Rolling"
             else:
                 self.eta_label = "Today 15:15 IST"
+
+        # Standardize product routing (MIS vs NRML vs CNC) based on time horizon and instrument type
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            if "product" not in self.actionable_plan:
+                th_u = (self.time_horizon or "INTRADAY").upper()
+                is_swing = th_u in (
+                    "SWING_SHORT",
+                    "SWING_MID",
+                    "SWING",
+                    "POSITIONAL",
+                    "LONG_TERM",
+                    "MULTIBAGGER",
+                )
+                is_deriv = bool(
+                    self.option_type
+                    or self.contract_symbol
+                    or (getattr(self, "segment", "") or "").upper() in ("FNO", "OPTIONS", "FUTURES")
+                    or (self.actionable_plan.get("instrument_type") in ("OPTION", "FUTURE"))
+                    or (
+                        self.alert_type
+                        in (
+                            "GAMMA_BLAST",
+                            "OPTIONS_MOMENTUM",
+                            "INDEX_CALL_SETUP",
+                            "INDEX_PUT_SETUP",
+                            "INDEX_MICRO_SCALP",
+                        )
+                    )
+                )
+                if is_swing:
+                    self.actionable_plan["product"] = "NRML" if is_deriv else "CNC"
+                else:
+                    self.actionable_plan["product"] = "MIS"
 
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:

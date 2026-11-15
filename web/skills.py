@@ -1957,8 +1957,10 @@ async def skill_auto_alerts_scan_swing(req: Optional[dict[str, Any]] = None):
     """Trigger on-demand sweep for institutional Swing & Positional trades across NSE & BSE."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from config.discovery_policy import get_discovery_policy
 
         d = req or {}
+        policy = get_discovery_policy()
         universe = d.get("universe", "nifty_total_market")
         min_score = int(d.get("min_score", 60))
         limit = int(d.get("limit", 40))
@@ -1966,9 +1968,62 @@ async def skill_auto_alerts_scan_swing(req: Optional[dict[str, Any]] = None):
         bypass_cache = bool(d.get("bypass_cache", False))
         exchange = d.get("exchange", "NSE")
 
+        is_fno_target = policy.fno_only or str(universe).lower() in (
+            "fno",
+            "fno_universe",
+            "derivatives",
+            "fno_stocks",
+        )
+
+        if is_fno_target:
+            alerts = await asyncio.to_thread(
+                auto_alert_engine.scan_fno_stock_swing_setups,
+                min_score=min_score,
+                top_n=limit,
+                min_turnover_cr=min_turnover_cr,
+                use_local_cache=not bypass_cache,
+                bypass_inflection_cache=bypass_cache,
+                exchange=exchange,
+            )
+            resp_universe = "fno"
+        else:
+            alerts = await asyncio.to_thread(
+                auto_alert_engine.scan_swing_inflections,
+                universe=universe,
+                min_score=min_score,
+                top_n=limit,
+                min_turnover_cr=min_turnover_cr,
+                use_local_cache=not bypass_cache,
+                bypass_inflection_cache=bypass_cache,
+                exchange=exchange,
+            )
+            resp_universe = universe
+
+        return {
+            "status": "ok",
+            "universe": resp_universe,
+            "count": len(alerts),
+            "data": [a.to_dict() for a in alerts],
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/scan_fno_swing")
+async def skill_auto_alerts_scan_fno_swing(req: Optional[dict[str, Any]] = None):
+    """Trigger on-demand sweep for institutional F&O Stock Swing & Positional setups under FNO_STOCK desk authority."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        d = req or {}
+        min_score = int(d.get("min_score", 65))
+        limit = int(d.get("limit", 25))
+        min_turnover_cr = float(d.get("min_turnover_cr", 1.0))
+        bypass_cache = bool(d.get("bypass_cache", False))
+        exchange = d.get("exchange", "NSE")
+
         alerts = await asyncio.to_thread(
-            auto_alert_engine.scan_swing_inflections,
-            universe=universe,
+            auto_alert_engine.scan_fno_stock_swing_setups,
             min_score=min_score,
             top_n=limit,
             min_turnover_cr=min_turnover_cr,
@@ -1978,7 +2033,7 @@ async def skill_auto_alerts_scan_swing(req: Optional[dict[str, Any]] = None):
         )
         return {
             "status": "ok",
-            "universe": universe,
+            "universe": "fno",
             "count": len(alerts),
             "data": [a.to_dict() for a in alerts],
         }
@@ -7669,7 +7724,6 @@ async def skill_gex_snapshot(
         import math
         from datetime import datetime
         from market.quotes import get_ltp, normalize_instrument
-        from engine.greeks_manager import LOT_SIZES
 
         raw_in = None
         if symbol or underlying:
@@ -7702,13 +7756,9 @@ async def skill_gex_snapshot(
         now_time = source_info.get("as_of_display") or datetime.now().strftime("%I:%M:%S %p IST")
         active_expiry = req_exp or (expiries[0] if expiries else "")
 
-        lot_sz = (
-            1
-            if clean_sym in ("BTC", "ETH", "SOL")
-            else LOT_SIZES.get(
-                clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
-            )
-        )
+        from market.instruments import get_fno_lot_size
+
+        lot_sz = 1 if clean_sym in ("BTC", "ETH", "SOL") else get_fno_lot_size(clean_sym)
 
         # Venue-specific check if no contracts exist
         if not contracts:
@@ -8166,19 +8216,27 @@ async def skill_gex_snapshot(
 
             ce_vol = getattr(ce, "volume", 0) or 0
             ce_oi = getattr(ce, "oi", 0) or 0
-            ce_bid = getattr(ce, "bid", None) or getattr(ce, "last_price", 0.0)
-            ce_ask = getattr(ce, "ask", None) or getattr(ce, "last_price", 0.0)
+            ce_lp = getattr(ce, "last_price", 0.0) or 0.0
+            ce_bid = getattr(ce, "bid", None) or ce_lp
+            ce_ask = getattr(ce, "ask", None) or ce_lp
             ce_buy_q = getattr(ce, "total_buy_qty", 0) or 0
             ce_sell_q = getattr(ce, "total_sell_qty", 0) or 0
             ce_imb = (ce_buy_q / max(1, ce_sell_q)) if ce_sell_q > 0 else 1.0
+            ce_sym = getattr(ce, "symbol", "") or ""
+            ce_delta = getattr(ce, "delta", None)
+            ce_theta = getattr(ce, "theta", None)
 
             pe_vol = getattr(pe, "volume", 0) or 0
             pe_oi = getattr(pe, "oi", 0) or 0
-            pe_bid = getattr(pe, "bid", None) or getattr(pe, "last_price", 0.0)
-            pe_ask = getattr(pe, "ask", None) or getattr(pe, "last_price", 0.0)
+            pe_lp = getattr(pe, "last_price", 0.0) or 0.0
+            pe_bid = getattr(pe, "bid", None) or pe_lp
+            pe_ask = getattr(pe, "ask", None) or pe_lp
             pe_buy_q = getattr(pe, "total_buy_qty", 0) or 0
             pe_sell_q = getattr(pe, "total_sell_qty", 0) or 0
             pe_imb = (pe_buy_q / max(1, pe_sell_q)) if pe_sell_q > 0 else 1.0
+            pe_sym = getattr(pe, "symbol", "") or ""
+            pe_delta = getattr(pe, "delta", None)
+            pe_theta = getattr(pe, "theta", None)
 
             # GEX lookup
             call_gex = 0.0
@@ -8206,6 +8264,12 @@ async def skill_gex_snapshot(
                     "calls_oi_chg": f"{'+' if (ce and ce.oi_change >= 0) else ''}{round((ce.oi_change if ce else 0) / 1000, 1)}k",
                     "calls_gex": f"{'+' if call_gex >= 0 else ''}{round(call_gex, 1)}Cr",
                     "calls_iv": f"{round((ce.iv if ce and ce.iv else 15.0), 1)}%",
+                    "calls_ltp": round(ce_lp, 2)
+                    if ce_lp
+                    else (round(ce_bid, 2) if ce_bid else 0.0),
+                    "calls_symbol": ce_sym,
+                    "calls_delta": round(ce_delta, 3) if ce_delta is not None else None,
+                    "calls_theta": round(ce_theta, 2) if ce_theta is not None else None,
                     "calls_bid": round(ce_bid, 2) if ce_bid else 0.0,
                     "calls_ask": round(ce_ask, 2) if ce_ask else 0.0,
                     "calls_bid_qty": getattr(ce, "bid_qty", 0),
@@ -8218,6 +8282,10 @@ async def skill_gex_snapshot(
                     "calls_blast_metric": f"{ce_meta['vol_oi_ratio']:.1f}x Vol/OI"
                     if ce_meta
                     else "",
+                    "puts_ltp": round(pe_lp, 2) if pe_lp else (round(pe_bid, 2) if pe_bid else 0.0),
+                    "puts_symbol": pe_sym,
+                    "puts_delta": round(pe_delta, 3) if pe_delta is not None else None,
+                    "puts_theta": round(pe_theta, 2) if pe_theta is not None else None,
                     "puts_bid": round(pe_bid, 2) if pe_bid else 0.0,
                     "puts_ask": round(pe_ask, 2) if pe_ask else 0.0,
                     "puts_bid_qty": getattr(pe, "bid_qty", 0),

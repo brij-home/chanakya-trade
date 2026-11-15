@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import wraps
 import logging
 import os
+from typing import Callable, Union
 
 from config.constants import SESSION_FOCUS_MODE
 
@@ -51,9 +52,11 @@ def set_discovery_policy(profile: str) -> DiscoveryPolicy:
     return DiscoveryPolicy(prof)
 
 
-def discovery_desk(desk: str):
+def discovery_desk(desk: Union[str, Callable[..., str]]):
     """Gate list-returning discovery functions before imports, feeds and AI work.
 
+    Supports static desk names ('CASH', 'FNO_STOCK', 'FNO_INDEX') or dynamic
+    callables (e.g. evaluating desk from function arguments).
     Never decorate lifecycle/exit/guardian functions with this policy.
     """
 
@@ -61,11 +64,12 @@ def discovery_desk(desk: str):
         @wraps(function)
         def gated(*args, **kwargs):
             policy = get_discovery_policy()
-            if not policy.allows(desk):
+            target_desk = desk(*args, **kwargs) if callable(desk) else desk
+            if not policy.allows(target_desk):
                 logger.debug(
                     "FILTERED_BY_FOCUS profile=%s desk=%s operation=%s",
                     policy.profile,
-                    desk,
+                    target_desk,
                     function.__qualname__,
                 )
                 return []

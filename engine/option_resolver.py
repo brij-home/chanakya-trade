@@ -103,6 +103,11 @@ class ResolvedOptionPlan:
             "delta": round(self.delta, 4) if self.delta is not None else None,
             "iv": round(self.iv, 2) if self.iv is not None else None,
             "is_next_month_routed": self.is_next_month_routed,
+            "order_type": "LIMIT",
+            "execution_strategy": "LIMIT_WITH_PROTECTION",
+            "limit_price": round(self.entry_premium * 1.005, 1),
+            "protection_ceiling": round(self.entry_premium * 1.025, 1),
+            "tif": "DAY",
         }
         if self.spread_details:
             d["hedged_spread"] = self.spread_details
@@ -206,11 +211,13 @@ def resolve_option_contract(
     try:
         from engine.position_sizer import get_lot_size
 
-        lot_sz = get_lot_size(clean_sym) or (
-            15 if clean_sym == "NIFTY" else (15 if clean_sym == "BANKNIFTY" else 1)
-        )
+        from market.instruments import STANDARD_LOT_SIZES
+
+        lot_sz = get_lot_size(clean_sym) or STANDARD_LOT_SIZES.get(clean_sym, 65 if is_idx else 1)
     except Exception:
-        lot_sz = 15 if is_idx else 1
+        from market.instruments import STANDARD_LOT_SIZES
+
+        lot_sz = STANDARD_LOT_SIZES.get(clean_sym, 65 if is_idx else 1)
 
     # If it's a cash equity with no F&O lot size and not requested, do not force options
     if not is_idx and not prefer_options and lot_sz <= 1:
@@ -454,20 +461,32 @@ def resolve_option_contract(
                             )
                         chosen = itm_candidates[0] if itm_candidates else matching[0]
                 else:  # Default "ATM"
-                    # Institutional 50-Delta strike selection:
-                    # Prefer contract with |delta| closest to 0.50 (in sweet spot [0.38, 0.62])
-                    atm_delta_candidates = [
+                    # Institutional Delta Sweet-Spot (0.40 - 0.55):
+                    # Prioritize sweet spot contracts, avoiding deep OTM lottery traps (|delta| < 0.35)
+                    sweet_spot_candidates = [
                         c
                         for c in matching
                         if getattr(c, "delta", None) is not None
-                        and 0.38 <= abs(float(c.delta)) <= 0.62
+                        and 0.40 <= abs(float(c.delta)) <= 0.55
                     ]
-                    if atm_delta_candidates:
-                        atm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
-                        chosen = atm_delta_candidates[0]
+                    if sweet_spot_candidates:
+                        sweet_spot_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
+                        chosen = sweet_spot_candidates[0]
                     else:
-                        matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-                        chosen = matching[0]
+                        atm_delta_candidates = [
+                            c
+                            for c in matching
+                            if getattr(c, "delta", None) is not None
+                            and 0.35 <= abs(float(c.delta)) <= 0.65
+                        ]
+                        if atm_delta_candidates:
+                            atm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
+                            chosen = atm_delta_candidates[0]
+                        else:
+                            matching.sort(
+                                key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot)
+                            )
+                            chosen = matching[0]
 
                 opt_sym = chosen.symbol
                 opt_ltp = float(chosen.last_price)

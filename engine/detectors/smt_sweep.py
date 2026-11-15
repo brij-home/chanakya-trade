@@ -308,6 +308,24 @@ def detect_smt_sweep(
                                 "is_wide_cpr": cpr_bear.is_wide,
                             },
                         )
+                        if ohlcv_5m is not None and len(ohlcv_5m) >= 3:
+                            try:
+                                from engine.fractal_entry_coordinator import (
+                                    coordinate_fractal_entry,
+                                )
+
+                                f_res = coordinate_fractal_entry(
+                                    symbol=clean_sym,
+                                    htf_zone_high=max(spot, day_high or spot),
+                                    htf_zone_low=min(spot, day_high or spot),
+                                    direction="BEARISH",
+                                    df_ltf=ohlcv_5m,
+                                )
+                                if f_res:
+                                    a.metrics["fractal_blueprint"] = f_res.to_dict()
+                                    a.actionable_plan["scale_out_plan"] = f_res.scale_out_plan
+                            except Exception as _e_fr:
+                                logger.debug(f"[SMTSweep] Bearish fractal entry non-fatal: {_e_fr}")
                         alerts.append(a)
                         logger.info(
                             f"[SMTSweep] 🔴 Fired Bearish SMT Sweep on {clean_sym}: {a.headline} (SL Spot: {sl_spot})"
@@ -465,6 +483,24 @@ def detect_smt_sweep(
                                 "is_wide_cpr": cpr_bull.is_wide,
                             },
                         )
+                        if ohlcv_5m is not None and len(ohlcv_5m) >= 3:
+                            try:
+                                from engine.fractal_entry_coordinator import (
+                                    coordinate_fractal_entry,
+                                )
+
+                                f_res = coordinate_fractal_entry(
+                                    symbol=clean_sym,
+                                    htf_zone_high=max(spot, day_low or spot),
+                                    htf_zone_low=min(spot, day_low or spot),
+                                    direction="BULLISH",
+                                    df_ltf=ohlcv_5m,
+                                )
+                                if f_res:
+                                    a.metrics["fractal_blueprint"] = f_res.to_dict()
+                                    a.actionable_plan["scale_out_plan"] = f_res.scale_out_plan
+                            except Exception as _e_fr:
+                                logger.debug(f"[SMTSweep] Bullish fractal entry non-fatal: {_e_fr}")
                         alerts.append(a)
                         logger.info(
                             f"[SMTSweep] 🟢 Fired Bullish SMT Sweep on {clean_sym}: {a.headline} (SL Spot: {sl_spot})"

@@ -439,6 +439,29 @@ def detect_turtle_soup_sweep(
     if calib and calib.is_mean_reversion_favored:
         confidence_val = min(94, confidence_val + 4)
 
+    # Multi-Timeframe Fractal Entry Coordination (Micro-Sweep & Scale-Out Plan)
+    try:
+        from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+        zone_h = max(sweep_level, sweep_wick_ext)
+        zone_l = min(sweep_level, sweep_wick_ext)
+        fractal_res = coordinate_fractal_entry(
+            symbol=clean_sym,
+            htf_zone_high=zone_h,
+            htf_zone_low=zone_l,
+            direction=direction,
+            df_ltf=df,
+            primary_rvol=rvol,
+        )
+        if fractal_res:
+            blueprint.extra_details["fractal_blueprint"] = fractal_res.to_dict()
+            blueprint.extra_details["scale_out_plan"] = fractal_res.scale_out_plan
+            blueprint.execution_style = fractal_res.limit_entry_style
+    except Exception as e_fractal:
+        logger.debug(f"[TurtleSoup] Fractal entry coordination non-fatal exception: {e_fractal}")
+
+    act_plan = blueprint.to_dict()
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type="TURTLE_SOUP_SWEEP",
@@ -464,7 +487,7 @@ def detect_turtle_soup_sweep(
         setup_style=style_val,
         entry_type="LIMIT_ON_PULLBACK",
         no_chase_boundary=no_chase,
-        actionable_plan=blueprint.to_dict(),
+        actionable_plan=act_plan,
         metrics={
             "sweep_type": sweep_type,
             "swept_level": sweep_level,
@@ -475,6 +498,7 @@ def detect_turtle_soup_sweep(
             "vwap": vwap,
             "smt_confirmed": smt_confirmed,
             "smt_sibling": smt_sibling,
+            "fractal_blueprint": act_plan.get("fractal_blueprint"),
             "recommended_structure": calib.preferred_vehicle
             if calib
             else ("DEBIT_SPREAD" if is_index_symbol(clean_sym) else "NAKED_OPTION_BUY"),

@@ -149,6 +149,7 @@ class AlertScrutinyAuditor:
             "no_chase": False,
             "order_book_sanctity_valid": True,
             "trap_invalidation_clean": True,
+            "exhaustion_clean": True,
             "friction_valid": True,
         }
 
@@ -5163,7 +5164,21 @@ class AlertScrutinyAuditor:
             from engine.trap_invalidator import audit_trade_for_traps
             from engine.daily_levels import daily_levels_store
 
-            dl = daily_levels_store.get_levels(clean_sym)
+            # Resolve session date if explicit on alert, otherwise None (defaults to today's date)
+            alert_s_date = None
+            if hasattr(alert, "created_at") and alert.created_at:
+                try:
+                    alert_s_date = str(alert.created_at)[:10]
+                except Exception as e_d1:
+                    logger.debug(f"[AlertScrutiny] created_at session parse error: {e_d1}")
+            elif hasattr(alert, "expiry_date") and alert.expiry_date:
+                try:
+                    alert_s_date = str(alert.expiry_date)[:10]
+                except Exception as e_d2:
+                    logger.debug(f"[AlertScrutiny] expiry_date session parse error: {e_d2}")
+            dl = daily_levels_store.get_levels(
+                clean_sym, session_date=alert_s_date, compute_if_missing=False
+            )
             trap_audit = audit_trade_for_traps(
                 symbol=clean_sym,
                 direction=direction,
@@ -5206,6 +5221,157 @@ class AlertScrutinyAuditor:
                     metrics["trap_audit"] = trap_audit.to_dict()
         except Exception as e_trap:
             logger.debug(f"[AlertScrutiny] Adversarial trap audit bypassed: {e_trap}")
+
+        # ── 15b. Institutional Exhaustion & Anti-Chase Radar Gate ─────────
+        try:
+            from analysis.exhaustion_radar import evaluate_exhaustion
+
+            eval_sym = underlying_idx if underlying_idx else clean_sym
+            eval_entry = entry_anchor
+            eval_sl = sl
+            eval_t1 = t1
+            eval_ltp = ltp
+
+            # If alert levels represent an option contract, evaluate underlying spot if available
+            if is_option_premium_levels:
+                spot_px = float(
+                    metrics.get("underlying_spot")
+                    or metrics.get("spot")
+                    or getattr(alert, "underlying_spot", 0.0)
+                    or getattr(alert, "spot_price", 0.0)
+                    or 0.0
+                )
+                if spot_px > 0:
+                    eval_entry = spot_px
+                    eval_ltp = spot_px
+                    # Use explicit underlying stop loss if provided, otherwise estimate from option risk via delta (~0.50)
+                    plan = getattr(alert, "actionable_plan", {}) or {}
+                    explicit_spot_sl = float(
+                        plan.get("spot_invalidation_anchor")
+                        or plan.get("underlying_sl")
+                        or (metrics.get("underlying_sl") if isinstance(metrics, dict) else 0.0)
+                        or 0.0
+                    )
+                    if explicit_spot_sl > 0:
+                        eval_sl = explicit_spot_sl
+                    else:
+                        opt_risk = max(0.5, abs(entry_anchor - sl))
+                        est_spot_risk = opt_risk / 0.50
+                        eval_sl = (
+                            spot_px - est_spot_risk
+                            if direction in ("BULLISH", "LONG", "BUY")
+                            else spot_px + est_spot_risk
+                        )
+
+                    explicit_spot_t1 = float(
+                        plan.get("target_1")
+                        or plan.get("underlying_target")
+                        or (metrics.get("underlying_target") if isinstance(metrics, dict) else 0.0)
+                        or 0.0
+                    )
+                    is_bull = direction in ("BULLISH", "LONG", "BUY")
+                    if (is_bull and explicit_spot_t1 > spot_px) or (
+                        not is_bull and 0 < explicit_spot_t1 < spot_px
+                    ):
+                        eval_t1 = explicit_spot_t1
+                    else:
+                        opt_reward = max(1.0, abs(t1 - entry_anchor))
+                        est_spot_reward = opt_reward / 0.50
+                        eval_t1 = (
+                            spot_px + est_spot_reward if is_bull else spot_px - est_spot_reward
+                        )
+
+            is_pullback_setup = bool(
+                "PULLBACK" in atype or "RETEST" in atype or "DIP" in atype or "SMC_OB" in atype
+            )
+            vpin_val = (
+                float(metrics.get("vpin", 0.0) or 0.0)
+                if isinstance(metrics, dict) and metrics.get("vpin")
+                else None
+            )
+            vwap_val = (
+                float(metrics.get("vwap", 0.0) or 0.0)
+                if isinstance(metrics, dict) and metrics.get("vwap")
+                else None
+            )
+
+            exhaustion_verdict = evaluate_exhaustion(
+                symbol=eval_sym,
+                direction=direction,
+                ltp=eval_ltp,
+                entry_price=eval_entry,
+                stop_loss=eval_sl,
+                target_1=eval_t1,
+                daily_levels=dl,
+                chain=getattr(alert, "chain", None)
+                or (metrics.get("chain") if isinstance(metrics, dict) else None),
+                vpin=vpin_val,
+                vwap=vwap_val,
+                is_pullback=is_pullback_setup,
+                current_hour=alert_time.hour if alert_time else None,
+                current_minute=alert_time.minute if alert_time else None,
+            )
+
+            if isinstance(metrics, dict):
+                metrics["exhaustion_radar"] = exhaustion_verdict.to_dict()
+
+            if (
+                exhaustion_verdict.is_exhausted
+                and exhaustion_verdict.recommended_action == "HARD_VETO"
+            ):
+                rvol_val = (
+                    float(metrics.get("rvol", 0.0) or 0.0) if isinstance(metrics, dict) else 0.0
+                )
+                sig_list = metrics.get("signals", []) if isinstance(metrics, dict) else []
+                is_spark_or_breakout = (
+                    "SPARK" in atype
+                    or "BREAKOUT" in atype
+                    or "BREAKDOWN" in atype
+                    or "ORB" in atype
+                    or "REVERSAL" in atype
+                    or "INTERCEPTION" in atype
+                    or bool(
+                        metrics.get("is_institutional_thrust")
+                        if isinstance(metrics, dict)
+                        else False
+                    )
+                    or any("REJECTION" in s or "BREAKDOWN" in s or "THRUST" in s for s in sig_list)
+                )
+                is_hedged_spread = bool(
+                    (getattr(alert, "actionable_plan", {}) or {}).get("hedged_spread")
+                    or (
+                        isinstance(metrics, dict)
+                        and (metrics.get("actionable_plan") or {}).get("hedged_spread")
+                    )
+                    or getattr(alert, "spread_details", None)
+                )
+                # If collision is structural but breakout/thrust is aggressive, or trade is a defined-risk hedged spread, punch through
+                if exhaustion_verdict.trap_type == "CHOKED_HEADROOM" and (
+                    is_hedged_spread
+                    or (
+                        is_spark_or_breakout
+                        and (
+                            rvol_val >= 1.8
+                            or (
+                                isinstance(metrics, dict) and metrics.get("is_institutional_thrust")
+                            )
+                            or "REVERSAL" in atype
+                            or any("REJECTION" in s or "BREAKDOWN" in s for s in sig_list)
+                        )
+                    )
+                ):
+                    flags["exhaustion_warning"] = True
+                else:
+                    flags["exhaustion_clean"] = False
+                    return (
+                        False,
+                        f"Institutional Exhaustion Radar Veto: {exhaustion_verdict.rationale}",
+                        flags,
+                    )
+            elif exhaustion_verdict.is_exhausted:
+                flags["exhaustion_warning"] = True
+        except Exception as e_exh:
+            logger.debug(f"[AlertScrutiny] Exhaustion radar check non-fatal: {e_exh}")
 
         # 4c-v. Institutional Statutory Friction & Net Expectancy Gate
         # Every alert must maintain positive net expectancy after statutory roundtrip friction

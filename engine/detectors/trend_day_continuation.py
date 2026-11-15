@@ -653,6 +653,28 @@ def detect_trend_day_pullback(
     act_plan["segment"] = alert_seg
     spread_info = getattr(resolved_opt, "spread_details", None) if has_opt else None
 
+    # Coordinate lower-timeframe fractal entry and 3-tier scale-out plan
+    fractal_dict = {}
+    try:
+        from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+        zone_buffer = 0.25 * atr_5m
+        htf_zone = (ltp + zone_buffer, ltp - zone_buffer)
+        fractal_bp = coordinate_fractal_entry(
+            symbol=clean_sym,
+            direction=direction,
+            htf_zone=htf_zone,
+            htf_target=t1_price,
+            df_ltf=df_5m,
+            ltp=ltp,
+        )
+        fractal_dict = fractal_bp.to_dict()
+        if isinstance(act_plan, dict):
+            act_plan["scale_out_plan"] = fractal_bp.scale_out_plan
+            act_plan["fractal_entry_type"] = fractal_bp.entry_type
+    except Exception as _e_frac:
+        logger.debug(f"[trend_day_continuation] Fractal coordination non-fatal: {_e_frac}")
+
     return AutoAlert(
         alert_id=alert_id,
         alert_type="TREND_DAY_PULLBACK",
@@ -719,6 +741,7 @@ def detect_trend_day_pullback(
             "vsa_signal": vsa_sig,
             "dmi_triple_verdict": dmi_verdict,
             "obv_regime": obv_div,
+            "fractal_blueprint": fractal_dict,
         },
         preferred_vehicle=pref_vehicle,
         no_chase_boundary=opt_no_chase if has_opt else resolved_no_chase,

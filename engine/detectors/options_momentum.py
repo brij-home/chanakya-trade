@@ -249,11 +249,39 @@ def detect_options_momentum_breakouts(
         except Exception as e_sym:
             logger.debug(f"[OptionsBreakout] Pre-filter error for {sym}: {e_sym}")
 
-    # Prioritize indices and top 10 highest-momentum single-stock options to eliminate rate-gate bottlenecks
+    # Prioritize indices and top highest-momentum single-stock options to eliminate rate-gate bottlenecks
+    # Apply RRG sector tailwind boost (bidirectional) so sector-driven runners (CE calls or PE puts) are prioritized
+    directional_sector_syms: dict[str, set[str]] = {"BULLISH": set(), "BEARISH": set()}
+    try:
+        from analysis.sector_rotation import get_directional_sector_constituents
+
+        directional_sector_syms = get_directional_sector_constituents()
+    except Exception as e_rrg_opt:
+        logger.debug(f"[OptionsBreakout] Sector RRG resolution error: {e_rrg_opt}")
+
+    bullish_sector_syms = directional_sector_syms.get("BULLISH", set())
+    bearish_sector_syms = directional_sector_syms.get("BEARISH", set())
+
+    def _eq_priority_score(t: dict[str, Any]) -> float:
+        spot_chg = float(t.get("spot_change_pct", 0.0) or 0.0)
+        base_chg = abs(spot_chg)
+        clean_s = t.get("clean_sym", "")
+        multiplier = 1.0
+        # Bidirectional sector boost:
+        # Long side: Positive move + Bullish sector confluence
+        # Short side: Negative move + Bearish sector breakdown confluence
+        if spot_chg > 0 and clean_s in bullish_sector_syms:
+            multiplier = 1.25
+        elif spot_chg < 0 and clean_s in bearish_sector_syms:
+            multiplier = 1.25
+        return base_chg * multiplier
+
     idx_targets = [t for t in active_targets if t["is_idx"]]
     eq_targets = [t for t in active_targets if not t["is_idx"]]
-    eq_targets.sort(key=lambda t: abs(t.get("spot_change_pct", 0.0)), reverse=True)
-    active_targets = idx_targets + eq_targets[:10]
+    eq_targets.sort(key=_eq_priority_score, reverse=True)
+    has_active_sectors = bool(bullish_sector_syms or bearish_sector_syms)
+    eq_limit = 15 if has_active_sectors else 10
+    active_targets = idx_targets + eq_targets[:eq_limit]
 
     def _eval_sym(sym_info: dict[str, Any]) -> Optional[tuple[float, AutoAlert]]:
         sym = sym_info["sym"]
@@ -369,8 +397,8 @@ def detect_options_momentum_breakouts(
             if is_idx:
                 atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
             else:
-                # Institutional Single-Stock High-Torque Sweet-Spot Scoring (Delta 0.38 - 0.48):
-                # Balances moneyness, turnover, and premium sweet-spot (1.2% - 3.5% of spot)
+                # Institutional Single-Stock High-Torque Sweet-Spot Scoring (Delta 0.35 - 0.50):
+                # Prioritizes ATM and immediate near-the-money contracts (for both Calls and Puts)
                 def _stock_strike_score(c):
                     c_strk = getattr(c, "strike", 0.0)
                     c_prem = float(getattr(c, "last_price", 0.0) or 0.0)
@@ -378,9 +406,11 @@ def detect_options_momentum_breakouts(
                     c_o = getattr(c, "oi", 0)
                     dist_p = abs(c_strk - spot) / max(1.0, spot)
                     prem_ratio = c_prem / max(1.0, spot)
-                    prem_score = max(0.0, 10.0 - abs(prem_ratio - 0.022) * 250.0)
+                    # Sweet-spot premium: Target 2.2% - 3.8% of spot to ensure Delta >= 0.35
+                    prem_score = max(0.0, 10.0 - abs(prem_ratio - 0.028) * 180.0)
                     turnover = min(15.0, (c_v / max(1, c_o)) * 5.0)
-                    return prem_score + turnover - (dist_p * 80.0)
+                    # Heavily penalize distance from spot so true ATM / nearest strikes win over distant OTM
+                    return prem_score + turnover - (dist_p * 120.0)
 
                 atm_contracts.sort(key=_stock_strike_score, reverse=True)
 

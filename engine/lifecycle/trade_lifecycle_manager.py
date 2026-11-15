@@ -423,7 +423,12 @@ class TradeLifecycleManager:
                 alert.initial_stop_loss = alert.stop_loss
 
             rec_stop = eval_res.recommended_stop
-            if eval_res.new_milestone in ("T1_ACHIEVED", "T0_5_ACHIEVED", "BREAKEVEN_LOCKED"):
+            if eval_res.new_milestone in (
+                "T1_ACHIEVED",
+                "T0_5_ACHIEVED",
+                "BREAKEVEN_LOCKED",
+                "DEAD_MONEY_BREAKEVEN",
+            ):
                 opt_prem = getattr(alert, "option_premium", None)
                 ref_entry = float(
                     opt_prem
@@ -527,13 +532,27 @@ class TradeLifecycleManager:
             "TARGET_ACHIEVED",
             "DE_RISK_0_5R",
             "BREAKEVEN_LOCKED",
+            "DEAD_MONEY_BREAKEVEN",
             "TRAIL_POST_SWEEP",
             "COMPRESS_STALL_RISK",
             "TIME_STOP_SCRATCH",
         ):
             if eval_res.new_milestone not in alert.achieved_milestones:
                 alert.achieved_milestones.append(eval_res.new_milestone)
-                if eval_res.new_milestone == "T1_ACHIEVED":
+                if eval_res.new_milestone == "DEAD_MONEY_BREAKEVEN":
+                    alert.is_breakeven_ratcheted = True
+                    if hasattr(alert, "record_audit"):
+                        alert.record_audit(
+                            "DEAD_MONEY_BREAKEVEN_RATCHET",
+                            f"60-minute consolidation dead-money ratchet to breakeven ({cs}{eval_res.recommended_stop:,.2f})",
+                            actor="TradeLifecycleManager",
+                            details={
+                                "recommended_stop": eval_res.recommended_stop,
+                                "pnl_pct": eval_res.pnl_pct,
+                                "r_multiple": eval_res.r_multiple,
+                            },
+                        )
+                elif eval_res.new_milestone == "T1_ACHIEVED":
                     if alert.metrics is None or not isinstance(alert.metrics, dict):
                         alert.metrics = {}
                     alert.metrics["free_roll_locked"] = True
@@ -594,6 +613,7 @@ class TradeLifecycleManager:
                         "T2_ACHIEVED": "WIN_T2",
                         "TARGET_ACHIEVED": "WIN_TARGET",
                         "BREAKEVEN_LOCKED": "BREAKEVEN",
+                        "DEAD_MONEY_BREAKEVEN": "BREAKEVEN",
                         "DE_RISK_0_5R": "DE_RISK",
                         "TRAIL_POST_SWEEP": "SWEEP_TRAIL",
                         "COMPRESS_STALL_RISK": "STALL_COMPRESS",
@@ -684,6 +704,9 @@ class TradeLifecycleManager:
         elif eval_res.new_milestone == "BREAKEVEN_LOCKED":
             alert.stage = "BREAKEVEN_LOCKED"
             alert.headline = f"🛡️ {env_tag} BREAKEVEN LOCKED (+0.8R FREE ROLL): {inst_label} SL → {cs}{eval_res.recommended_stop:,.2f} (Downside Eliminated)"
+        elif eval_res.new_milestone == "DEAD_MONEY_BREAKEVEN":
+            alert.stage = "BREAKEVEN_LOCKED"
+            alert.headline = f"🛡️ {env_tag} 60-MIN DEAD-MONEY RATCHET: {inst_label} SL → {cs}{eval_res.recommended_stop:,.2f} (Downside Eliminated)"
         elif eval_res.new_milestone == "DE_RISK_0_5R":
             alert.stage = "DE_RISK_0_5R"
             red_pct = getattr(eval_res, "risk_reduction_pct", 65.0)

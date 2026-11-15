@@ -378,6 +378,25 @@ def detect_smc_orderblock_retest(
             variant="bull",
         )
 
+        # Coordinate lower-timeframe fractal entry and 3-tier scale-out plan
+        fractal_dict = {}
+        scale_out_plan = {}
+        try:
+            from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+            fractal_bp = coordinate_fractal_entry(
+                symbol=clean_sym,
+                direction="BULLISH",
+                htf_zone=(ob.top, ob.bottom),
+                htf_target=t1,
+                df_ltf=df,
+                ltp=ltp,
+            )
+            fractal_dict = fractal_bp.to_dict()
+            scale_out_plan = fractal_bp.scale_out_plan
+        except Exception as _e_frac:
+            logger.debug(f"[smc_orderblock_retest] Fractal coordination non-fatal: {_e_frac}")
+
         headline = (
             f"🧲 SMC Demand OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
             f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
@@ -437,6 +456,7 @@ def detect_smc_orderblock_retest(
                 "has_flow": has_flow_bull,
                 "vsa_signal": vsa_sig_bull,
                 "obv_regime": obv_div_bull,
+                "fractal_blueprint": fractal_dict,
             },
             preferred_vehicle="NAKED_OPTION",
             actionable_plan={
@@ -450,6 +470,7 @@ def detect_smc_orderblock_retest(
                 "runner_target": f"₹{runner:,.2f}",
                 "no_chase_boundary": f"₹{ob.top:,.2f}",
                 "risk_reward": f"1:{rr_t2}",
+                "scale_out_plan": scale_out_plan,
                 "no_chase_rule": (
                     f"DO NOT ENTER above ₹{ob.top:,.2f} — "
                     f"OB mitigated once price closes above its top."
@@ -592,6 +613,27 @@ def detect_smc_orderblock_retest(
             variant="bear",
         )
 
+        # Coordinate lower-timeframe fractal entry and 3-tier scale-out plan
+        fractal_dict = {}
+        scale_out_plan = {}
+        try:
+            from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+            fractal_bp = coordinate_fractal_entry(
+                symbol=clean_sym,
+                direction="BEARISH",
+                htf_zone=(ob.top, ob.bottom),
+                htf_target=t1,
+                df_ltf=df,
+                ltp=ltp,
+            )
+            fractal_dict = fractal_bp.to_dict()
+            scale_out_plan = fractal_bp.scale_out_plan
+        except Exception as _e_frac:
+            logger.debug(
+                f"[smc_orderblock_retest] Bearish fractal coordination non-fatal: {_e_frac}"
+            )
+
         headline = (
             f"🔴 SMC Supply OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
             f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
@@ -651,6 +693,7 @@ def detect_smc_orderblock_retest(
                 "has_flow": has_flow_bear,
                 "vsa_signal": vsa_sig_bear,
                 "obv_regime": obv_div_bear,
+                "fractal_blueprint": fractal_dict,
             },
             preferred_vehicle="NAKED_OPTION",
             actionable_plan={
@@ -664,6 +707,7 @@ def detect_smc_orderblock_retest(
                 "runner_target": f"₹{runner:,.2f}",
                 "no_chase_boundary": f"₹{ob.bottom:,.2f}",
                 "risk_reward": f"1:{rr_t2}",
+                "scale_out_plan": scale_out_plan,
                 "no_chase_rule": (
                     f"DO NOT ENTER below ₹{ob.bottom:,.2f} — "
                     f"OB mitigated once price closes below its bottom."

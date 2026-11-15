@@ -279,6 +279,21 @@ class TestGetGiftNifty:
             get_gift_nifty(nifty_spot=24350.0)
             mock_fn.assert_called_once_with(24350.0)
 
+    def test_returns_composite_fallback_when_requested(self):
+        from market.gift_nifty import get_gift_nifty
+        from unittest.mock import MagicMock
+
+        mock_macro = MagicMock(implied_nifty_gap_pct=0.45)
+        with patch("market.gift_nifty._from_yfinance", return_value=None):
+            with patch("market.global_macro.fetch_global_macro_report", return_value=mock_macro):
+                res = get_gift_nifty(nifty_spot=24000.0, allow_composite_fallback=True)
+
+        assert res is not None
+        assert res.source == "global_macro_composite"
+        assert res.change_pct == 0.45
+        assert res.ltp == round(24000.0 * 1.0045, 1)
+        assert res.premium_pts == round(res.ltp - 24000.0, 1)
+
 
 # ── MarketSnapshot integration ────────────────────────────────────────────────
 

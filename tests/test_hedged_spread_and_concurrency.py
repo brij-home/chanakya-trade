@@ -469,8 +469,8 @@ class TestHedgeSpreadSpotResolutionRegression:
 
         # Document: strikes are phantom low — this is WRONG output
         assert buy_leg.strike < 1000, "Expected phantom low strike from wrong spot"
-        # And the net_cashflow is unrealistically small
-        assert abs(d["net_cashflow"]) < 500, (
+        # And the net_cashflow is unrealistically small (under ₹1,000 vs normal SENSEX spread of ₹20k+)
+        assert abs(d["net_cashflow"]) < 1000, (
             "Expected tiny cashflow from phantom strike — confirms guard is needed upstream"
         )
 

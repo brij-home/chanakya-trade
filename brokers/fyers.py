@@ -272,6 +272,39 @@ _REVERSE_WEEKLY_MONTH_MAP = {
 }
 
 
+def _get_fyers_contract_lot_size(symbol: str, underlying: str = "") -> int:
+    """Authoritatively resolve contract lot size from exchange symbol master, falling back to canonical F&O master."""
+    try:
+        from market.symbol_master import get_lot_size as _master_lot
+
+        lot = _master_lot(symbol)
+        if lot > 1:
+            return lot
+    except Exception as e_lot:
+        logger.debug(f"[fyers] Symbol master lot resolution fallback for {symbol}: {e_lot}")
+
+    try:
+        from market.instruments import get_fno_lot_size as _inst_lot
+
+        clean_und = (
+            underlying.upper()
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("-INDEX", "")
+            .strip()
+        )
+        lot = _inst_lot(clean_und)
+        if lot > 0:
+            return lot
+    except Exception as e_inst:
+        logger.debug(
+            f"[fyers] Instrument master lot resolution fallback for {underlying}: {e_inst}"
+        )
+
+    return 1
+
+
 def format_fyers_option_symbol(
     underlying: str,
     expiry_date: Any,
@@ -2200,7 +2233,11 @@ class FyersAPI(BrokerAPI):
                         vega=_parse_greek_val(greeks.get("vega")),
                         bid=float(item.get("bid", 0.0) or 0.0) or None,
                         ask=float(item.get("ask", 0.0) or 0.0) or None,
-                        lot_size=int(item.get("lotSize", 50) or 50),
+                        lot_size=(
+                            int(item.get("lotSize", 0) or 0)
+                            if int(item.get("lotSize", 0) or 0) > 1
+                            else (_get_fyers_contract_lot_size(item.get("symbol", ""), underlying))
+                        ),
                         exchange=(
                             "MCX"
                             if (

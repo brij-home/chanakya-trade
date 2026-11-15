@@ -153,7 +153,34 @@ def detect_defined_risk_neutral(
         except Exception as e_flow_neutral:
             logger.debug("Flow neutral analysis non-fatal: %s", e_flow_neutral)
 
-    # Condition: Must exhibit either low ADX, narrow intraday consolidation, flanking OI walls, or verified choppy flow
+    # 5. Central Pivot Range (CPR) & Value Area Mean-Reversion Geometry
+    is_inside_cpr = False
+    is_inside_camarilla = False
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        dl = get_daily_levels(symbol)
+        if dl:
+            if getattr(dl, "cpr", None):
+                cpr_dict = dl.cpr if isinstance(dl.cpr, dict) else {}
+                cpr_top = max(
+                    float(cpr_dict.get("tc", 0.0) or 0.0), float(cpr_dict.get("bc", 0.0) or 0.0)
+                )
+                cpr_bot = min(
+                    float(cpr_dict.get("tc", 0.0) or 0.0), float(cpr_dict.get("bc", 0.0) or 0.0)
+                )
+                if cpr_top > 0 and cpr_bot > 0 and (cpr_bot <= ltp <= cpr_top):
+                    is_inside_cpr = True
+            if getattr(dl, "camarilla", None):
+                cam_dict = dl.camarilla if isinstance(dl.camarilla, dict) else {}
+                h3 = float(cam_dict.get("h3", 0.0) or 0.0)
+                l3 = float(cam_dict.get("l3", 0.0) or 0.0)
+                if h3 > 0 and l3 > 0 and (l3 <= ltp <= h3):
+                    is_inside_camarilla = True
+    except Exception as e_cpr_neutral:
+        logger.debug("CPR/Camarilla neutral analysis non-fatal: %s", e_cpr_neutral)
+
+    # Condition: Must exhibit low ADX, narrow intraday consolidation, flanking OI walls, verified choppy flow, or inside CPR/Value Area
     evidence_score = 0
     if is_low_adx:
         evidence_score += 1
@@ -163,14 +190,45 @@ def detect_defined_risk_neutral(
         evidence_score += 1
     if is_flow_choppy:
         evidence_score += 1
+    if is_inside_cpr:
+        evidence_score += 1
+    if is_inside_camarilla:
+        evidence_score += 1
 
-    # Require at least 2 confirming range-bound signals (or index in low VIX with narrow range)
-    if evidence_score < 2 and not (ctx.is_index and vix <= 15.0 and is_narrow_day):
+    # Require at least 2 confirming range-bound signals (or index in low VIX <= 16.5 with narrow range)
+    if evidence_score < 2 and not (ctx.is_index and vix <= 16.5 and is_narrow_day):
         return None
 
     # Construct Iron Condor strategy
     lot_size = get_fno_lot_size(symbol)
     iv = max(0.10, min(0.35, vix / 100.0))
+
+    # Dynamic contract DTE resolution (defaults cleanly without hardcoding)
+    dte_val = 7
+    try:
+        raw_chain = ctx.option_chain
+        chain_contracts = (
+            raw_chain.contracts
+            if hasattr(raw_chain, "contracts")
+            else (raw_chain if isinstance(raw_chain, list) else [])
+        )
+        if chain_contracts:
+            exp_str = getattr(chain_contracts[0], "expiry", None)
+            if exp_str:
+                from engine.alert_expiry import _parse_expiry_date
+
+                exp_d = _parse_expiry_date(exp_str)
+                if exp_d:
+                    dte_val = max(0, (exp_d - datetime.now(IST).date()).days)
+        if dte_val == 7:
+            from market.calendar import get_nearest_weekly_expiry
+
+            n_exp = get_nearest_weekly_expiry(symbol)
+            if n_exp:
+                dte_val = max(0, (n_exp - datetime.now(IST).date()).days)
+    except Exception as e_dte:
+        logger.debug(f"[DefinedRiskNeutral] Error resolving dynamic DTE for {symbol}: {e_dte}")
+        dte_val = 7
 
     try:
         spread = build_defined_risk_spread(
@@ -178,7 +236,7 @@ def detect_defined_risk_neutral(
             spot_price=ltp,
             strategy="IRON_CONDOR",
             iv=iv,
-            dte=7,
+            dte=dte_val,
             lot_size=lot_size,
             num_lots=1,
         )
