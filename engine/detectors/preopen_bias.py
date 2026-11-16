@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 _BIAS_THRESHOLD_PCT = 0.30
 _STRONG_BIAS_PCT = 0.60
-_INDEX_UNIVERSE = frozenset({"NIFTY", "BANKNIFTY"})
+_INDEX_UNIVERSE = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
 
 
 def detect_preopen_bias(
@@ -313,7 +313,7 @@ def detect_preopen_stock_catalyst(
     symbol: str,
     preopen_price: float,
     prev_close: float,
-    direction_bias: str,
+    direction_bias: Optional[str] = None,
     sector_name: str = "",
     rrg_quadrant: str = "",
     min_gap_pct: float = 1.0,
@@ -334,9 +334,11 @@ def detect_preopen_stock_catalyst(
         return None
 
     is_bull = gap_pct > 0
-    # Must match direction_bias from Sector RRG
-    if (is_bull and direction_bias != "BULLISH") or (not is_bull and direction_bias != "BEARISH"):
-        return None
+    inferred_direction = "BULLISH" if is_bull else "BEARISH"
+    # If explicit sector direction_bias is provided and opposes the gap, require a decisive company catalyst gap (>= 2.0%)
+    if direction_bias and direction_bias != inferred_direction:
+        if abs_gap < 2.0:
+            return None
 
     now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")

@@ -73,6 +73,7 @@ def detect_turtle_soup_sweep(
     rvol: float = 1.0,
     session_date: Optional[date] = None,
     time_horizon: str = "INTRADAY",
+    change_pct: Optional[float] = None,
 ) -> Optional[AutoAlert]:
     """
     Scans for institutional liquidity sweep rejections (Turtle Soup)
@@ -161,21 +162,41 @@ def detect_turtle_soup_sweep(
     is_bullish = sweep_type == "BULLISH_SPRING"
     direction = "BULLISH" if is_bullish else "BEARISH"
 
-    # ── VWAP Trend Alignment Guard ──
+    # ── Trend Day & Relative Strength Alignment Guard ──
+    session_open_move_pct = 0.0
+    if len(o_s) > 0 and float(o_s.iloc[0]) > 0:
+        session_open_move_pct = (curr_ltp - float(o_s.iloc[0])) / float(o_s.iloc[0]) * 100.0
+
+    eff_chg = change_pct if change_pct is not None else session_open_move_pct
+
     effective_vwap = vwap if (vwap and vwap > 0) else None
     if effective_vwap:
-        if is_bullish and curr_ltp < effective_vwap * 0.985:
-            logger.debug(
-                f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Deeply submerged below VWAP "
-                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
-            )
-            return None
-        if not is_bullish and curr_ltp > effective_vwap * 1.015:
-            logger.debug(
-                f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
-                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
-            )
-            return None
+        if is_bullish:
+            if curr_ltp < effective_vwap * 0.998 and eff_chg <= -0.80:
+                logger.info(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Trend Day Lockout "
+                    f"(Stock is down {eff_chg:.2f}% and submerged below VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+            if curr_ltp < effective_vwap * 0.985:
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Deeply submerged below VWAP "
+                    f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+        else:
+            if curr_ltp > effective_vwap * 1.002 and eff_chg >= 0.80:
+                logger.info(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Trend Day Lockout "
+                    f"(Stock is up {eff_chg:.2f}% and holding firmly above VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+            if curr_ltp > effective_vwap * 1.010:
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
+                    f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
 
     # ── Microstructure / TBT 50-Depth Order Book Confirmation ──
     try:

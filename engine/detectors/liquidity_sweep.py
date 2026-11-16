@@ -90,6 +90,7 @@ def detect_predator_liquidity_sweep(
     time_horizon: str = "INTRADAY",
     pdh: Optional[float] = None,
     pdl: Optional[float] = None,
+    change_pct: Optional[float] = None,
 ) -> Optional[AutoAlert]:
     """
     Scans for institutional liquidity sweeps reversing retail false breakouts
@@ -174,6 +175,45 @@ def detect_predator_liquidity_sweep(
     # Check Order Book Imbalance / Flow Absorption Confirmation
     effective_obi = obi_50 if obi_50 is not None else _get_order_book_imbalance_hint(clean_sym)
     is_bullish = sweep_type == "BULLISH_PREDATOR_SPRING"
+
+    # ── Trend Day & Relative Strength Alignment Guard ──
+    effective_vwap = vwap if (vwap and vwap > 0) else None
+    session_open_move_pct = 0.0
+    if len(o_s) > 0 and float(o_s.iloc[0]) > 0:
+        session_open_move_pct = (curr_ltp - float(o_s.iloc[0])) / float(o_s.iloc[0]) * 100.0
+
+    eff_chg = change_pct if change_pct is not None else session_open_move_pct
+
+    if not is_bullish:
+        # Bearish Predator Upthrust (buying Puts / fading a high):
+        # Veto if stock is in a strong uptrend above VWAP (e.g. KALYANKJIL +3.1%, TATACONSUM +2.4%)
+        if effective_vwap and curr_ltp > effective_vwap * 1.002 and eff_chg >= 0.80:
+            logger.info(
+                f"[liquidity_sweep] Suppressed bearish upthrust on {clean_sym}: Trend Day Lockout "
+                f"(Stock is up {eff_chg:.2f}% and holding firmly above VWAP ₹{effective_vwap:.2f})"
+            )
+            return None
+        if effective_vwap and curr_ltp > effective_vwap * 1.010:
+            logger.info(
+                f"[liquidity_sweep] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
+                f"(Spot ₹{curr_ltp:.2f} vs VWAP ₹{effective_vwap:.2f})"
+            )
+            return None
+    else:
+        # Bullish Predator Spring (buying Calls / catching a low):
+        # Veto if stock is in a strong downtrend below VWAP (e.g. TMPV -8%, INOXWIND -7%)
+        if effective_vwap and curr_ltp < effective_vwap * 0.998 and eff_chg <= -0.80:
+            logger.info(
+                f"[liquidity_sweep] Suppressed bullish spring on {clean_sym}: Trend Day Lockout "
+                f"(Stock is down {eff_chg:.2f}% and submerged below VWAP ₹{effective_vwap:.2f})"
+            )
+            return None
+        if effective_vwap and curr_ltp < effective_vwap * 0.990:
+            logger.info(
+                f"[liquidity_sweep] Suppressed bullish spring on {clean_sym}: Extended low below VWAP "
+                f"(Spot ₹{curr_ltp:.2f} vs VWAP ₹{effective_vwap:.2f})"
+            )
+            return None
 
     # Absorption filter: if OBI is available, it must confirm or at least not strongly oppose
     if effective_obi is not None:

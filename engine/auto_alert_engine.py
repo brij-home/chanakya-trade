@@ -16200,7 +16200,7 @@ class AutoAlertEngine:
                     else 0.0
                 )
 
-                if (prev_day_low_val <= 0 or prev_day_high_val <= 0) and is_sym_index:
+                if prev_day_low_val <= 0 or prev_day_high_val <= 0:
                     try:
                         from market.history import get_ohlcv
 
@@ -17011,7 +17011,13 @@ class AutoAlertEngine:
             vol = float(getattr(q, "volume", 0.0) or 0.0)
             ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
             turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
-            is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
+            from engine.position_sizer import get_lot_size
+
+            lot_sz = get_lot_size(sym) or 1
+            is_fno = lot_sz > 1
+            is_liquid = (
+                (vol > 300000) or (turnover_cr >= 10.0) or (is_fno and (vol / max(1, lot_sz) >= 60))
+            )
             return chg * (1.5 if is_liquid else 1.0)
 
         return sorted(candidates, key=_v_score, reverse=True)
@@ -17117,6 +17123,7 @@ class AutoAlertEngine:
                 ltp = 0.0
 
                 vwap = None
+                chg_pct = None
 
                 if quotes_map:
                     q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
@@ -17125,6 +17132,7 @@ class AutoAlertEngine:
                         ltp = float(q.last_price)
 
                         vwap = getattr(q, "vwap", None)
+                        chg_pct = getattr(q, "change_pct", None)
 
                 from engine.market_matrix import get_market_matrix
 
@@ -17145,6 +17153,7 @@ class AutoAlertEngine:
                     ltp=ltp,
                     vwap=vwap,
                     exchange=exch,
+                    change_pct=chg_pct,
                 )
 
             except Exception as e:
@@ -17408,6 +17417,7 @@ class AutoAlertEngine:
                 ltp = 0.0
 
                 vwap = None
+                chg_pct = None
 
                 if quotes_map:
                     q = quotes_map.get(f"{exch}:{sym}") or quotes_map.get(sym)
@@ -17416,6 +17426,7 @@ class AutoAlertEngine:
                         ltp = float(q.last_price)
 
                         vwap = getattr(q, "vwap", None)
+                        chg_pct = getattr(q, "change_pct", None)
 
                 from engine.market_matrix import get_market_matrix
 
@@ -17436,6 +17447,7 @@ class AutoAlertEngine:
                     ltp=ltp,
                     vwap=vwap,
                     exchange=exch,
+                    change_pct=chg_pct,
                 )
 
             except Exception as e:
@@ -20275,70 +20287,80 @@ class AutoAlertEngine:
                 from analysis.universe import THEMATIC_PRESETS
 
                 watched_candidates = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])[
-                    :35
+                    :50
                 ]
 
-            for s_sym in watched_candidates[:30]:
-                s_clean = s_sym.upper()
+            pre_quotes = self._get_cycle_quotes(watched_candidates) or {}
+            scored_candidates: list[tuple[float, str, float, float, Optional[str]]] = []
+
+            for s_sym in watched_candidates:
+                s_clean = s_sym.upper().replace(".NS", "").replace("NSE:", "").strip()
                 dir_bias = (
                     "BULLISH"
                     if s_clean in bull_syms
                     else ("BEARISH" if s_clean in bear_syms else None)
                 )
-                if not dir_bias:
-                    continue
 
-                dl_level = daily_levels_store.get(s_clean)
-                preopen_px = (
-                    float(
-                        getattr(dl_level, "preopen_price", 0.0)
-                        or getattr(dl_level, "open", 0.0)
+                q_obj = (
+                    pre_quotes.get(f"NSE:{s_clean}")
+                    or pre_quotes.get(s_clean)
+                    or pre_quotes.get(s_sym)
+                )
+                preopen_px = 0.0
+                prev_c = 0.0
+                if q_obj:
+                    preopen_px = float(
+                        getattr(q_obj, "open", 0.0)
+                        or getattr(q_obj, "last_price", 0.0)
+                        or getattr(q_obj, "ltp", 0.0)
                         or 0.0
                     )
-                    if dl_level
-                    else 0.0
-                )
-                prev_c = (
-                    float(
-                        getattr(dl_level, "prev_close", 0.0)
-                        or getattr(dl_level, "close", 0.0)
-                        or 0.0
+                    prev_c = float(
+                        getattr(q_obj, "prev_close", 0.0) or getattr(q_obj, "close", 0.0) or 0.0
                     )
-                    if dl_level
-                    else 0.0
-                )
-
-                if preopen_px <= 0 or prev_c <= 0:
-                    from market.quotes import get_quote
-
-                    raw_q = get_quote(f"NSE:{s_clean}")
-                    q_obj = raw_q.get(f"NSE:{s_clean}") if isinstance(raw_q, dict) else raw_q
-                    if q_obj:
+                else:
+                    dl_level = daily_levels_store.get(s_clean)
+                    if dl_level:
                         preopen_px = float(
-                            getattr(q_obj, "open", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
+                            getattr(dl_level, "preopen_price", 0.0)
+                            or getattr(dl_level, "open", 0.0)
+                            or 0.0
                         )
                         prev_c = float(
-                            getattr(q_obj, "prev_close", 0.0) or getattr(q_obj, "close", 0.0) or 0.0
+                            getattr(dl_level, "prev_close", 0.0)
+                            or getattr(dl_level, "close", 0.0)
+                            or 0.0
                         )
 
                 if preopen_px > 0 and prev_c > 0:
-                    sec_name = STOCK_SECTOR_MAP.get(s_clean, "Sector")
-                    cat_alert = detect_preopen_stock_catalyst(
-                        symbol=s_clean,
-                        preopen_price=preopen_px,
-                        prev_close=prev_c,
-                        direction_bias=dir_bias,
-                        sector_name=sec_name,
-                        rrg_quadrant=(
-                            "LEADING/IMPROVING" if dir_bias == "BULLISH" else "LAGGING/WEAKENING"
-                        ),
-                        min_gap_pct=1.0,
-                    )
-                    if cat_alert and self.record_alert(cat_alert):
-                        found.append(cat_alert)
-                        logger.info(
-                            f"[AutoAlertEngine] 🌅 Pre-Open Stock Catalyst fired: {cat_alert.headline}"
+                    g_pct = abs((preopen_px - prev_c) / prev_c * 100.0)
+                    if g_pct >= 1.0:
+                        scored_candidates.append((g_pct, s_clean, preopen_px, prev_c, dir_bias))
+
+            # Rank by uncrossing gap magnitude and take top 10 most explosive pre-market candidates
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            for _, s_clean, preopen_px, prev_c, dir_bias in scored_candidates[:10]:
+                sec_name = STOCK_SECTOR_MAP.get(s_clean, "Sector")
+                cat_alert = detect_preopen_stock_catalyst(
+                    symbol=s_clean,
+                    preopen_price=preopen_px,
+                    prev_close=prev_c,
+                    direction_bias=dir_bias,
+                    sector_name=sec_name,
+                    rrg_quadrant=(
+                        "LEADING/IMPROVING"
+                        if dir_bias == "BULLISH"
+                        else (
+                            "LAGGING/WEAKENING" if dir_bias == "BEARISH" else "MOMENTUM_EXPANSION"
                         )
+                    ),
+                    min_gap_pct=1.0,
+                )
+                if cat_alert and self.record_alert(cat_alert):
+                    found.append(cat_alert)
+                    logger.info(
+                        f"[AutoAlertEngine] 🌅 Pre-Open Stock Catalyst fired: {cat_alert.headline}"
+                    )
         except Exception as e_stock_pre:
             logger.debug(f"[AutoAlertEngine] Pre-open stock catalyst scan error: {e_stock_pre}")
 
@@ -22624,7 +22646,15 @@ class AutoAlertEngine:
 
                     turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
 
-                    is_liquid = (vol > 500000) or (turnover_cr >= 15.0)
+                    from engine.position_sizer import get_lot_size
+
+                    lot_sz = get_lot_size(sym) or 1
+                    is_fno = lot_sz > 1
+                    is_liquid = (
+                        (vol > 300000)
+                        or (turnover_cr >= 10.0)
+                        or (is_fno and (vol / max(1, lot_sz) >= 60))
+                    )
 
                     return chg * (1.5 if is_liquid else 1.0)
 

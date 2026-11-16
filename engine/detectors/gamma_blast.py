@@ -227,18 +227,28 @@ def detect_gamma_blast(
         ((day_high - spot) / max(1.0, spot) * 100) if (day_high and spot <= day_high) else 0.0
     )
 
+    # ── PDH / PDL Liquidity Sweep Detection (Strict Fail-Closed) ───────────────
+    # Detects when spot has swept previous session extreme (PDL/PDH) and rejected/bounced
+    # — the highest-conviction SMC reversal signal.
+    # An active PDL sweep REQUIRES:
+    #   1. prev_day_low exists (> 0)
+    #   2. day_low pierced or tested within 0.60% of prev_day_low
+    #   3. Spot has bounced >= 0.10% off session low and reclaimed back above PDL (spot >= prev_day_low * 0.999)
+    # Strict Fail-Closed: If prev_day_low is None/0, PDL sweep CANNOT be claimed!
     _pdl_tested = bool(
         prev_day_low
         and prev_day_low > 0
         and day_low
         and day_low <= (prev_day_low * 1.002)
-        and (prev_day_low - day_low) / prev_day_low * 100 <= 0.40
-    ) or bool(day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100 >= 0.15)
+        and (prev_day_low - day_low) / prev_day_low * 100 <= 0.60
+    )
 
     _pdl_sweep_active = bool(
         _pdl_tested
+        and prev_day_low
+        and prev_day_low > 0
         and _spot_bounce_from_low >= 0.10  # Requires verified bounce off session low!
-        and (not prev_day_low or spot >= prev_day_low * 0.999)  # Reclaiming back above PDL
+        and spot >= prev_day_low * 0.999  # Reclaiming back above PDL
     )
 
     _pdh_tested = bool(
@@ -246,13 +256,15 @@ def detect_gamma_blast(
         and prev_day_high > 0
         and day_high
         and day_high >= (prev_day_high * 0.998)
-        and (day_high - prev_day_high) / prev_day_high * 100 <= 0.40
-    ) or bool(day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100 >= 0.15)
+        and (day_high - prev_day_high) / prev_day_high * 100 <= 0.60
+    )
 
     _pdh_sweep_active = bool(
         _pdh_tested
+        and prev_day_high
+        and prev_day_high > 0
         and _spot_pullback_from_high >= 0.10  # Requires verified rejection off session high!
-        and (not prev_day_high or spot <= prev_day_high * 1.001)  # Holding back below PDH
+        and spot <= prev_day_high * 1.001  # Holding back below PDH
     )
 
     # ── PDL / PDH Proximity Gates (Previous Session Levels) ─────────────────────
@@ -543,7 +555,7 @@ def detect_gamma_blast(
         ):
             continue
 
-        # Index Call Writer Defense Guard:
+        # Institutional Call Writer Defense Gate (Universal for Indices & Stock F&O):
         # If strike is OTM (strike_diff_pct > 0.15%), positive ΔOI represents institutional Call WRITING
         # (building an overhead resistance ceiling to cap the rally). A true long CE gamma blast requires either:
         # 1. Writer capitulation (oi_change < 0), OR
@@ -554,6 +566,23 @@ def detect_gamma_blast(
                 f"(ΔOI: +{oi_change:,}) represents institutional resistance writing, not buyer gamma blast."
             )
             continue
+
+        # Single-Stock F&O Call Resistance Writing Gate:
+        # When a stock is trading below VWAP (or in an intraday markdown), expanding Call OI (+ΔOI) is
+        # definitive Short Call Buildup (institutional resistance writing). Veto long CE buying traps!
+        if not is_index and oi_change > 0:
+            if spot < effective_vwap:
+                logger.debug(
+                    f"[GammaBlast CE] Rejected {contract_sym}: Stock {clean_sym} spot ₹{spot:.2f} < VWAP ₹{effective_vwap:.2f} "
+                    f"with expanding Call OI (ΔOI: +{oi_change:,}) represents Short Call Buildup resistance, not buyer accumulation."
+                )
+                continue
+            if strike_diff_pct > 0.35 and spot < (effective_vwap * 1.002):
+                logger.debug(
+                    f"[GammaBlast CE] Rejected {contract_sym}: Stock {clean_sym} OTM Call (+{strike_diff_pct:.2f}%) "
+                    f"with expanding Call OI (ΔOI: +{oi_change:,}) without VWAP breakout momentum represents resistance writing."
+                )
+                continue
 
         is_oi_shedding = (
             oi_change < 0
@@ -1341,7 +1370,7 @@ def detect_gamma_blast(
         ):
             continue
 
-        # Index Put Writer Defense Guard:
+        # Institutional Put Writer Defense Gate (Universal for Indices & Stock F&O):
         # If strike is OTM (strike_diff_pct < -0.15%), positive ΔOI represents institutional Put WRITING
         # (building a support floor to absorb selling). A true long PE gamma blast requires either:
         # 1. Writer capitulation (oi_change < 0), OR
@@ -1352,6 +1381,23 @@ def detect_gamma_blast(
                 f"(ΔOI: +{oi_change:,}) represents institutional support writing, not buyer gamma blast."
             )
             continue
+
+        # Single-Stock F&O Put Support Writing Gate:
+        # When a stock is trading above VWAP (or in an intraday markup), expanding Put OI (+ΔOI) is
+        # definitive Short Put Buildup (institutional support writing). Veto long PE buying traps!
+        if not is_index and oi_change > 0:
+            if spot > effective_vwap:
+                logger.debug(
+                    f"[GammaBlast PE] Rejected {contract_sym}: Stock {clean_sym} spot ₹{spot:.2f} > VWAP ₹{effective_vwap:.2f} "
+                    f"with expanding Put OI (ΔOI: +{oi_change:,}) represents Short Put Buildup support, not breakdown panic."
+                )
+                continue
+            if strike_diff_pct < -0.35 and spot > (effective_vwap * 0.998):
+                logger.debug(
+                    f"[GammaBlast PE] Rejected {contract_sym}: Stock {clean_sym} OTM Put ({strike_diff_pct:.2f}%) "
+                    f"with expanding Put OI (ΔOI: +{oi_change:,}) without VWAP breakdown momentum represents support writing."
+                )
+                continue
 
         is_oi_shedding = (
             oi_change < 0
