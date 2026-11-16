@@ -803,52 +803,6 @@ def detect_index_call_setup(
                     else 0.0
                 )
 
-                _gap_from_dl = False
-                if dl and hasattr(dl, "pre_open") and isinstance(dl.pre_open, dict):
-                    try:
-                        _gap_from_dl = float(dl.pre_open.get("gap_pct", 0.0) or 0.0) >= 0.70
-                    except (ValueError, TypeError):
-                        _gap_from_dl = False
-                _gap_from_prev_close = bool(
-                    prev_close
-                    and prev_close > 0
-                    and (spot - prev_close) / prev_close * 100.0 >= 0.80
-                )
-                is_gap_day = bool(
-                    _gap_from_dl
-                    or _gap_from_prev_close
-                    or (
-                        _day_open_price_ce
-                        and (
-                            (
-                                prev_close
-                                and prev_close > 0
-                                and _day_open_price_ce >= prev_close * 1.008
-                            )
-                            or (h4 > 0 and _day_open_price_ce >= h4 * 0.999)
-                            or (h5 > 0 and _day_open_price_ce >= h5 * 0.998)
-                        )
-                    )
-                )
-
-                _is_h5_expansion = bool(
-                    h5 > 0
-                    and spot >= h5 * 0.9990
-                    and (
-                        is_breakout_momentum
-                        or is_explosive_momentum
-                        or _is_opening_displacement
-                        or _has_structural_reversal
-                        or is_gap_day
-                    )
-                    and (effective_vwap and spot > effective_vwap * 0.9985)
-                )
-                if h5 > 0 and spot >= h5 * 0.9990 and not is_gap_day:
-                    logger.info(
-                        f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
-                        f"Rally statistically exhausted. Suppressing long call setup."
-                    )
-                    return []
                 candle_range = 0.0
                 upper_wick_ratio = 0.0
                 lower_wick_ratio = 0.0
@@ -874,6 +828,74 @@ def detect_index_call_setup(
                         logger.debug(
                             f"[IndexCallSetup] Candle wick ratio calculation failed: {e_wick}"
                         )
+
+                _gap_from_dl = False
+                if dl and hasattr(dl, "pre_open") and isinstance(dl.pre_open, dict):
+                    try:
+                        _gap_from_dl = float(dl.pre_open.get("gap_pct", 0.0) or 0.0) >= 0.70
+                    except (ValueError, TypeError):
+                        _gap_from_dl = False
+                # True gap day requires session opening price to gap up >= 0.80% above previous close.
+                # Do NOT measure spot vs prev_close as a gap; an intraday rally to H5 is runway consumption, not a gap day!
+                _gap_from_prev_close = bool(
+                    prev_close
+                    and prev_close > 0
+                    and _day_open_price_ce
+                    and (_day_open_price_ce - prev_close) / prev_close * 100.0 >= 0.80
+                )
+                is_gap_day = bool(
+                    _gap_from_dl
+                    or _gap_from_prev_close
+                    or (
+                        _day_open_price_ce
+                        and (
+                            (
+                                prev_close
+                                and prev_close > 0
+                                and _day_open_price_ce >= prev_close * 1.008
+                            )
+                            or (h4 > 0 and _day_open_price_ce >= h4 * 0.999)
+                            or (h5 > 0 and _day_open_price_ce >= h5 * 0.998)
+                        )
+                    )
+                )
+
+                # Camarilla H5 is the ultimate statistical target of an H4 breakout.
+                # If spot has reached/penetrated H5, the breakout move is statistically complete (>80% mean-reversion risk).
+                # Only allow expansion if in an active gap regime holding strictly above VWAP without upper rejection wicks.
+                is_h5_wick_rejection = upper_wick_ratio >= 0.25
+                is_vwap_overextended_h5 = bool(
+                    effective_vwap
+                    and effective_vwap > 0
+                    and (spot - effective_vwap) / effective_vwap * 100.0 >= 0.40
+                )
+                _is_h5_expansion = bool(
+                    h5 > 0
+                    and spot >= h5 * 0.9990
+                    and is_gap_day
+                    and not is_h5_wick_rejection
+                    and not is_vwap_overextended_h5
+                    and (
+                        is_breakout_momentum
+                        or is_explosive_momentum
+                        or _is_opening_displacement
+                        or _has_structural_reversal
+                    )
+                    and (effective_vwap and spot > effective_vwap * 0.9985)
+                )
+                if h5 > 0 and spot >= h5 * 0.9990:
+                    if not is_gap_day:
+                        logger.info(
+                            f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
+                            f"Rally statistically exhausted. Suppressing long call setup."
+                        )
+                        return []
+                    elif is_h5_wick_rejection or is_vwap_overextended_h5:
+                        logger.info(
+                            f"[IndexCallSetup] Camarilla H5 Exhaustion Rejection: Spot ₹{spot:,.1f} testing H5 ₹{h5:,.1f} "
+                            f"with upper rejection wick ({upper_wick_ratio:.2f}) or VWAP overextension. Suppressing long call setup."
+                        )
+                        return []
                 if atr > 0 and day_low > 0:
                     up_move = spot - day_low
                     is_trend_expansion = bool(
@@ -972,9 +994,10 @@ def detect_index_call_setup(
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
     hbcm_dict: dict[str, Any] = {}
+    idx_polarization = None
     try:
         from engine.hbcm import evaluate_hbcm
-        from market.indices import get_heavyweights_posture
+        from market.indices import get_heavyweights_posture, get_index_polarization
 
         is_hw_mocked = (
             hasattr(get_heavyweights_posture, "assert_called")
@@ -983,6 +1006,20 @@ def detect_index_call_setup(
         )
 
         hw_posture = get_heavyweights_posture(clean_sym)
+        try:
+            idx_polarization = get_index_polarization(clean_sym)
+        except Exception as _e_pol:
+            logger.debug(f"[IndexCallSetup] Polarization check skipped: {_e_pol}")
+
+        # Heavyweight Tug-of-War Gridlock Invariant:
+        # If the index is in a locomotive split (e.g. HDFCBANK up vs ICICIBANK down) or Tug-of-War chop:
+        if idx_polarization and idx_polarization.is_polarized:
+            logger.info(
+                f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweights in Tug-of-War Gridlock "
+                f"({idx_polarization.summary}). Directional breakout and expansion attempts fail in polarized chop."
+            )
+            return []
+
         # Pass allow_weighted_fallback when momentum is active or V-bottom escape is triggered so that
         # 3/5 heavyweights with >= 55% combined weight can satisfy the confluence gate on fast rally days.
         _allow_weighted = is_explosive_momentum or is_breakout_momentum or _breadth_bypassed
@@ -997,23 +1034,31 @@ def detect_index_call_setup(
             hbcm_res.summary or ""
         ).startswith("HBCM_TEST_PASSTHROUGH")
         if has_hbcm_quotes:
-            if not hbcm_res.confluence_pass:
-                bull_wt = sum(
-                    float(c.get("weight_pct", 0.0) or 0.0)
-                    for c in (hbcm_res.constituents or [])
-                    if c.get("posture") == "BULLISH"
-                )
-                bear_wt = sum(
-                    float(c.get("weight_pct", 0.0) or 0.0)
-                    for c in (hbcm_res.constituents or [])
-                    if c.get("posture") == "BEARISH"
-                )
+            bull_wt = sum(
+                float(c.get("weight_pct", 0.0) or 0.0)
+                for c in (hbcm_res.constituents or [])
+                if c.get("posture") == "BULLISH"
+            )
+            bear_wt = sum(
+                float(c.get("weight_pct", 0.0) or 0.0)
+                for c in (hbcm_res.constituents or [])
+                if c.get("posture") == "BEARISH"
+            )
 
-                # Institutional Grounding Invariant: Never bypass HBCM if 4 or 5 heavyweights are bearish!
-                if hbcm_res.bearish_count >= 4:
+            if not hbcm_res.confluence_pass:
+                # Institutional Grounding Invariant: Never bypass HBCM if 3 or more heavyweights are bearish!
+                if hbcm_res.bearish_count >= 3:
                     logger.info(
                         f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Majority of heavyweights are bearish "
                         f"({hbcm_res.bearish_count}/5 bears). HBCM bypass strictly forbidden."
+                    )
+                    return []
+
+                # Weight Dominance Invariant: If bearish constituents outweigh bullish ones, suppress breakout calls
+                if bear_wt > bull_wt and hbcm_res.bearish_count > hbcm_res.bullish_count:
+                    logger.info(
+                        f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweight weight is net bearish "
+                        f"(Bear wt {bear_wt:.1f}% vs Bull wt {bull_wt:.1f}%). HBCM bypass strictly forbidden."
                     )
                     return []
 
@@ -1026,25 +1071,22 @@ def detect_index_call_setup(
                         and (bull_wt >= bear_wt or hbcm_res.bullish_count > hbcm_res.bearish_count)
                     )
                 )
-                # Fix #4 (P1): Explosive Momentum HBCM Bypass
-                # Heavyweights LAG the index by 1-3 minutes during fast institutional breakouts.
-                # When option momentum is explosive (vol/OI ≥ 3.0x or CE premium +25%+), the market
-                # has voted with order flow. Lower the HBCM bar to ≥ 1 bullish heavyweight so we
-                # fire 2-4 min earlier — before 80% of the option move is gone.
+                # Explosive Momentum & ROC acceleration bypass requires at least 2 aligned locomotives
+                # and net positive or equal weight. A single stock rally (e.g. HDFC alone while other banks languish)
+                # is a distribution trap, not an institutional index breakout.
                 _explosive_momentum_hbcm_pass = (
                     is_explosive_momentum
-                    and hbcm_res.bullish_count >= 1  # at least one locomotive aligned
-                    and not getattr(hbcm_res, "all_bearish", False)  # not all heavies fighting
+                    and hbcm_res.bullish_count >= 2  # at least 2 locomotives aligned
+                    and hbcm_res.bearish_count < 3
+                    and bull_wt >= bear_wt
+                    and not getattr(hbcm_res, "all_bearish", False)
                 )
-                # Fix #7: ROC Momentum Acceleration HBCM Bypass
-                # Continuous accelerating positive ROC (d²P/dt² > 0) with meaningful magnitude
-                # confirms institutional thrust. Heavyweights lag during impulse rallies;
-                # as long as at least 1 heavyweight is pulling (bullish_count >= 1) and not all
-                # heavyweights are bearish, allow the CE setup.
                 _roc_hbcm_pass = (
                     roc_metric.is_accelerating_up
                     and roc_metric.is_meaningful_up
-                    and hbcm_res.bullish_count >= 1
+                    and hbcm_res.bullish_count >= 2
+                    and hbcm_res.bearish_count < 3
+                    and bull_wt >= bear_wt
                     and not getattr(hbcm_res, "all_bearish", False)
                 )
                 if not (_v_bottom_hbcm_pass or _explosive_momentum_hbcm_pass or _roc_hbcm_pass):
@@ -1093,6 +1135,40 @@ def detect_index_call_setup(
                         f"[IndexCallSetup] V-Bottom Price Action Confluence: Allowed CE setup on {clean_sym} "
                         f"with {hbcm_res.bullish_count}/5 bullish heavyweights (V-bottom bounce overrides lagging constituent)."
                     )
+
+        # ── Institutional Futures Basis Divergence Gate ─────────────────────────
+        # Reject long call breakout setups if near-month index futures are trading at a steep discount to spot
+        # (basis = futures - spot < -25 pts for Bank Nifty/Sensex, < -10 pts for Nifty).
+        # A negative futures basis during an index rally proves institutional proprietary selling in the futures contract.
+        try:
+            from market.indices import get_index_futures_snapshot
+
+            fut_snap = get_index_futures_snapshot(clean_sym)
+            if fut_snap and fut_snap.get("status") in ("REAL_LIVE", "DEGRADED_CACHED"):
+                fut_basis = fut_snap.get("basis")
+                min_discount_cutoff = (
+                    -25.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else -10.0
+                )
+                if fut_basis is not None and fut_basis < min_discount_cutoff:
+                    _near_resistance = (
+                        (day_high and spot and (day_high - spot) / max(1.0, spot) * 100.0 <= 0.35)
+                        or (h5 and spot >= (h5 * 0.998))
+                        or (h4 and spot >= (h4 * 0.998))
+                        or (
+                            prev_day_high
+                            and spot
+                            and (prev_day_high - spot) / max(1.0, spot) * 100.0 <= 0.35
+                        )
+                    )
+                    if _near_resistance:
+                        logger.info(
+                            f"[IndexCallSetup] Suppressed CE on {clean_sym}: Bearish Futures Basis Divergence "
+                            f"(Basis {fut_basis:+.1f} pts < {min_discount_cutoff:.1f} pts vs spot ₹{spot:,.1f}). "
+                            f"Institutional futures selling discount invalidates long call breakout."
+                        )
+                        return []
+        except Exception as e_basis:
+            logger.debug(f"[IndexCallSetup] Futures basis check notice: {e_basis}")
         else:
             if not is_test_runner or is_hw_mocked:
                 active_hw = hw_posture.get("heavyweights", [])
@@ -1365,7 +1441,10 @@ def detect_index_call_setup(
             except (ValueError, TypeError):
                 _gap_from_dl_late = False
         _gap_from_prev_close_late = bool(
-            prev_close and prev_close > 0 and (spot - prev_close) / prev_close * 100.0 >= 0.80
+            prev_close
+            and prev_close > 0
+            and _day_open_price_ce
+            and (_day_open_price_ce - prev_close) / prev_close * 100.0 >= 0.80
         )
         is_gap_day_late = bool(
             _gap_from_dl_late
@@ -1379,11 +1458,17 @@ def detect_index_call_setup(
                 )
             )
         )
-        if spot >= cam_h5 * 0.9990 and not is_gap_day_late:
-            logger.info(
-                f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{cam_h5:,.1f}."
-            )
-            return []
+        if spot >= cam_h5 * 0.9990:
+            if not is_gap_day_late:
+                logger.info(
+                    f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{cam_h5:,.1f}."
+                )
+                return []
+            elif effective_vwap and (spot - effective_vwap) / effective_vwap * 100.0 >= 0.40:
+                logger.info(
+                    f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} at Camarilla H5 ₹{cam_h5:,.1f} overextended above VWAP."
+                )
+                return []
 
         # Terminal ADR Exhaustion Check:
         # If in the afternoon session (>= 13:30 IST) and spot has rallied >= 1.25x the daily range from day low:
@@ -2940,11 +3025,7 @@ def detect_index_call_setup(
         if opt_plan
         else round(opt_ltp * 0.012 + 0.35, 2)
     )
-    max_loss_rupees = (
-        opt_plan.get("max_loss_per_lot", round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0))
-        if opt_plan
-        else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
-    )
+    max_loss_rupees = round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
     t1_pct = round(((t1_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else 30.0
 
     # ── Synthetic Spot-Anchored Stop Loss Engine ─────────────────
@@ -3245,13 +3326,36 @@ def detect_index_call_setup(
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
 
-    # ── Liquidity Audit ─────────────────────────────────────────
+    # ── Liquidity Audit & Execution Friction Invariant ──────────────────────
     try:
         from market.options import audit_option_liquidity
 
         liq_audit = audit_option_liquidity(best_ce, underlying=underlying, lot_size=lot_sz)
     except Exception:
         liq_audit = {"liquidity_status": "UNKNOWN", "bid_ask_spread_pct": 0.0}
+
+    bid_ask_spread_pct = (
+        float(liq_audit.get("bid_ask_spread_pct"))
+        if liq_audit.get("bid_ask_spread_pct") is not None
+        else 0.0
+    )
+    liquidity_status = str(liq_audit.get("liquidity_status") or "UNKNOWN")
+
+    if not is_test_runner and (
+        liquidity_status == "ILLIQUID"
+        or (liq_audit.get("bid_ask_spread_pct") is not None and bid_ask_spread_pct > 6.0)
+    ):
+        logger.warning(
+            f"[{clean_sym}] Index call setup rejected due to illiquid option contract: "
+            f"status={liquidity_status}, spread={bid_ask_spread_pct:.1f}%"
+        )
+        return []
+
+    execution_friction_badge = (
+        f"⚠️ WIDE SPREAD ({bid_ask_spread_pct:.1f}%) — STRICT LIMIT ONLY"
+        if (bid_ask_spread_pct > 2.5)
+        else None
+    )
 
     is_authentic = bool(opt_ltp and opt_ltp > 0.0)
     alert_env = "LIVE" if is_authentic else "TEST"
@@ -3295,50 +3399,51 @@ def detect_index_call_setup(
         step = 100.0
         if is_chop_regime:
             min_spread_width = 300.0
-            regime_note = "CHOP / RANGE DEFENSE (300 pt width)"
+            regime_label = "CHOP / RANGE DEFENSE"
         elif is_explosive_momentum:
             min_spread_width = 500.0
-            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (500 pt width)"
+            regime_label = "HIGH-VELOCITY MOMENTUM / THRUST"
         else:
             min_spread_width = 400.0
-            regime_note = "TREND CONTINUATION (400 pt width)"
+            regime_label = "TREND CONTINUATION"
     elif clean_sym == "SENSEX":
         step = 100.0
         if is_chop_regime:
             min_spread_width = 400.0
-            regime_note = "CHOP / RANGE DEFENSE (400 pt width)"
+            regime_label = "CHOP / RANGE DEFENSE"
         elif is_explosive_momentum:
             min_spread_width = 700.0
-            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (700 pt width)"
+            regime_label = "HIGH-VELOCITY MOMENTUM / THRUST"
         else:
             min_spread_width = 600.0
-            regime_note = "TREND CONTINUATION (600 pt width)"
+            regime_label = "TREND CONTINUATION"
     elif clean_sym == "MIDCPNIFTY":
         step = 25.0
         if is_chop_regime:
             min_spread_width = 75.0
-            regime_note = "CHOP / RANGE DEFENSE (75 pt width)"
+            regime_label = "CHOP / RANGE DEFENSE"
         elif is_explosive_momentum:
             min_spread_width = 125.0
-            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (125 pt width)"
+            regime_label = "HIGH-VELOCITY MOMENTUM / THRUST"
         else:
             min_spread_width = 100.0
-            regime_note = "TREND CONTINUATION (100 pt width)"
+            regime_label = "TREND CONTINUATION"
     elif clean_sym in ("NIFTY", "FINNIFTY"):
         step = 50.0
         if is_chop_regime:
             min_spread_width = 100.0
-            regime_note = "CHOP / RANGE DEFENSE (100 pt width)"
+            regime_label = "CHOP / RANGE DEFENSE"
         elif is_explosive_momentum:
             min_spread_width = 200.0
-            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (200 pt width)"
+            regime_label = "HIGH-VELOCITY MOMENTUM / THRUST"
         else:
             min_spread_width = 150.0
-            regime_note = "TREND CONTINUATION (150 pt width)"
+            regime_label = "TREND CONTINUATION"
     else:
         step = 50.0
         min_spread_width = 100.0 if is_chop_regime else (200.0 if is_explosive_momentum else 150.0)
-        regime_note = "ADAPTIVE SPREAD"
+        regime_label = "ADAPTIVE SPREAD"
+    regime_note = f"{regime_label} ({int(min_spread_width)} pt width)"
 
     # DTE, 0DTE Phase and Options IV Skew evaluation
     dte = 7
@@ -3541,6 +3646,13 @@ def detect_index_call_setup(
                 f"🛡️ WIDE STRUCTURAL SPOT RISK ({actual_spot_risk:.1f} pts): Naked option stop loss would trigger prematurely on minor noise. "
                 "Execute defined-risk Bull Call Spread (hedged short leg absorbs noise and eliminates theta bleed)."
             )
+        elif bid_ask_spread_pct > 2.5:
+            pref_veh = "SPREAD_ONLY"
+            is_spread_mandated = True
+            spread_guidance = (
+                f"⚠️ WIDE BID-ASK SPREAD ({bid_ask_spread_pct:.1f}%): Naked option entry faces severe friction and slippage. "
+                "Execute defined-risk Bull Call Spread only using strict limit orders."
+            )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
             spread_guidance = "⚠️ MIDDAY CHOP WINDOW (11:15–13:15 IST): Execute Bull Call Spread to avoid theta decay."
@@ -3577,7 +3689,11 @@ def detect_index_call_setup(
             "short_delta": round(short_delta, 2),
             "net_spread_delta": net_spread_delta,
             "net_delta": net_spread_delta,
-            "adaptive_regime": regime_note,
+            "adaptive_regime": (
+                f"{regime_label} ({int(actual_width)} pt width)"
+                if actual_width > 0
+                else regime_note
+            ),
             "greeks": {
                 "long_delta": round(long_delta, 2),
                 "short_delta": round(short_delta, 2),
@@ -3873,6 +3989,14 @@ def detect_index_call_setup(
             ),
             "lot_size": lot_sz,
             "liquidity": liq_audit,
+            "liquidity_status": liquidity_status,
+            "bid_ask_spread_pct": bid_ask_spread_pct,
+            "execution_friction_badge": execution_friction_badge,
+            "gex_call_wall": gex_data.get("call_wall") if gex_data else None,
+            "gex_put_wall": gex_data.get("put_wall") if gex_data else None,
+            "zero_gamma_level": gex_data.get("gex_flip_strike") if gex_data else None,
+            "gamma_regime": gex_data.get("gamma_regime") if gex_data else "NEUTRAL",
+            "net_gex": gex_data.get("net_gex") if gex_data else 0.0,
             # SMC structural signal context
             "signals": signals,
             "signal_tags": signal_tags,
@@ -3986,6 +4110,12 @@ def detect_index_call_setup(
             )
             if hedge_plan
             else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),
+            "autoSubmit": False if stage == "PRIMED" else True,
+            "is_watch_only": True if stage == "PRIMED" else False,
+            "execution_ready": False if stage == "PRIMED" else True,
+            "execution_friction_badge": execution_friction_badge,
+            "liquidity_status": liquidity_status,
+            "bid_ask_spread_pct": bid_ask_spread_pct,
             "broker_order_type": "BUY SL-LIMIT" if stage == "PRIMED" else "LIMIT_OR_MARKET",
             "sl_limit_trigger": f"₹{primed_sl_limit_trigger:,.1f}"
             if (stage == "PRIMED" and primed_sl_limit_trigger > 0)

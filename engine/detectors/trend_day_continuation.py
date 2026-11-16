@@ -294,6 +294,21 @@ def detect_trend_day_pullback(
                 f"[TrendContinuation] Index regime gate non-fatal check bypassed: {e_idx_regime}"
             )
 
+    # ── Index Heavyweight Locomotive Polarization Gate ────────────
+    if is_index and not is_test_env:
+        try:
+            from market.indices import get_index_polarization
+
+            idx_pol = get_index_polarization(clean_sym)
+            if idx_pol.is_polarized:
+                logger.info(
+                    f"[TrendContinuation] Suppressed on {clean_sym}: Heavyweight Locomotive Tug-of-War Polarization "
+                    f"({idx_pol.summary}). Disallowing index trend continuation in conflict gridlock."
+                )
+                return None
+        except Exception as e_pol:
+            logger.debug(f"[TrendContinuation] Index polarization check notice: {e_pol}")
+
     # ── Central Pivot Range (CPR) & Camarilla Levels Gate ─────────────
     cpr_data: dict = {}
     is_narrow_cpr = False

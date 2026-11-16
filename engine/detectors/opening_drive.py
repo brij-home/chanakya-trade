@@ -222,7 +222,15 @@ def detect_opening_drive(
     # ── Index Heavyweight Locomotive Gate ─────────────────────────
     if is_index:
         try:
-            from market.indices import get_heavyweights_posture
+            from market.indices import get_heavyweights_posture, get_index_polarization
+
+            idx_pol = get_index_polarization(clean_sym)
+            if idx_pol.is_polarized:
+                logger.info(
+                    f"[OpeningDrive] Suppressed on {clean_sym}: Heavyweight Locomotive Tug-of-War Polarization "
+                    f"({idx_pol.summary}). Disallowing index opening drive in conflict gridlock."
+                )
+                return None
 
             is_test_runner = (
                 os.getenv("CHANAKYA_TESTING") == "1"

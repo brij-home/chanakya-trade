@@ -230,11 +230,16 @@ def test_orb_benchmark_regime_gate(monkeypatch):
         vwap=99.5,
         rvol=1.8,
         exchange="NSE",
+        ref_time=dates[-1],
         ignore_time_gate=True,
     )
     assert res_suppressed is None, (
         "ORB breakdown must be suppressed when benchmark NIFTY 50 is trending up"
     )
+
+    from engine.market_regime_gate import clear_index_tide_cache
+
+    clear_index_tide_cache()
 
     # 2. When NIFTY is red -0.35% and below VWAP, breakdown setup is permitted
     mock_nifty_bear = MagicMock(
@@ -256,6 +261,7 @@ def test_orb_benchmark_regime_gate(monkeypatch):
         vwap=99.5,
         rvol=1.8,
         exchange="NSE",
+        ref_time=dates[-1],
         ignore_time_gate=True,
     )
     assert res_allowed is not None, (

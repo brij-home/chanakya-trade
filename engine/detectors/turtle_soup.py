@@ -113,6 +113,7 @@ def detect_turtle_soup_sweep(
     sweep_type: Optional[str] = None
     sweep_level: float = 0.0
     sweep_wick_ext: float = 0.0
+    sweep_wick_ratio: float = 0.0
 
     for idx in eval_bars:
         b_o = float(o_s.iloc[idx])
@@ -133,6 +134,7 @@ def detect_turtle_soup_sweep(
                 sweep_type = "BEARISH_UPTHRUST"
                 sweep_level = prior_high
                 sweep_wick_ext = b_h
+                sweep_wick_ratio = upper_shadow
                 break
 
         # 2. Bullish Spring (Bear Trap at Prior Low)
@@ -144,6 +146,7 @@ def detect_turtle_soup_sweep(
                 sweep_type = "BULLISH_SPRING"
                 sweep_level = prior_low
                 sweep_wick_ext = b_l
+                sweep_wick_ratio = lower_shadow
                 break
 
     if not sweep_type:
@@ -234,16 +237,19 @@ def detect_turtle_soup_sweep(
                     )
                     return None
 
-                # If bearish upthrust: verify we aren't shorting an active Camarilla H4 breakout
+                # If bearish upthrust: verify we aren't shorting a genuine green Camarilla H4 breakout candle.
+                # A true liquidity sweep (upper rejection shadow >= 35%) above H4 is a valid bull trap to short.
+                # Only suppress if candle is expanding upward with no upper rejection wick (< 25%).
                 if (
                     not is_bullish
                     and cam_h4 > 0
                     and curr_ltp > cam_h4
                     and abs(curr_ltp - cam_h4) / cam_h4 <= 0.02
+                    and sweep_wick_ratio < 0.25
                 ):
                     logger.debug(
                         f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
-                        f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f}"
+                        f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f} with active upward expansion"
                     )
                     return None
     except Exception as e_cam:

@@ -1477,6 +1477,8 @@ def compute_chain_gex(
             resolved_lot = 1
 
     strike_gex: dict[float, float] = defaultdict(float)
+    strike_call_gex: dict[float, float] = defaultdict(float)
+    strike_put_gex: dict[float, float] = defaultdict(float)
     strike_dex: dict[float, float] = defaultdict(float)
     total_call_gex = 0.0
     total_put_gex = 0.0
@@ -1549,11 +1551,13 @@ def compute_chain_gex(
         if opt_type == "CE":
             total_call_gex += notional_gamma
             strike_gex[strike] += notional_gamma
+            strike_call_gex[strike] += notional_gamma
             total_call_dex += dex_cr
             strike_dex[strike] += dex_cr
         else:
             total_put_gex += notional_gamma
             strike_gex[strike] -= notional_gamma
+            strike_put_gex[strike] += notional_gamma
             total_put_dex += dex_cr
             strike_dex[strike] += dex_cr
 
@@ -1561,6 +1565,11 @@ def compute_chain_gex(
 
     net_gex = total_call_gex - total_put_gex
     regime = "POSITIVE_GAMMA_PIN" if net_gex >= 0 else "NEGATIVE_GAMMA_ACCELERATION"
+
+    # Call Wall (Maximum positive Call GEX — strong dealer selling resistance)
+    call_wall = max(strike_call_gex.items(), key=lambda x: x[1])[0] if strike_call_gex else spot
+    # Put Wall (Maximum Put GEX — strong dealer buying support)
+    put_wall = max(strike_put_gex.items(), key=lambda x: x[1])[0] if strike_put_gex else spot
 
     # Compute Gamma Flip Strike
     sorted_strikes = sorted(strike_gex.keys())
@@ -1595,6 +1604,8 @@ def compute_chain_gex(
         "net_gex": round(net_gex, 2),
         "call_gex": round(total_call_gex, 2),
         "put_gex": round(total_put_gex, 2),
+        "call_wall": round(call_wall, 2),
+        "put_wall": round(put_wall, 2),
         "gamma_regime": regime,
         "gex_flip_strike": round(flip_strike, 2),
         "is_acceleration_zone": bool(is_acceleration),
@@ -1666,6 +1677,20 @@ def compute_options_iv_skew(
     atm_c_iv = float(getattr(atm_c, "iv", 0.0) or 0.0)
     atm_p_iv = float(getattr(atm_p, "iv", 0.0) or 0.0)
 
+    # Resolve DTE for implied volatility solver fallback
+    dte_val = 7
+    exp_str = getattr(atm_c or atm_p, "expiry", None)
+    if exp_str:
+        try:
+            from datetime import date
+
+            exp_d = date.fromisoformat(str(exp_str)[:10])
+            dte_val = max(1, (exp_d - date.today()).days)
+        except Exception:
+            dte_val = 7
+
+    from engine.options_backtest import bs_iv
+
     if atm_c_iv <= 0:
         nearby_c = [
             c for c in chain if getattr(c, "option_type", "") == "CE" and getattr(c, "iv", 0.0)
@@ -1673,6 +1698,11 @@ def compute_options_iv_skew(
         if nearby_c:
             nearby_c.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
             atm_c_iv = float(getattr(nearby_c[0], "iv", 0.0) or 0.0)
+        elif atm_c and float(getattr(atm_c, "last_price", 0.0) or 0.0) > 0:
+            c_px = float(getattr(atm_c, "last_price", 0.0))
+            solved_c = bs_iv(c_px, spot, atm_strike, dte_val, "CE")
+            if solved_c:
+                atm_c_iv = round(solved_c * 100.0, 2)
 
     if atm_p_iv <= 0:
         nearby_p = [
@@ -1681,8 +1711,30 @@ def compute_options_iv_skew(
         if nearby_p:
             nearby_p.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
             atm_p_iv = float(getattr(nearby_p[0], "iv", 0.0) or 0.0)
+        elif atm_p and float(getattr(atm_p, "last_price", 0.0) or 0.0) > 0:
+            p_px = float(getattr(atm_p, "last_price", 0.0))
+            solved_p = bs_iv(p_px, spot, atm_strike, dte_val, "PE")
+            if solved_p:
+                atm_p_iv = round(solved_p * 100.0, 2)
 
-    atm_skew = round(atm_c_iv - atm_p_iv, 2) if (atm_c_iv > 0 and atm_p_iv > 0) else 0.0
+    if atm_c_iv <= 0 or atm_p_iv <= 0:
+        return {
+            "status": "UNAVAILABLE",
+            "atm_strike": atm_strike,
+            "atm_call_iv": atm_c_iv,
+            "atm_put_iv": atm_p_iv,
+            "atm_skew": None,
+            "otm_call_iv": 0.0,
+            "otm_put_iv": 0.0,
+            "wing_skew": None,
+            "skew_25d": None,
+            "regime": "UNAVAILABLE",
+            "spread_pricing_edge": "IV surface data unavailable for underlying",
+            "is_call_skew_elevated": False,
+            "is_put_skew_elevated": False,
+        }
+
+    atm_skew = round(atm_c_iv - atm_p_iv, 2)
 
     otm_c_strike = atm_strike + (step * 2)
     otm_p_strike = max(step, atm_strike - (step * 2))
@@ -1690,6 +1742,19 @@ def compute_options_iv_skew(
     otm_p = puts.get(otm_p_strike)
     otm_c_iv = float(getattr(otm_c, "iv", 0.0) or 0.0)
     otm_p_iv = float(getattr(otm_p, "iv", 0.0) or 0.0)
+
+    if otm_c_iv <= 0 and otm_c and float(getattr(otm_c, "last_price", 0.0) or 0.0) > 0:
+        otm_c_px = float(getattr(otm_c, "last_price", 0.0))
+        solved_otm_c = bs_iv(otm_c_px, spot, otm_c_strike, dte_val, "CE")
+        if solved_otm_c:
+            otm_c_iv = round(solved_otm_c * 100.0, 2)
+
+    if otm_p_iv <= 0 and otm_p and float(getattr(otm_p, "last_price", 0.0) or 0.0) > 0:
+        otm_p_px = float(getattr(otm_p, "last_price", 0.0))
+        solved_otm_p = bs_iv(otm_p_px, spot, otm_p_strike, dte_val, "PE")
+        if solved_otm_p:
+            otm_p_iv = round(solved_otm_p * 100.0, 2)
+
     wing_skew = round(otm_c_iv - otm_p_iv, 2) if (otm_c_iv > 0 and otm_p_iv > 0) else 0.0
 
     from engine.iv_surface import calculate_25delta_skew

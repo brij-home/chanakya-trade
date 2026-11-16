@@ -678,48 +678,40 @@ def build_defined_risk_hedge_plan(
     # 3. Determine strike interval & calibrated spread width
     if is_sensex:
         step = 100.0
-        if is_chop_regime:
-            width = spread_width or 400.0
-            adaptive_regime_desc = "CHOP / RANGE DEFENSE (400 pt width)"
-        elif is_explosive:
-            width = spread_width or 700.0
-            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (700 pt width)"
-        else:
-            width = spread_width or 600.0
-            adaptive_regime_desc = "TREND CONTINUATION (600 pt width)"
+        width = spread_width or (400.0 if is_chop_regime else (700.0 if is_explosive else 600.0))
+        regime_label = (
+            "CHOP / RANGE DEFENSE"
+            if is_chop_regime
+            else ("HIGH-VELOCITY MOMENTUM / THRUST" if is_explosive else "TREND CONTINUATION")
+        )
+        adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     elif is_banknifty:
         step = 100.0
-        if is_chop_regime:
-            width = spread_width or 300.0
-            adaptive_regime_desc = "CHOP / RANGE DEFENSE (300 pt width)"
-        elif is_explosive:
-            width = spread_width or 500.0
-            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (500 pt width)"
-        else:
-            width = spread_width or 400.0
-            adaptive_regime_desc = "TREND CONTINUATION (400 pt width)"
+        width = spread_width or (300.0 if is_chop_regime else (500.0 if is_explosive else 400.0))
+        regime_label = (
+            "CHOP / RANGE DEFENSE"
+            if is_chop_regime
+            else ("HIGH-VELOCITY MOMENTUM / THRUST" if is_explosive else "TREND CONTINUATION")
+        )
+        adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     elif is_nifty or is_finnifty:
         step = 50.0
-        if is_chop_regime:
-            width = spread_width or 100.0
-            adaptive_regime_desc = "CHOP / RANGE DEFENSE (100 pt width)"
-        elif is_explosive:
-            width = spread_width or 200.0
-            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (200 pt width)"
-        else:
-            width = spread_width or 150.0
-            adaptive_regime_desc = "TREND CONTINUATION (150 pt width)"
+        width = spread_width or (100.0 if is_chop_regime else (200.0 if is_explosive else 150.0))
+        regime_label = (
+            "CHOP / RANGE DEFENSE"
+            if is_chop_regime
+            else ("HIGH-VELOCITY MOMENTUM / THRUST" if is_explosive else "TREND CONTINUATION")
+        )
+        adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     elif is_midcpnifty:
         step = 25.0
-        if is_chop_regime:
-            width = spread_width or 75.0
-            adaptive_regime_desc = "CHOP / RANGE DEFENSE (75 pt width)"
-        elif is_explosive:
-            width = spread_width or 125.0
-            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (125 pt width)"
-        else:
-            width = spread_width or 100.0
-            adaptive_regime_desc = "TREND CONTINUATION (100 pt width)"
+        width = spread_width or (75.0 if is_chop_regime else (125.0 if is_explosive else 100.0))
+        regime_label = (
+            "CHOP / RANGE DEFENSE"
+            if is_chop_regime
+            else ("HIGH-VELOCITY MOMENTUM / THRUST" if is_explosive else "TREND CONTINUATION")
+        )
+        adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     else:
         # Single-stock F&O: dynamic step based on stock price
         if spot >= 5000:
@@ -1064,7 +1056,15 @@ def build_defined_risk_hedge_plan(
         "short_delta": round(short_delta, 2),
         "net_spread_delta": net_spread_delta,
         "net_delta": net_spread_delta,
-        "adaptive_regime": adaptive_regime_desc,
+        "adaptive_regime": (
+            adaptive_regime_desc
+            if "LEVEL-ANCHORED RUNWAY" in (adaptive_regime_desc or "")
+            else (
+                f"{regime_label} ({int(actual_width)} pt width)"
+                if ("regime_label" in locals() and actual_width > 0)
+                else adaptive_regime_desc
+            )
+        ),
         "greeks": {
             "long_delta": round(long_delta, 2),
             "short_delta": round(short_delta, 2),

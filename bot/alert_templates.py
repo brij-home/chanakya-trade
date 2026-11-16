@@ -5909,11 +5909,18 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if isinstance(hp, dict):
                 pref_veh = hp.get("preferred_vehicle", "")
             if pref_veh == "SPREAD_ONLY":
-                spread_ref_inline = " <i>(Hedged Spread Mandated 👇 — Naked Trade Discouraged)</i>"
+                act = "EXECUTE HEDGED SPREAD"
+                spread_ref_inline = " <b>[🛡️ HEDGED SPREAD MANDATED 👇 — DO NOT BUY NAKED]</b>"
+            elif is_primed:
+                act = "📡 RADAR WATCH"
+                spread_ref_inline = " <b>[⚠️ WATCHLIST RADAR — DO NOT ENTER PREMATURELY]</b>"
             elif pref_veh in ("HEDGED_SPREAD", "RATIO_SPREAD_1X2"):
                 spread_ref_inline = " <i>(Hedged Spread Preferred 👇)</i> [Naked Leg]"
             else:
                 spread_ref_inline = " <i>(or Hedged Spread below 👇)</i> [Naked Leg]"
+        elif is_primed:
+            act = "📡 RADAR WATCH"
+            spread_ref_inline = " <b>[⚠️ WATCHLIST RADAR — DO NOT ENTER PREMATURELY]</b>"
         elif "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
             act = "BUY"
 
@@ -6300,6 +6307,13 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"  └ <i>Stage pending order in broker now. Auto-fills on trigger breach with zero manual latency!</i>\n"
             )
 
+        fric_badge = actionable_plan.get("execution_friction_badge") or (
+            alert.metrics.get("execution_friction_badge")
+            if isinstance(getattr(alert, "metrics", None), dict)
+            else None
+        )
+        fric_str = f"\n• <b>Friction:</b> <code>{fric_badge}</code>" if fric_badge else ""
+
         plan_str = (
             f"{exp_line}"
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}{opt_cmp_str}{spot_ref}{spread_ref_inline}\n"
@@ -6309,6 +6323,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             f"• <b>R:R:</b> <b>{rr}</b>{ev_str}{lot_rr_str}{no_chase_inline}"
             f"{rule_str}"
             f"{wait_str}"
+            f"{fric_str}"
             f"{warn_str}"
             f"{session_clock_warn}"
         )
@@ -8256,6 +8271,22 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     # If a defined-risk hedge spread, execution mandate, or free-roll protocol is present,
     # bundle them inside modern Telegram `<blockquote expandable>` so the default view is crisp
     # (fits in 10-12 lines on mobile) while spread legs, Greeks, CPR, and reasoning expand on tap.
+    gex_line_str = ""
+    try:
+        metrics = getattr(alert, "metrics", {}) or {}
+        gex_cw = metrics.get("gex_call_wall")
+        gex_pw = metrics.get("gex_put_wall")
+        gex_flip = metrics.get("zero_gamma_level")
+        gex_regime = metrics.get("gamma_regime")
+        if gex_cw or gex_pw or gex_flip:
+            cw_str = f"₹{gex_cw:,.0f}" if gex_cw else "N/A"
+            pw_str = f"₹{gex_pw:,.0f}" if gex_pw else "N/A"
+            flip_str = f"₹{gex_flip:,.0f}" if gex_flip else "N/A"
+            regime_tag = f" ({gex_regime.replace('_', ' ')})" if gex_regime else ""
+            gex_line_str = f"• 🏛️ <b>GEX Structure:</b> Call Wall {cw_str} | Put Wall {pw_str} | Zero-Gamma {flip_str}{regime_tag}"
+    except Exception as e_gex_tpl:
+        logger.debug(f"[bot.alert_templates] GEX rendering non-fatal: {e_gex_tpl}")
+
     secondary_parts = []
     if "hedge_box" in locals() and hedge_box:
         secondary_parts.append(hedge_box.strip())
@@ -8265,6 +8296,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         secondary_parts.append(fr_str.strip())
     if cpr_line_str:
         secondary_parts.append(cpr_line_str.strip())
+    if gex_line_str:
+        secondary_parts.append(gex_line_str.strip())
     if sector_line_str:
         secondary_parts.append(sector_line_str.strip())
     if signals_line_str:
@@ -8285,6 +8318,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             lines.append(sector_line_str)
         if cpr_line_str:
             lines.append(cpr_line_str)
+        if gex_line_str:
+            lines.append(gex_line_str)
         if signals_line_str:
             lines.append(signals_line_str)
         if reason_line:

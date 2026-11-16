@@ -327,6 +327,12 @@ def detect_opening_range_breakout(
 
         if dl and is_index and dl.camarilla:
             if is_bearish or (is_primed and primed_direction == "BEARISH"):
+                l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
+                if l5 > 0 and ltp <= (l5 * 1.002):
+                    logger.info(
+                        f"[ORB] Suppressed Bearish ORB on {symbol}: Spot ₹{ltp:,.1f} reached Camarilla L5 Floor ₹{l5:,.1f} (Exhaustion)."
+                    )
+                    return None
                 l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
                 if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
                     logger.info(
@@ -334,6 +340,12 @@ def detect_opening_range_breakout(
                     )
                     return None
             elif is_bullish or (is_primed and primed_direction == "BULLISH"):
+                h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
+                if h5 > 0 and ltp >= (h5 * 0.998):
+                    logger.info(
+                        f"[ORB] Suppressed Bullish ORB on {symbol}: Spot ₹{ltp:,.1f} reached Camarilla H5 Ceiling ₹{h5:,.1f} (Exhaustion)."
+                    )
+                    return None
                 h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
                 if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
                     logger.info(
@@ -342,6 +354,21 @@ def detect_opening_range_breakout(
                     return None
     except Exception as e_dl:
         logger.debug(f"[ORB] Daily levels & CPR check skipped for {symbol}: {e_dl}")
+
+    # ── Index Heavyweight Locomotive Polarization Gate ────────────
+    if is_index:
+        try:
+            from market.indices import get_index_polarization
+
+            idx_pol = get_index_polarization(symbol)
+            if idx_pol.is_polarized:
+                logger.info(
+                    f"[ORB] Suppressed ORB on {symbol}: Heavyweight Locomotive Tug-of-War Polarization "
+                    f"({idx_pol.summary}). Disallowing index ORB breakout in conflict gridlock."
+                )
+                return None
+        except Exception as e_pol:
+            logger.debug(f"[ORB] Index polarization check notice: {e_pol}")
 
     # 4.05 Directional Momentum & Velocity Veto for Index ORB
     if is_index and df is not None:

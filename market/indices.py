@@ -313,20 +313,24 @@ def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     spread_pct = round(max_gainer[1] - max_loser[1], 2)
 
     # Bank Nifty: HDFCBANK (~29%) and ICICIBANK (~23%) together control >52% of index.
-    # If they are pulling in opposite directions with magnitude >= 0.40%, index is in gridlock chop.
+    # If they are pulling in opposite directions with spread >= 0.50% or opposing signs, index is in gridlock chop.
     hdfc_chg = changes.get("HDFCBANK", 0.0)
     icici_chg = changes.get("ICICIBANK", 0.0)
     bank_locomotive_split = is_bank_index and (
-        (hdfc_chg >= 0.40 and icici_chg <= -0.40) or (hdfc_chg <= -0.40 and icici_chg >= 0.40)
+        (hdfc_chg * icici_chg < 0 and abs(hdfc_chg - icici_chg) >= 0.50)
+        or (hdfc_chg >= 0.35 and icici_chg <= -0.35)
+        or (hdfc_chg <= -0.35 and icici_chg >= 0.35)
     )
 
     # Polarized Tug-of-War threshold:
-    # Spread between top gainer and top loser >= 3.0% with opposing signs (one >= +1.0%, other <= -1.0%)
-    # OR dispersion standard deviation >= 1.5% with mixed signs.
-    has_opposing_momentum = max_gainer[1] >= 1.0 and max_loser[1] <= -1.0
+    # Spread between top gainer and top loser >= 2.5% with opposing signs (one >= +0.8%, other <= -0.8%)
+    # OR dispersion standard deviation >= 1.2% with mixed signs.
+    has_opposing_momentum = (max_gainer[1] >= 0.80 and max_loser[1] <= -0.80) or (
+        max_gainer[1] >= 1.0 and max_loser[1] <= -0.5
+    )
     is_polarized = bool(
         bank_locomotive_split
-        or (has_opposing_momentum and (spread_pct >= 3.0 or dispersion_std >= 1.5))
+        or (has_opposing_momentum and (spread_pct >= 2.5 or dispersion_std >= 1.2))
     )
 
     if is_polarized:
