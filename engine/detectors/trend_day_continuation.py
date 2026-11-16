@@ -93,7 +93,7 @@ def detect_trend_day_pullback(
     Evaluates intraday 5m price action for institutional shallow pullbacks on trend days.
     Active strictly between 10:15 and 14:30 IST.
     """
-    if df_5m is None or len(df_5m) < 8 or ltp <= 0:
+    if df_5m is None or len(df_5m) < 4 or ltp <= 0:
         return None
 
     if now_dt is None:
@@ -102,8 +102,8 @@ def detect_trend_day_pullback(
     is_test_env = bool(os.getenv("CHANAKYA_TESTING") == "1" or os.getenv("PYTEST_CURRENT_TEST"))
     now_time = now_dt.time()
 
-    # Time Window: Active from 10:15 to 15:15 IST (mid-morning to afternoon continuation)
-    if not is_test_env and not (dtime(10, 15) <= now_time <= dtime(15, 15)):
+    # Time Window: Active from 09:35 to 15:15 IST (seamless handoff from opening drive to morning/afternoon continuation)
+    if not is_test_env and not (dtime(9, 35) <= now_time <= dtime(15, 15)):
         return None
 
     clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
@@ -596,6 +596,27 @@ def detect_trend_day_pullback(
         "structural_spot_sl": f"₹{sl_price:,.1f}" if has_opt else None,
         "profit_rule": "Scale 50% at T1 (+2.0R), move SL to Breakeven/Cost. Trail 25% to T2, hold runner on 20-EMA.",
     }
+
+    try:
+        from engine.pullback_level_resolver import resolve_pullback_entry
+
+        pullback_res = resolve_pullback_entry(
+            symbol=clean_sym,
+            direction=direction,
+            spot=ltp,
+            vwap=val_vwap or ltp,
+            day_high=cur_h,
+            day_low=cur_l,
+            atr_5m=atr_5m,
+            prefer_options=is_index,
+        )
+        if pullback_res:
+            act_plan["limit_entry_zone"] = (
+                f"₹{pullback_res.entry_zone_min:,.1f} - ₹{pullback_res.entry_zone_max:,.1f}"
+            )
+            act_plan["limit_entry_mid"] = pullback_res.entry_zone_mid
+    except Exception as e_pb:
+        logger.debug(f"[TrendContinuation] Pullback level resolver error for {clean_sym}: {e_pb}")
 
     if has_opt:
         act_plan["option_type"] = opt_type

@@ -17441,13 +17441,32 @@ class AutoAlertEngine:
                 if df is None or len(df) < 15:
                     return None
 
-                return detect_turtle_soup_sweep(
+                alert_ts = detect_turtle_soup_sweep(
                     symbol=sym,
                     df=df,
                     ltp=ltp,
                     vwap=vwap,
                     exchange=exch,
                     change_pct=chg_pct,
+                )
+                if alert_ts:
+                    return alert_ts
+
+                # ── Inversion Bridge: Turn Vetoes into Continuation Alpha ──
+                # If counter-trend sweep was vetoed on a trending leader or loser,
+                # evaluate for Trapped Liquidity Inversion (Bear Trap Short Squeeze / Bull Trap Liquidation)
+                from engine.detectors.liquidity_inversion import detect_liquidity_inversion
+
+                high_val = getattr(q, "high", None) if "q" in locals() and q else None
+                low_val = getattr(q, "low", None) if "q" in locals() and q else None
+                return detect_liquidity_inversion(
+                    symbol=sym,
+                    df=df,
+                    ltp=ltp,
+                    vwap=vwap,
+                    change_pct=chg_pct,
+                    day_high=high_val,
+                    day_low=low_val,
                 )
 
             except Exception as e:

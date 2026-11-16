@@ -37,6 +37,7 @@ from engine.detectors.gamma_unpin_squeezer import (
 )
 from engine.detectors.trend_day_continuation import detect_trend_day_pullback
 from engine.detectors.initial_balance import detect_initial_balance_setups
+from engine.detectors.liquidity_inversion import detect_liquidity_inversion
 
 from engine.detection_context import (
     BaseDetector,
@@ -91,4 +92,5 @@ __all__ = [
     "OrderBookThrustDetector",
     "detect_0dte_gamma_unpin",
     "GammaUnpinSqueezerDetector",
+    "detect_liquidity_inversion",
 ]

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 from market.instruments import format_strike
@@ -276,6 +277,30 @@ def resolve_option_contract(
         vix_regime = "NORMAL_MOMENTUM"
         strategy_type = "NAKED_DIRECTIONAL"
         exec_mandate = "STANDARD"
+
+    # ── 0DTE Afternoon Theta Protection Gate ─────────────────────
+    # On weekly index expiry days past 13:00 IST, OTM options suffer rapid theta collapse.
+    # Force ITM (Delta >= 0.60) or Vertical Defined-Risk Spreads to protect capital.
+    try:
+        from datetime import time as dtime_type
+        from config.constants import IST_ZONE as IST_Z
+        from engine.alert_expiry import is_expiry_day
+
+        now_ist = datetime.now(IST_Z)
+        if is_idx and is_expiry_day(clean_sym, ref_date=now_ist.date()):
+            if now_ist.time() >= dtime_type(13, 0):
+                if tier_upper == "HIGH_GAMMA_ASYMMETRY":
+                    tier_upper = "DEEP_ITM"
+                    logger.info(
+                        f"[OptionResolver] 0DTE Afternoon Theta Gate on {clean_sym}: "
+                        "Upgraded strike selection to DEEP_ITM (Delta >= 0.60) to eliminate OTM decay trap."
+                    )
+                if not prefer_spread and now_ist.time() >= dtime_type(14, 0):
+                    vix_regime = "ELEVATED_VOL_SPREAD"
+                    strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
+                    exec_mandate = "HEDGED_SPREAD_MANDATORY"
+    except Exception as e_0dte:
+        logger.debug(f"[OptionResolver] 0DTE gate non-fatal check: {e_0dte}")
 
     # Step 2: Query Live Options Chain
     chosen_contract = None

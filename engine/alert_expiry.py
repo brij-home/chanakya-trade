@@ -553,6 +553,20 @@ def is_0dte_afternoon(expiry_str: Optional[str], ref_dt: Optional[datetime] = No
     return now_dt.time() >= dtime(12, 30)
 
 
+def is_expiry_day(symbol: str, ref_date: Optional[Any] = None) -> bool:
+    """Returns True if the given symbol (index or equity) expires on the given calendar date."""
+    d = ref_date or datetime.now(IST).date()
+    if isinstance(d, datetime):
+        d = d.date()
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        from market.rule_schedule import expiry_weekday
+
+        exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+        return d.weekday() == expiry_weekday(exch, d)
+    return False
+
+
 def is_monthly_physical_expiry_week(
     expiry_str: Optional[Any] = None,
     symbol: Optional[str] = None,

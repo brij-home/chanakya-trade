@@ -4631,6 +4631,186 @@ async def get_rs_rw_radar(
         raise _HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/v1/market/confluence-radar", tags=["Analysis", "Market"])
+async def get_confluence_radar(
+    min_score: float = 65.0,
+    top_n: int = 20,
+    universe: Optional[str] = "FNO",
+):
+    """
+    Get real-time Multi-Factor Confluence Radar (0-100 Scoreboard)
+    with Pullback-to-Value Limit Entry Bands and Asymmetric R:R.
+    """
+    try:
+        from engine.confluence_engine import evaluate_confluence
+        from market.quotes import get_quote
+        from analysis.universe import resolve_dynamic_universe
+
+        univ_list, _ = resolve_dynamic_universe(universe or "FNO")
+        symbols_to_check = univ_list[: min(len(univ_list), 30)]
+        formatted = [f"NSE:{s}" if ":" not in s else s for s in symbols_to_check]
+        quotes_map = await asyncio.to_thread(get_quote, formatted)
+
+        results = []
+        for s in symbols_to_check:
+            clean_s = s.replace("NSE:", "").replace("BSE:", "").strip()
+            q = quotes_map.get(f"NSE:{clean_s}") or quotes_map.get(clean_s)
+            if not q or not getattr(q, "last_price", 0.0):
+                continue
+            ltp = float(q.last_price)
+            vwap = float(getattr(q, "vwap", 0.0) or ltp)
+            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+            high = float(getattr(q, "high", ltp) or ltp)
+            low = float(getattr(q, "low", ltp) or ltp)
+
+            # Directional bias based on price vs VWAP & session move
+            direction = "BULLISH" if (chg >= 0 and ltp >= vwap * 0.999) else "BEARISH"
+            rvol = float(
+                getattr(q, "rvol", 0.0)
+                or getattr(q, "tod_rvol", 0.0)
+                or (1.8 if abs(chg) >= 1.5 else 1.2)
+            )
+            gap = float(getattr(q, "pre_open_gap_pct", 0.0) or getattr(q, "gap_pct", 0.0) or 0.0)
+            sec_q = getattr(q, "sector_quadrant", None)
+            rep = evaluate_confluence(
+                symbol=clean_s,
+                direction=direction,
+                ltp=ltp,
+                vwap=vwap,
+                rvol=rvol,
+                change_pct=chg,
+                pre_open_gap_pct=gap,
+                sector_quadrant=sec_q,
+                day_high=high,
+                day_low=low,
+            )
+            if rep.total_score >= min_score or not min_score:
+                results.append(
+                    {
+                        "symbol": rep.symbol,
+                        "direction": rep.direction,
+                        "total_score": rep.total_score,
+                        "is_qualified": rep.is_qualified,
+                        "ltp": ltp,
+                        "vwap": vwap,
+                        "change_pct": chg,
+                        "headline": rep.headline,
+                        "summary": rep.summary,
+                        "entry_zone_min": rep.pullback_plan.entry_zone_min
+                        if rep.pullback_plan
+                        else None,
+                        "entry_zone_max": rep.pullback_plan.entry_zone_max
+                        if rep.pullback_plan
+                        else None,
+                        "entry_zone_mid": rep.pullback_plan.entry_zone_mid
+                        if rep.pullback_plan
+                        else None,
+                        "stop_loss": rep.pullback_plan.stop_loss if rep.pullback_plan else None,
+                        "target_1": rep.pullback_plan.target_1 if rep.pullback_plan else None,
+                        "target_2": rep.pullback_plan.target_2 if rep.pullback_plan else None,
+                        "rr_t1": rep.pullback_plan.rr_t1 if rep.pullback_plan else None,
+                        "rr_t2": rep.pullback_plan.rr_t2 if rep.pullback_plan else None,
+                        "no_chase_price": rep.pullback_plan.no_chase_price
+                        if rep.pullback_plan
+                        else None,
+                        "opt_symbol": rep.pullback_plan.opt_symbol if rep.pullback_plan else None,
+                        "opt_entry_limit": rep.pullback_plan.opt_entry_limit
+                        if rep.pullback_plan
+                        else None,
+                        "opt_sl": rep.pullback_plan.opt_sl if rep.pullback_plan else None,
+                        "opt_t1": rep.pullback_plan.opt_t1 if rep.pullback_plan else None,
+                        "factors": [
+                            {
+                                "name": f.name,
+                                "score": f.score,
+                                "max": f.max_score,
+                                "status": f.status,
+                                "details": f.details,
+                            }
+                            for f in rep.factors
+                        ],
+                    }
+                )
+
+        results.sort(key=lambda r: r["total_score"], reverse=True)
+        return {"status": "success", "count": len(results), "data": results[:top_n]}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute confluence radar: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/confluence/{symbol}", tags=["Analysis", "Market"])
+async def get_symbol_confluence(symbol: str, direction: Optional[str] = None):
+    """
+    Get detailed 0-100 Multi-Factor Confluence evaluation & Pullback Limit Entry plan for a specific symbol.
+    """
+    try:
+        from engine.confluence_engine import evaluate_confluence
+        from market.quotes import get_quote
+
+        clean_s = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        q_map = await asyncio.to_thread(get_quote, [f"NSE:{clean_s}"])
+        q = q_map.get(f"NSE:{clean_s}") or q_map.get(clean_s)
+        if not q or not getattr(q, "last_price", 0.0):
+            raise _HTTPException(status_code=404, detail=f"Live quote unavailable for {symbol}")
+
+        ltp = float(q.last_price)
+        vwap = float(getattr(q, "vwap", 0.0) or ltp)
+        chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+        high = float(getattr(q, "high", ltp) or ltp)
+        low = float(getattr(q, "low", ltp) or ltp)
+
+        dir_choice = (
+            direction.upper().strip()
+            if direction
+            else ("BULLISH" if (chg >= 0 and ltp >= vwap * 0.999) else "BEARISH")
+        )
+        rvol = float(
+            getattr(q, "rvol", 0.0)
+            or getattr(q, "tod_rvol", 0.0)
+            or (1.8 if abs(chg) >= 1.5 else 1.2)
+        )
+        gap = float(getattr(q, "pre_open_gap_pct", 0.0) or getattr(q, "gap_pct", 0.0) or 0.0)
+        sec_q = getattr(q, "sector_quadrant", None)
+        rep = evaluate_confluence(
+            symbol=clean_s,
+            direction=dir_choice,
+            ltp=ltp,
+            vwap=vwap,
+            rvol=rvol,
+            change_pct=chg,
+            pre_open_gap_pct=gap,
+            sector_quadrant=sec_q,
+            day_high=high,
+            day_low=low,
+        )
+        return {
+            "status": "success",
+            "symbol": rep.symbol,
+            "direction": rep.direction,
+            "total_score": rep.total_score,
+            "is_qualified": rep.is_qualified,
+            "headline": rep.headline,
+            "summary": rep.summary,
+            "pullback_plan": rep.pullback_plan.__dict__ if rep.pullback_plan else None,
+            "factors": [
+                {
+                    "name": f.name,
+                    "score": f.score,
+                    "max": f.max_score,
+                    "status": f.status,
+                    "details": f.details,
+                }
+                for f in rep.factors
+            ],
+        }
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[API] Failed to evaluate confluence for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/v1/analysis/forensics/{symbol}", tags=["Analysis"])
 async def get_forensic_audit(symbol: str):
     """
