@@ -124,24 +124,8 @@ def detect_opening_drive(
     if len(df_today) == 0:
         df_today = df_5m
 
-    # Extract first 5m bar of today
-    first_bar = df_today.iloc[0]
-    bar_open = float(first_bar.get("open", first_bar.get("Open", 0.0)))
-    bar_high = float(first_bar.get("high", first_bar.get("High", 0.0)))
-    bar_low = float(first_bar.get("low", first_bar.get("Low", 0.0)))
-    bar_close = float(first_bar.get("close", first_bar.get("Close", 0.0)))
-    bar_range = bar_high - bar_low
-
-    if bar_open <= 0 or bar_range <= 0:
-        return None
-
-    range_pct = (bar_range / bar_open) * 100.0
-    # Mega-cap heavyweights and indices have lower percentage volatility than midcaps;
-    # calibrate minimum 5m expansion range floor (0.20% for mega-caps, 0.35% for general equities):
-    min_range_pct = 0.20 if (is_index or is_heavyweight) else 0.35
-    if range_pct < min_range_pct:
-        return None
-
+    # ── Multi-Bar Opening Ignition (Bars 0 to 3) ──────────────────
+    # Check if Bar 0 is textbook Open == Low/High, OR if Bar 1/2 ignites after an uncrossing base
     if rvol is not None:
         rvol_val = float(rvol)
     elif is_index:
@@ -149,52 +133,92 @@ def detect_opening_drive(
     else:
         rvol_val = 1.8
 
+    matched_bar_idx = -1
     is_bull_drive = False
     is_bear_drive = False
 
-    # 1. Bullish Opening Drive: Open == Low (within 0.15%) & expanding upward
-    low_diff_pct = (abs(bar_open - bar_low) / bar_open) * 100.0
-    if low_diff_pct <= 0.15 and (bar_close >= (bar_low + 0.45 * bar_range) or ltp >= bar_high):
-        if (
-            (prev_high and (bar_close >= prev_high * 0.998 or ltp >= prev_high))
-            or (prev_close and bar_close > prev_close)
-            or (ltp >= bar_open * 1.003)
-            or (
-                prev_close
-                and bar_open < prev_close * 0.998
-                and bar_close > bar_open
-                and (bar_close >= (bar_low + 0.65 * bar_range) or ltp >= bar_high * 0.999)
-            )
-        ):
-            # Wick Trap Filter: reject candles where upper rejection wick > 35%
-            upper_wick = bar_high - max(bar_open, bar_close)
-            has_rejection_wick = (upper_wick / bar_range) > 0.35
-            if not has_rejection_wick or (
-                ltp >= bar_high and (bar_high - bar_close) / bar_range <= 0.20
-            ):
-                is_bull_drive = True
+    bar_open = 0.0
+    bar_high = 0.0
+    bar_low = 0.0
+    bar_close = 0.0
+    range_pct = 0.0
 
-    # 2. Bearish Opening Drive: Open == High (within 0.15%) & expanding downward (The OFSS Archetype)
-    high_diff_pct = (abs(bar_high - bar_open) / bar_open) * 100.0
-    if high_diff_pct <= 0.15 and (bar_close <= (bar_low + 0.55 * bar_range) or ltp <= bar_low):
-        if (
-            (prev_low and (bar_close <= prev_low * 1.002 or ltp <= prev_low))
-            or (prev_close and bar_close < prev_close)
-            or (ltp <= bar_open * 0.997)
-            or (
-                prev_close
-                and bar_open > prev_close * 1.002
-                and bar_close < bar_open
-                and (bar_close <= (bar_low + 0.35 * bar_range) or ltp <= bar_low * 1.001)
-            )
-        ):
-            # Wick Trap Filter: reject candles where lower absorption wick > 35%
-            lower_wick = min(bar_open, bar_close) - bar_low
-            has_absorption_wick = (lower_wick / bar_range) > 0.35
-            if not has_absorption_wick or (
-                ltp <= bar_low and (bar_close - bar_low) / bar_range <= 0.20
+    min_range_pct = 0.20 if (is_index or is_heavyweight) else 0.35
+    num_bars = min(len(df_today), 3)
+
+    for bar_idx in range(num_bars):
+        cand_bar = df_today.iloc[bar_idx]
+        b_open = float(cand_bar.get("open", cand_bar.get("Open", 0.0)))
+        b_high = float(cand_bar.get("high", cand_bar.get("High", 0.0)))
+        b_low = float(cand_bar.get("low", cand_bar.get("Low", 0.0)))
+        b_close = float(cand_bar.get("close", cand_bar.get("Close", 0.0)))
+        b_range = b_high - b_low
+
+        if b_open <= 0 or b_range <= 0:
+            continue
+
+        range_pct_i = (b_range / b_open) * 100.0
+        if range_pct_i < min_range_pct:
+            continue
+
+        # Dynamic low/high diff tolerance: up to 0.20% on Bar 0, up to 0.25% on subsequent ignition bars
+        max_diff = 0.20 if bar_idx == 0 else 0.25
+
+        # 1. Bullish Opening Drive check
+        low_diff_pct = (abs(b_open - b_low) / b_open) * 100.0
+        if low_diff_pct <= max_diff and (b_close >= (b_low + 0.45 * b_range) or ltp >= b_high):
+            if (
+                (prev_high and (b_close >= prev_high * 0.998 or ltp >= prev_high))
+                or (prev_close and b_close > prev_close)
+                or (ltp >= b_open * 1.003)
+                or (
+                    prev_close
+                    and b_open < prev_close * 0.998
+                    and b_close > b_open
+                    and (b_close >= (b_low + 0.65 * b_range) or ltp >= b_high * 0.999)
+                )
             ):
-                is_bear_drive = True
+                upper_wick = b_high - max(b_open, b_close)
+                has_rejection_wick = (upper_wick / b_range) > 0.35
+                if not has_rejection_wick or (
+                    ltp >= b_high and (b_high - b_close) / b_range <= 0.20
+                ):
+                    is_bull_drive = True
+                    matched_bar_idx = bar_idx
+                    bar_open = b_open
+                    bar_high = b_high
+                    bar_low = b_low
+                    bar_close = b_close
+                    range_pct = range_pct_i
+                    break
+
+        # 2. Bearish Opening Drive check
+        high_diff_pct = (abs(b_high - b_open) / b_open) * 100.0
+        if high_diff_pct <= max_diff and (b_close <= (b_low + 0.55 * b_range) or ltp <= b_low):
+            if (
+                (prev_low and (b_close <= prev_low * 1.002 or ltp <= prev_low))
+                or (prev_close and b_close < prev_close)
+                or (ltp <= b_open * 0.997)
+                or (
+                    prev_close
+                    and b_open > prev_close * 1.002
+                    and b_close < b_open
+                    and (b_close <= (b_low + 0.35 * b_range) or ltp <= b_low * 1.001)
+                )
+            ):
+                lower_wick = min(b_open, b_close) - b_low
+                has_absorption_wick = (lower_wick / b_range) > 0.35
+                if not has_absorption_wick or (
+                    ltp <= b_low and (b_close - b_low) / b_range <= 0.20
+                ):
+                    is_bear_drive = True
+                    matched_bar_idx = bar_idx
+                    bar_open = b_open
+                    bar_high = b_high
+                    bar_low = b_low
+                    bar_close = b_close
+                    range_pct = range_pct_i
+                    break
 
     if not (is_bull_drive or is_bear_drive):
         return None
@@ -664,7 +688,18 @@ def detect_opening_drive(
 
     metrics_dict: dict[str, Any] = {
         "setup": "OPENING_DRIVE",
-        "open_pattern": "OPEN_EQUALS_LOW" if is_bull_drive else "OPEN_EQUALS_HIGH",
+        "open_pattern": "OPEN_EQUALS_LOW"
+        if (is_bull_drive and matched_bar_idx == 0)
+        else (
+            "OPEN_EQUALS_HIGH"
+            if (is_bear_drive and matched_bar_idx == 0)
+            else (
+                f"IGNITION_BAR_{matched_bar_idx}"
+                if is_bull_drive
+                else f"BREAKDOWN_BAR_{matched_bar_idx}"
+            )
+        ),
+        "matched_bar_idx": matched_bar_idx,
         "opening_range_pct": round(range_pct, 2),
         "rvol": rvol_val,
         "bar_open": bar_open,
@@ -686,6 +721,30 @@ def detect_opening_drive(
         "avwap_confluence": avwap_confluence,
         "obv_regime": obv_div,
     }
+
+    try:
+        from engine.pullback_level_resolver import resolve_pullback_entry
+
+        pullback_res = resolve_pullback_entry(
+            symbol=clean_sym,
+            direction=direction,
+            spot=ltp,
+            vwap=vwap or ltp,
+            day_high=bar_high,
+            day_low=bar_low,
+            atr_5m=atr_5m,
+            prefer_options=is_index,
+        )
+        if pullback_res:
+            act_plan["limit_entry_zone"] = (
+                f"₹{pullback_res.entry_zone_min:,.1f} - ₹{pullback_res.entry_zone_max:,.1f}"
+            )
+            act_plan["limit_entry_mid"] = pullback_res.entry_zone_mid
+            metrics_dict["entry_zone_min"] = pullback_res.entry_zone_min
+            metrics_dict["entry_zone_max"] = pullback_res.entry_zone_max
+            metrics_dict["entry_zone_mid"] = pullback_res.entry_zone_mid
+    except Exception as e_pb:
+        logger.debug(f"[OpeningDrive] Pullback level resolver error for {clean_sym}: {e_pb}")
 
     if rvol_val >= 1.5:
         metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
