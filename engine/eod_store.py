@@ -1703,7 +1703,11 @@ def _download_chunk_yfinance(
         if len(df) >= 1:
             for s in sym_list:
                 results[s] = df.copy()
-                if s in sym_alias_map:
+                if (
+                    s in sym_alias_map
+                    and sym_alias_map[s] not in chunk_symbols
+                    and sym_alias_map[s] not in results
+                ):
                     results[sym_alias_map[s]] = df.copy()
     else:
         for ticker, sym_list in ticker_to_syms.items():
@@ -1719,7 +1723,11 @@ def _download_chunk_yfinance(
                     if len(sub_df) >= 1:
                         for s in sym_list:
                             results[s] = sub_df.copy()
-                            if s in sym_alias_map:
+                            if (
+                                s in sym_alias_map
+                                and sym_alias_map[s] not in chunk_symbols
+                                and sym_alias_map[s] not in results
+                            ):
                                 results[sym_alias_map[s]] = sub_df.copy()
             except Exception as e:
                 logger.warning(

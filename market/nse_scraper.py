@@ -90,8 +90,8 @@ def _get_session():
 
             sess = c_requests.Session(impersonate="chrome124")
             sess.headers.update(_NSE_HEADERS)
-            # Warm up session with cookies from option-chain page (fast 3.5s timeout)
-            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=3.5)
+            # Warm up session with cookies from option-chain page (resilient 5.0s timeout)
+            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=5.0)
             if r.status_code == 200:
                 sess.headers.update(
                     {
@@ -179,7 +179,7 @@ def nse_get_contract_info(underlying: str) -> dict:
         return {}
     url = f"{_NSE_BASE}/api/option-chain-contract-info?symbol={clean_sym}"
     try:
-        resp = session.get(url, timeout=3.5)
+        resp = session.get(url, timeout=7.0)
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
@@ -350,7 +350,7 @@ def nse_fetch_full_snapshot(
             f"{_NSE_BASE}/api/option-chain-v3?"
             f"type={endpoint_type}&symbol={clean_sym}&expiry={selected_nse_exp}"
         )
-        resp = session.get(url, timeout=3.5)
+        resp = session.get(url, timeout=7.0)
         if resp.status_code != 200:
             _CACHE[cache_key] = (now, [], None, iso_expiries)
             return [], None, iso_expiries

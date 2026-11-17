@@ -642,12 +642,27 @@ class AutoAlert:
                 except (ValueError, TypeError):
                     self.tactical_sl = float(self.stop_loss)
             elif is_opt_setup:
-                # Scale guard: only adopt stop_loss as tactical option SL if it is in option premium scale (< 1500 pts)
-                # If stop_loss is in spot scale (>= 1500 pts), it belongs in structural_spot_sl!
-                if self.stop_loss < 1500.0:
-                    self.tactical_sl = float(self.stop_loss)
-                elif self.structural_spot_sl is None:
-                    self.structural_spot_sl = float(self.stop_loss)
+                ref_spot = float(
+                    self.underlying_spot
+                    or (self.metrics or {}).get("spot")
+                    or (self.metrics or {}).get("underlying_spot")
+                    or self.strike
+                    or 0.0
+                )
+                sl_val = float(self.stop_loss)
+                if ref_spot > 0:
+                    is_spot_scale = abs(sl_val - ref_spot) / ref_spot <= 0.35
+                else:
+                    opt_p = float(
+                        self.option_premium or (self.metrics or {}).get("option_premium") or 0.0
+                    )
+                    is_spot_scale = opt_p > 0 and sl_val > 2.5 * opt_p
+
+                if is_spot_scale:
+                    if self.structural_spot_sl is None:
+                        self.structural_spot_sl = sl_val
+                else:
+                    self.tactical_sl = sl_val
 
         if self.structural_spot_sl is None:
             spot_anchor = (
@@ -2416,15 +2431,33 @@ class AutoAlert:
             )
         )
         sl = float(self.stop_loss or 0.0)
-        if sl > 0:
-            if not is_opt or sl >= 1500.0:
+        if sl <= 0:
+            return 0.0
+        if not is_opt:
+            return sl
+
+        ref_spot = float(
+            self.underlying_spot
+            or (self.metrics or {}).get("spot")
+            or (self.metrics or {}).get("underlying_spot")
+            or self.strike
+            or 0.0
+        )
+        if ref_spot > 0:
+            if abs(sl - ref_spot) / ref_spot <= 0.35:
                 return sl
-        return 0.0
+            return 0.0
+
+        opt_p = float(self.option_premium or (self.metrics or {}).get("option_premium") or 0.0)
+        if opt_p > 0 and sl <= 2.5 * opt_p:
+            return 0.0
+        return sl
 
     @property
     def effective_option_sl(self) -> float:
         """
         Effective tactical option premium stop-loss level (denominated in option contract rupees).
+        Guarantees that spot SL is never returned as option premium stop loss.
         """
         if self.tactical_sl and self.tactical_sl > 0:
             return float(self.tactical_sl)
@@ -2438,9 +2471,32 @@ class AutoAlert:
                 and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
             )
         )
+        if not is_opt:
+            return 0.0
+
         sl = float(self.stop_loss or 0.0)
-        if is_opt and 0 < sl < 1500.0:
-            return sl
+        if sl <= 0:
+            return 0.0
+
+        ref_spot = float(
+            self.underlying_spot
+            or (self.metrics or {}).get("spot")
+            or (self.metrics or {}).get("underlying_spot")
+            or self.strike
+            or 0.0
+        )
+        if ref_spot > 0:
+            if abs(sl - ref_spot) / ref_spot <= 0.35:
+                return 0.0
+            if sl < 0.25 * ref_spot:
+                return sl
+
+        opt_p = float(self.option_premium or (self.metrics or {}).get("option_premium") or 0.0)
+        if opt_p > 0:
+            if sl <= 2.5 * opt_p:
+                return sl
+            return 0.0
+
         return 0.0
 
     @property

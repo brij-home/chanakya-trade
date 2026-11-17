@@ -400,6 +400,32 @@ def detect_intraday_mover_sparks(
             except Exception as e_tide:
                 logger.debug(f"[IntradaySpark] Index tide check skipped for {clean_sym}: {e_tide}")
 
+        # Gate 32: Microstructure Order Book Imbalance (OBI) & Fortress Wall Shield
+        # Protects against shorting directly into institutional bid absorption walls (OBI50 >= +0.30)
+        # or buying into massive ask distribution supply walls (OBI50 <= -0.30).
+        try:
+            from market.order_book import get_depth_book
+
+            depth = get_depth_book(clean_sym)
+            if depth and (depth.best_bid > 0 or depth.best_ask > 0):
+                obi_val = float(depth.obi(50))
+                if not is_bullish and obi_val >= 0.30:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed breakdown spark on {clean_sym}: "
+                        f"Severe Bid Book Imbalance (OBI50={obi_val:+.2f} >= +0.30) indicates institutional absorption wall."
+                    )
+                    continue
+                elif is_bullish and obi_val <= -0.30:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed breakout spark on {clean_sym}: "
+                        f"Severe Ask Book Imbalance (OBI50={obi_val:+.2f} <= -0.30) indicates institutional supply wall."
+                    )
+                    continue
+        except Exception as e_depth:
+            logger.debug(
+                f"[IntradaySpark] Order book depth check skipped for {clean_sym}: {e_depth}"
+            )
+
         is_mock_spark = (
             type(q).__name__ == "MagicMock"
             or getattr(q, "_is_mock", False)
