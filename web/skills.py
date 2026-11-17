@@ -7143,6 +7143,7 @@ def _compute_market_overview_sync() -> dict:
         "decliners": None,
         "unchanged": None,
         "sectors": [],
+        "index_internals": None,
     }
 
     fetched_any = False
@@ -7208,6 +7209,21 @@ def _compute_market_overview_sync() -> dict:
             fetched_any = True
     except Exception as e_suppressed:
         logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
+
+    # Index Market Internals & Heavyweight Point Contributions (Frontier D)
+    try:
+        from engine.market_internals import compute_index_internals
+
+        internals = compute_index_internals("NIFTY")
+        if internals and internals.total_constituents > 0:
+            if result.get("advancers") is None:
+                result["advancers"] = internals.advances
+                result["decliners"] = internals.declines
+                result["unchanged"] = internals.unchanged
+            result["index_internals"] = internals.to_dict()
+            fetched_any = True
+    except Exception as e_internals:
+        logger.debug(f"[web.skills] Market internals enrichment note: {e_internals}")
 
     # Sector RRG — non-blocking timeout
     try:

@@ -905,6 +905,33 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
+      {/* ── Order Flow Cumulative Volume Delta (CVD) Absorption Banner ── */}
+      {(alert.cvd_divergence || alert.metrics?.cvd_divergence) && !isInvalidated && (
+        <div
+          className={`flex items-center gap-2 px-2.5 py-1 rounded-lg border text-[11px] ${
+            (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BULLISH_ABSORPTION'
+              ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-300 dark:border-emerald-500/35 text-emerald-900 dark:text-emerald-200'
+              : (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BEARISH_EXHAUSTION'
+              ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-300 dark:border-rose-500/35 text-rose-900 dark:text-rose-200'
+              : 'bg-blue-50 dark:bg-blue-500/15 border-blue-300 dark:border-blue-500/35 text-blue-900 dark:text-blue-200'
+          }`}
+        >
+          <span className="font-bold flex-shrink-0">
+            {(alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BULLISH_ABSORPTION'
+              ? '🛡️ CVD Absorption (Passive Buyers):'
+              : (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BEARISH_EXHAUSTION'
+              ? '⚠️ CVD Exhaustion (Bull Trap):'
+              : '⚡ CVD Order Flow Delta:'}
+          </span>
+          <span
+            className="truncate flex-1 font-sans"
+            title={alert.cvd_note || alert.metrics?.cvd_note || 'Order flow delta confirms institutional participation'}
+          >
+            {alert.cvd_note || alert.metrics?.cvd_note || `Institutional flow confirms ${alert.direction} momentum.`}
+          </span>
+        </div>
+      )}
+
       {/* ── Microstructure Execution Friction & Order Mandate Banner ── */}
       {alert.execution_friction_badge && !isInvalidated && (
         <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-500/15 border border-amber-300 dark:border-amber-500/35 text-[11px] text-amber-900 dark:text-amber-200">

@@ -178,6 +178,7 @@ export default function OverviewView() {
   const advancers = data?.advancers ?? null
   const decliners = data?.decliners ?? null
   const unchanged = data?.unchanged ?? null
+  const indexInternals = data?.index_internals ?? null
   const sectorList = (data?.sectors && data.sectors.length > 0) ? data.sectors : null
 
   const macroItems = globalMacro?.items ? Object.values(globalMacro.items) : null
@@ -379,16 +380,59 @@ export default function OverviewView() {
                   <div
                     className="text-center py-1.5 rounded-lg text-xs font-black"
                     style={{
-                      background: advancers > decliners ? 'rgba(0,214,143,0.1)' : 'rgba(255,79,123,0.1)',
-                      color: advancers > decliners ? 'var(--color-emerald)' : 'var(--color-rose)',
+                      background:
+                        indexInternals?.regime === 'HEAD_FAKE_DIVERGENCE'
+                          ? 'rgba(245,166,35,0.15)'
+                          : advancers > decliners
+                          ? 'rgba(0,214,143,0.1)'
+                          : 'rgba(255,79,123,0.1)',
+                      color:
+                        indexInternals?.regime === 'HEAD_FAKE_DIVERGENCE'
+                          ? 'var(--color-gold)'
+                          : advancers > decliners
+                          ? 'var(--color-emerald)'
+                          : 'var(--color-rose)',
                     }}
                   >
-                    {advancers > decliners ? '🚀 BULLISH BREADTH' : '🛡️ BEARISH BREADTH'}
+                    {indexInternals?.regime === 'HEAD_FAKE_DIVERGENCE'
+                      ? '⚠️ HEAD-FAKE DIVERGENCE'
+                      : advancers > decliners
+                      ? '🚀 BULLISH BREADTH'
+                      : '🛡️ BEARISH BREADTH'}
                   </div>
-                  <div className="text-[11px] text-muted">
-                    A/D Ratio: {(advancers / Math.max(decliners, 1)).toFixed(2)}x &nbsp;|&nbsp;
-                    {advancers + decliners + (unchanged ?? 0)} stocks tracked
+                  <div className="flex justify-between text-[11px] text-muted">
+                    <span>A/D Ratio: {(advancers / Math.max(decliners, 1)).toFixed(2)}x</span>
+                    {indexInternals?.pct_above_vwap != null && (
+                      <span
+                        className="font-mono tabular-nums font-bold"
+                        style={{
+                          color:
+                            indexInternals.pct_above_vwap >= 60
+                              ? 'var(--color-emerald)'
+                              : indexInternals.pct_above_vwap <= 40
+                              ? 'var(--color-rose)'
+                              : 'var(--color-muted)',
+                        }}
+                      >
+                        {indexInternals.pct_above_vwap}% &gt; VWAP
+                      </span>
+                    )}
                   </div>
+                  {indexInternals?.top_positive_drivers && indexInternals.top_positive_drivers.length > 0 && (
+                    <div
+                      className="text-[10px] text-muted pt-1 border-t flex justify-between truncate"
+                      style={{ borderColor: 'var(--color-border)' }}
+                    >
+                      <span className="truncate">
+                        🚀 {indexInternals.top_positive_drivers[0].symbol} (+{indexInternals.top_positive_drivers[0].points} pts)
+                      </span>
+                      {indexInternals.top_negative_drivers && indexInternals.top_negative_drivers.length > 0 && (
+                        <span className="truncate">
+                          ⚠️ {indexInternals.top_negative_drivers[0].symbol} ({indexInternals.top_negative_drivers[0].points} pts)
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
                 <UnavailableState
