@@ -281,6 +281,35 @@ def evaluate_confluence(
             f5_score = 8.0
             f5_status = "PARTIAL"
             f5_desc = "Balanced derivatives flow."
+    # Check Microstructure Cumulative Volume Delta (CVD) absorption/expansion
+    try:
+        from engine.cvd_engine import get_cvd_metrics
+
+        cvd_m = get_cvd_metrics(clean_sym)
+        if cvd_m.sample_count >= 5:
+            if is_bull and (
+                cvd_m.cvd_divergence == "BULLISH_ABSORPTION" or cvd_m.cvd_bias == "BULLISH"
+            ):
+                f5_score = max(f5_score, 18.0)
+                f5_status = "CONFIRMED"
+                f5_desc = f"Institutional Order Flow CVD confirmation: {cvd_m.absorption_note}"
+            elif not is_bull and (
+                cvd_m.cvd_divergence == "BEARISH_EXHAUSTION" or cvd_m.cvd_bias == "BEARISH"
+            ):
+                f5_score = max(f5_score, 18.0)
+                f5_status = "CONFIRMED"
+                f5_desc = f"Institutional Order Flow CVD confirmation: {cvd_m.absorption_note}"
+            elif is_bull and cvd_m.cvd_divergence == "BEARISH_EXHAUSTION":
+                f5_score = 0.0
+                f5_status = "OPPOSING"
+                f5_desc = f"Order Flow CVD Exhaustion / Bull Trap: {cvd_m.absorption_note}"
+            elif not is_bull and cvd_m.cvd_divergence == "BULLISH_ABSORPTION":
+                f5_score = 0.0
+                f5_status = "OPPOSING"
+                f5_desc = f"Order Flow CVD Absorption / Bear Trap: {cvd_m.absorption_note}"
+    except Exception as exc_cvd:
+        logger.debug(f"[confluence_engine] CVD evaluation note for {clean_sym}: {exc_cvd}")
+
     factors.append(ConfluenceFactor("Derivatives Order Flow", f5_score, 20.0, f5_status, f5_desc))
     total_score += f5_score
 

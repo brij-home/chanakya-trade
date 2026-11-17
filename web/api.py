@@ -4811,6 +4811,84 @@ async def get_symbol_confluence(symbol: str, direction: Optional[str] = None):
         raise _HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/v1/options/optimize-strike", tags=["Analysis", "Options"])
+async def get_options_optimization(
+    symbol: str,
+    direction: str = "BULLISH",
+    spot: Optional[float] = None,
+    regime: str = "MOMENTUM_BREAKOUT",
+    iv: Optional[float] = None,
+    iv_percentile: Optional[float] = None,
+    dte_days: float = 6.0,
+    target_delta: Optional[float] = None,
+    lot_size: int = 1,
+):
+    """
+    Dynamically optimize options strike, Greeks surface (Delta, Gamma, Vega, Theta),
+    and spread structure (Naked Buy vs Vertical Debit Spread) based on live spot & IV regime.
+    """
+    try:
+        from engine.options_optimizer import optimize_option_contract
+        from market.quotes import get_ltp
+
+        ref_spot = float(spot or 0.0)
+        if ref_spot <= 0:
+            ref_spot = float(await asyncio.to_thread(get_ltp, symbol) or 0.0)
+        if ref_spot <= 0:
+            raise _HTTPException(
+                status_code=400, detail=f"Valid underlying spot price required for {symbol}"
+            )
+
+        plan = optimize_option_contract(
+            symbol=symbol,
+            direction=direction,
+            spot=ref_spot,
+            regime=regime,
+            iv=iv,
+            iv_percentile=iv_percentile,
+            dte_days=dte_days,
+            target_delta=target_delta,
+            lot_size=lot_size,
+        )
+        return {"status": "success", "data": plan.to_dict()}
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[API] Options strike optimization failed for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/cvd/{symbol}", tags=["Market", "Microstructure"])
+async def get_symbol_cvd(symbol: str):
+    """
+    Get real-time Cumulative Volume Delta (CVD) footprint metrics, slope, and institutional absorption traps.
+    """
+    try:
+        from engine.cvd_engine import get_cvd_metrics
+
+        metrics = get_cvd_metrics(symbol)
+        return {"status": "success", "data": metrics.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to get CVD metrics for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/index-internals", tags=["Market", "Analysis"])
+async def get_index_market_internals(index: str = "NIFTY"):
+    """
+    Get real-time index market internals: Advance/Decline (A/D) ratio, % > VWAP breadth,
+    weighted heavyweight point contributions, and regime classification (Broad vs Head-Fake).
+    """
+    try:
+        from engine.market_internals import compute_index_internals
+
+        report = await asyncio.to_thread(compute_index_internals, index)
+        return {"status": "success", "data": report.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute index internals for {index}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/v1/analysis/forensics/{symbol}", tags=["Analysis"])
 async def get_forensic_audit(symbol: str):
     """

@@ -45,7 +45,9 @@ def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
     canonical = canonical_symbol(str(symbol))
     with _DEPTH_LOCK:
         if canonical not in _DEPTH_BOOKS:
-            _DEPTH_BOOKS[canonical] = BisectDepthBook(max_depth=max_depth)
+            book_inst = BisectDepthBook(max_depth=max_depth)
+            book_inst.symbol = canonical
+            _DEPTH_BOOKS[canonical] = book_inst
         book = _DEPTH_BOOKS[canonical]
         # Benchmark Spot Indices (-INDEX) do not have limit order books on any exchange.
         # If the spot index book is empty, transparently link to its active near-month Futures book.
@@ -357,9 +359,24 @@ class BisectDepthBook:
         return self.simulate_sweep(side=side, quantity=quantity)
 
     def record_tick(self, price: float, volume: int = 1, timestamp: Optional[float] = None) -> None:
-        """Record a price/volume tick into the internal circular ring buffer in O(1)."""
+        """Record a price/volume tick into the internal circular ring buffer and CVD engine in O(1)."""
         if price > 0:
             self._tick_buffer.append(price, volume, timestamp)
+            sym = getattr(self, "symbol", "")
+            if sym:
+                try:
+                    from engine.cvd_engine import record_market_trade
+
+                    record_market_trade(
+                        symbol=sym,
+                        price=price,
+                        volume=volume,
+                        best_bid=self.best_bid,
+                        best_ask=self.best_ask,
+                        timestamp=timestamp,
+                    )
+                except Exception as _e_cvd:
+                    logger.debug(f"[record_tick] CVD ingestion note for {sym}: {_e_cvd}")
 
     @property
     def rolling_tick_vwap(self) -> float:
