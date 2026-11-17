@@ -1653,14 +1653,21 @@ def compute_options_iv_skew(
         .upper()
     )
 
-    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        step = 100.0
-    elif clean_und in ("NIFTY", "FINNIFTY"):
-        step = 50.0
-    elif clean_und == "MIDCPNIFTY":
-        step = 25.0
-    else:
-        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+    try:
+        from market.symbol_master import get_strike_step
+
+        step = float(get_strike_step(clean_und, spot=spot))
+        if step <= 0:
+            step = 50.0
+    except Exception:
+        if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+            step = 100.0
+        elif clean_und in ("NIFTY", "FINNIFTY"):
+            step = 50.0
+        elif clean_und == "MIDCPNIFTY":
+            step = 25.0
+        else:
+            step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
 
     atm_strike = round(spot / step) * step
 

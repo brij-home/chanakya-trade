@@ -165,26 +165,25 @@ class OptimizedContractPlan:
 
 
 def get_underlying_strike_step(symbol: str, spot: float) -> float:
-    """Returns canonical strike step size for Indian indices and equities."""
+    """Returns canonical strike step size via market.symbol_master SSOT."""
+    from market.symbol_master import get_strike_step
+
     clean = canonical_symbol(symbol).upper()
+    try:
+        step = float(get_strike_step(clean, spot=spot))
+        if step > 0:
+            return step
+    except Exception as exc:
+        logger.debug(f"[options_optimizer] Step resolution note for {clean}: {exc}")
+
+    # Fallback to standard benchmark step if master is unavailable
     if clean in ("BANKNIFTY", "SENSEX", "BANKEX"):
         return 100.0
     if clean in ("NIFTY", "FINNIFTY"):
         return 50.0
     if clean in ("MIDCPNIFTY",):
         return 25.0
-    # Equities: dynamic step based on spot price band
-    if spot >= 5000:
-        return 100.0
-    if spot >= 2500:
-        return 50.0
-    if spot >= 1000:
-        return 20.0
-    if spot >= 500:
-        return 10.0
-    if spot >= 200:
-        return 5.0
-    return 2.5
+    return 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
 
 
 def optimize_option_contract(
@@ -255,9 +254,23 @@ def optimize_option_contract(
             best_strike = cand_strike
             best_greeks = g
 
-    # 4. Formulate Canonical Option Contract Symbol
-    # E.g. NSE:NIFTY26NOV24500CE
-    contract_sym = f"NSE:{clean_sym}26NOV{int(best_strike)}{opt_type}"
+    # 4. Formulate Canonical Option Contract Symbol (Dynamic Expiry)
+    expiry_code = ""
+    try:
+        from market.symbol_master import get_active_expiries
+
+        exp_dates = get_active_expiries(clean_sym)
+        if exp_dates:
+            expiry_code = exp_dates[0].strftime("%y%b").upper()
+    except Exception as exc:
+        logger.debug(f"[options_optimizer] Expiry resolution note for {clean_sym}: {exc}")
+
+    if not expiry_code:
+        from datetime import datetime
+
+        expiry_code = datetime.now().strftime("%y%b").upper()
+
+    contract_sym = f"NSE:{clean_sym}{expiry_code}{int(best_strike)}{opt_type}"
 
     # 5. Assess IV Crush Vulnerability & Execution Structure
     is_high_iv = resolved_ivp >= 70.0 or resolved_iv >= 0.22
@@ -282,7 +295,7 @@ def optimize_option_contract(
         # Short wing: 2 steps OTM
         hedge_offset = 2 if is_bull else -2
         hedge_strike = best_strike + (hedge_offset * step)
-        hedge_contract_sym = f"NSE:{clean_sym}26NOV{int(hedge_strike)}{opt_type}"
+        hedge_contract_sym = f"NSE:{clean_sym}{expiry_code}{int(hedge_strike)}{opt_type}"
         hedge_greeks = calculate_black_scholes_greeks(
             spot=spot,
             strike=hedge_strike,

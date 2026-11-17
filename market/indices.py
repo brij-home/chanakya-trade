@@ -251,23 +251,29 @@ def get_market_snapshot(extended: bool = True) -> MarketSnapshot:
     )
 
 
-NIFTY_TOP_HEAVYWEIGHTS = [
-    "HDFCBANK",
-    "RELIANCE",
-    "ICICIBANK",
-    "INFY",
-    "TCS",
-    "BHARTIARTL",
-    "LT",
-]
+try:
+    from engine.market_internals import BANKNIFTY_WEIGHTS, NIFTY_WEIGHTS
 
-BANKNIFTY_TOP_HEAVYWEIGHTS = [
-    "HDFCBANK",
-    "ICICIBANK",
-    "SBIN",
-    "AXISBANK",
-    "KOTAKBANK",
-]
+    NIFTY_TOP_HEAVYWEIGHTS = list(NIFTY_WEIGHTS.keys())[:7]
+    BANKNIFTY_TOP_HEAVYWEIGHTS = list(BANKNIFTY_WEIGHTS.keys())[:5]
+except Exception:
+    NIFTY_TOP_HEAVYWEIGHTS = [
+        "HDFCBANK",
+        "RELIANCE",
+        "ICICIBANK",
+        "INFY",
+        "TCS",
+        "BHARTIARTL",
+        "LT",
+    ]
+
+    BANKNIFTY_TOP_HEAVYWEIGHTS = [
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "AXISBANK",
+        "KOTAKBANK",
+    ]
 
 
 def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
