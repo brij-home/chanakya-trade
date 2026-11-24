@@ -61,6 +61,7 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "SILVER": 30,
     "SILVERM": 5,
     "SILVERMIC": 1,
+    "SILMIC": 1,
     "COPPER": 2500,
     "ZINC": 5000,
     "ALUMINIUM": 5000,
@@ -558,7 +559,9 @@ class ParsedDerivativeContract:
         }
 
 
-def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
+def _calc_monthly_expiry_date(
+    exch: str, underlying: str, yr: int, mo: int, is_option: bool = False
+) -> date:
     """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS with calendar adjustment."""
     from calendar import monthrange
 
@@ -570,11 +573,38 @@ def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> d
         while d.weekday() != expiry_weekday("BSE", d):
             d -= timedelta(days=1)
     elif exch_up == "MCX" or und_up in COMMODITY_SYMBOLS:
-        if "CRUDE" in und_up:
-            exp_day = min(19, num_days)
+        if is_option:
+            # MCX Options expire prior to futures / tender period (institutional calendar rules)
+            if "CRUDE" in und_up:
+                exp_day = min(16, num_days)
+            elif "NATURALGAS" in und_up or "NATGAS" in und_up:
+                exp_day = min(23, num_days)
+            elif und_up in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL"):
+                exp_day = min(23, num_days)
+            elif und_up in ("GOLD", "GOLDM", "SILVER", "SILVERM"):
+                exp_day = min(25, num_days)
+            else:
+                exp_day = min(25, num_days)
             d = date(yr, mo, exp_day)
+            if d.weekday() == 5:
+                d -= timedelta(days=1)
+            elif d.weekday() == 6:
+                d -= timedelta(days=2)
         else:
-            d = date(yr, mo, num_days)
+            # MCX Futures contracts
+            if "CRUDE" in und_up:
+                exp_day = min(19, num_days)
+            elif "NATURALGAS" in und_up or "NATGAS" in und_up:
+                exp_day = min(25, num_days)
+            elif und_up in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL"):
+                exp_day = min(26, num_days)
+            else:
+                exp_day = num_days
+            d = date(yr, mo, exp_day)
+            if d.weekday() == 5:
+                d -= timedelta(days=1)
+            elif d.weekday() == 6:
+                d -= timedelta(days=2)
     else:
         d = date(yr, mo, num_days)
         while d.weekday() != expiry_weekday("NSE", d):
@@ -683,7 +713,7 @@ def parse_derivative_contract(symbol: str) -> Optional[ParsedDerivativeContract]
         yr = 2000 + int(yy)
         mo = MONTH_NAME_TO_INT.get(mo_str.upper(), 1)
         stk = float(stk_str)
-        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo)
+        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo, is_option=True)
         exp_tag = f"{yy}{mo_str.upper()}"
         lot = get_fno_lot_size(und)
         tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
@@ -713,7 +743,7 @@ def parse_derivative_contract(symbol: str) -> Optional[ParsedDerivativeContract]
         und = canonical_symbol(und_raw)
         yr = 2000 + int(yy)
         mo = MONTH_NAME_TO_INT.get(mo_str.upper(), 1)
-        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo)
+        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo, is_option=False)
         exp_tag = f"{yy}{mo_str.upper()}"
         lot = get_fno_lot_size(und)
         tick = STANDARD_TICK_SIZES.get("FNO", 0.05)

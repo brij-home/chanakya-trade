@@ -452,7 +452,7 @@ def _resolve_commodity_contract(symbol: str, ref_time: dt.datetime | None = None
 
     # NATURALGAS: monthly, expires ~25th (tender period starts ~23rd).
     # 48h pre-tender auto-roll activates on day 23.
-    if clean in ("NATURALGAS", "NATURALGASM"):
+    if clean in ("NATURALGAS", "NATURALGASM", "NATGASMINI"):
         target_dt = now if now.day <= 22 else now + dt.timedelta(days=15)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
@@ -1749,7 +1749,7 @@ class FyersAPI(BrokerAPI):
             try:
                 if not rate_gate_acquired:
                     if not _fyers_rate_limiter.acquire(category=category):
-                        logger.warning(
+                        logger.info(
                             f"[FyersAPI] Rate gate denied permit for {category.name} chunk ({len(chunk)} symbols)."
                         )
                         continue
@@ -2120,7 +2120,7 @@ class FyersAPI(BrokerAPI):
                         params["timestamp"] = str(exp_ts)
 
             if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
-                logger.warning(
+                logger.info(
                     f"[FyersAPI] Rate gate denied permit for DEPTH_CHAIN optionchain ({underlying})."
                 )
                 return []
@@ -3089,7 +3089,7 @@ class FyersAPI(BrokerAPI):
                 _warn_circuit_breaker_open("historical data", fyers_sym)
                 break
             if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
-                logger.warning(
+                logger.info(
                     f"[FyersAPI] Rate gate denied permit for HISTORICAL chunk ({fyers_sym}, {c_from} to {c_to})."
                 )
                 break

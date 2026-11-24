@@ -1320,14 +1320,28 @@ def _resolve_monotonic_display_targets(
         if filtered:
             candidates = filtered
 
-        # Scale Separation Invariant: For options buying (< 1000 premium), filter out leaked spot targets
+        # Scale Separation Invariant: For options buying, filter out leaked spot targets
         is_opt = (
             "OPTION" in str(ap.get("instrument_type", "")).upper()
             or any(k in str(ap.get("contract", "")).upper() for k in ("CE", "PE"))
             or (alert and getattr(alert, "option_type", None))
+            or str(getattr(alert, "segment", "")).upper() in ("NFO", "FNO_STOCK", "FNO_INDEX")
         )
-        if is_opt and entry_val < 1000:
-            scale_filtered = [c for c in candidates if c < max(500.0, entry_val * 6.0)]
+        if is_opt and entry_val > 0:
+            u_spot = getattr(alert, "underlying_spot", None) or ap.get("underlying_spot")
+            s_val = None
+            if u_spot:
+                try:
+                    s_val = float(str(u_spot).replace("₹", "").replace(",", ""))
+                except Exception:
+                    pass
+
+            scale_filtered = [
+                c
+                for c in candidates
+                if c <= entry_val * 6.0
+                and (s_val is None or abs(c - s_val) / s_val >= 0.35)
+            ]
             if scale_filtered:
                 candidates = scale_filtered
 
@@ -3023,10 +3037,10 @@ def render_fno_alert(
         )
         + f"• <b>R:R:</b> <b>{rr_display}</b>{lot_rr_str}{no_chase_str}{fno_hedge_line}\n"
         + flow_line
-        + f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
+        + f"<blockquote expandable>💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
         f"📋 <b>Playbook:</b> <i>{d.profit_rule}</i>"
         f"{conv_badge}\n"
-        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code></blockquote>"
     )
     if getattr(d, "is_do_not_miss", False):
         msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
@@ -3099,10 +3113,10 @@ def render_equity_alert(data: EquityAlertData | dict[str, Any], in_market: bool 
         f"• <b>T1 (2R):</b> <code>₹{d.target_1:,.2f}</code> (+{d.t1_pct:.1f}%) — <i>Scale 50% & SL to Breakeven</i>"
         f"{t2_str}{moon_str}\n"
         f"• <b>R:R:</b> <b>1:{d.risk_reward:.1f}</b>{no_chase_str}\n"
-        f"📊 <b>Scores:</b> Strategic: <b>{d.strategic_score}/100</b> | Live Tactical: <b>{d.tactical_score}/100</b> · RVOL: <b>{d.rvol:.1f}x</b>\n"
+        f"<blockquote expandable>📊 <b>Scores:</b> Strategic: <b>{d.strategic_score}/100</b> | Live Tactical: <b>{d.tactical_score}/100</b> · RVOL: <b>{d.rvol:.1f}x</b>\n"
         f"💡 <b>Reason:</b> {cat_str}\n"
         f"⚡ <b>Quick Size:</b> <code>{d.quick_command}</code>\n"
-        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code></blockquote>"
     )
     if getattr(d, "is_do_not_miss", False):
         msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
@@ -3196,9 +3210,9 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         f"• <b>T2 (2.5R):</b> <code>₹{t2:,.2f}</code> — <i>Full Extension</i>\n"
         f"• <b>R:R:</b> <b>{rr}</b>{lot_str}\n"
         f"🚫 <b>{no_chase}</b>\n"
-        f"💡 <b>Reason:</b> {factors_str}"
+        f"<blockquote expandable>💡 <b>Reason:</b> {factors_str}"
         f"{off_note}\n"
-        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code></blockquote>"
     )
     return msg
 
@@ -3798,9 +3812,9 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"• <b>T1 (Downside):</b> <code>₹{t1:,.2f}</code> — <i>Cover 40% & SL to Cost</i>\n"
             f"• <b>T2 (Downside):</b> <code>₹{t2:,.2f}</code> — <i>Cover 40% & Trail</i>{moon_line}\n"
             f"• <b>R:R:</b> <b>{rr_display}</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
-            f"💡 <b>Reason:</b> {conf_str}"
+            f"<blockquote expandable>💡 <b>Reason:</b> {conf_str}"
             f"{off_note}\n"
-            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code></blockquote>"
         )
     else:
         base_struct = (
@@ -3837,9 +3851,9 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"• <b>T1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
             f"• <b>T2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
             f"• <b>R:R:</b> <b>{rr_display}</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
-            f"💡 <b>Reason:</b> {conf_str}"
+            f"<blockquote expandable>💡 <b>Reason:</b> {conf_str}"
             f"{off_note}\n"
-            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code></blockquote>"
         )
     is_dnm = bool(
         data.get("is_do_not_miss")
@@ -5636,6 +5650,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         or str(getattr(alert, "symbol", "")).upper().endswith("USDC")
         or str(getattr(alert, "symbol", "")).upper().endswith("BTC")
     )
+    is_primed = (
+        getattr(alert, "stage", "") == "PRIMED"
+        or "PRIMED" in str(getattr(alert, "headline", "")).upper()
+    )
+    is_early_w = getattr(alert, "stage", "") == "EARLY_WARNING"
     if is_test:
         tg_header = f"🧪 <b>{env_tag} NEW CALL · TEST SETUP</b>"
     elif is_crypto:
@@ -6573,6 +6592,16 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             else:
                 wait_str = f"\n• <b>Discipline:</b> <i>{wait_rule}</i>"
 
+        mini_alt = actionable_plan.get("mini_alternative")
+        mini_str = ""
+        if mini_alt and isinstance(mini_alt, dict):
+            m_sym = str(mini_alt.get("symbol", "")).replace("MCX:", "")
+            m_desc = mini_alt.get("description", "")
+            m_lot = mini_alt.get("lot_size", "")
+            u_sym = str(mini_alt.get("micro_symbol", "")).replace("MCX:", "")
+            u_str = f" / <code>{u_sym}</code> ({mini_alt.get('micro_lot_size', 1)} kg)" if u_sym else ""
+            mini_str = f"\n🔹 <b>Retail Sizing:</b> <code>{m_sym}</code> ({m_desc} · Lot: {m_lot}){u_str}"
+
         if is_opt_first:
             plan_str = (
                 f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}\n"
@@ -6582,6 +6611,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"{capped_risk_str}"
                 f"{confluence_str}"
                 f"{fut_ref_str}"
+                f"{mini_str}"
                 f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"
@@ -6613,6 +6643,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"• <b>T1:</b> <code>{tgt1}</code>{tgt1_meta}{tgt2_str}{tgt3_str}\n"
                 f"• <b>R:R:</b> <b>{rr}</b>{lot_rr_str}{no_chase_inline}"
                 f"{confluence_str}"
+                f"{mini_str}"
                 f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"

@@ -35,19 +35,69 @@ class DiscoveryPolicy:
         }
 
 
+def _get_persisted_profile() -> Union[str, None]:
+    """Retrieve persisted discovery profile from disk if set and not in testing."""
+    is_testing = bool(
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or os.environ.get("DEPLOY_MODE") == "test"
+        or "PYTEST_CURRENT_TEST" in os.environ
+    )
+    if is_testing and os.environ.get("TEST_DISCOVERY_PERSISTENCE") != "1":
+        return None
+    try:
+        from config.paths import app_data_path
+        import json
+
+        p = app_data_path("discovery_profile.json")
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            prof = data.get("profile")
+            if prof in _PROFILES:
+                return prof
+    except Exception:
+        pass
+    return None
+
+
+def _persist_profile(prof: str) -> None:
+    """Persist selected discovery profile to disk for cross-session survival."""
+    is_testing = bool(
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or os.environ.get("DEPLOY_MODE") == "test"
+        or "PYTEST_CURRENT_TEST" in os.environ
+    )
+    if is_testing and os.environ.get("TEST_DISCOVERY_PERSISTENCE") != "1":
+        return
+    try:
+        from config.paths import app_data_path
+        import json
+
+        p = app_data_path("discovery_profile.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"profile": prof}), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def get_discovery_policy() -> DiscoveryPolicy:
-    profile = os.environ.get("SESSION_FOCUS_MODE", SESSION_FOCUS_MODE).strip().upper()
+    env_prof = os.environ.get("SESSION_FOCUS_MODE")
+    if env_prof:
+        profile = env_prof.strip().upper()
+    else:
+        persisted = _get_persisted_profile()
+        profile = persisted.strip().upper() if persisted else SESSION_FOCUS_MODE.strip().upper()
     if profile not in _PROFILES:
         raise ValueError(f"Unknown SESSION_FOCUS_MODE: {profile!r}; expected {sorted(_PROFILES)}")
     return DiscoveryPolicy(profile)
 
 
 def set_discovery_policy(profile: str) -> DiscoveryPolicy:
-    """Dynamically update discovery policy profile (FNO_ONLY, FNO_PRIORITY, BALANCED)."""
+    """Dynamically update and persist discovery policy profile (FNO_ONLY, FNO_PRIORITY, BALANCED)."""
     prof = profile.strip().upper()
     if prof not in _PROFILES:
         raise ValueError(f"Unknown SESSION_FOCUS_MODE: {prof!r}; expected {sorted(_PROFILES)}")
     os.environ["SESSION_FOCUS_MODE"] = prof
+    _persist_profile(prof)
     logger.info("[discovery_policy] Session focus mode dynamically updated to: %s", prof)
     return DiscoveryPolicy(prof)
 

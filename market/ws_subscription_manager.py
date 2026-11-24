@@ -130,7 +130,8 @@ try:
     # Pre-seed top institutional benchmarks from nifty_total_market.json (up to 750)
     _tot_path = Path("data/universes/nifty_total_market.json")
     if _tot_path.exists():
-        _tot_data = json.load(open(_tot_path, "r", encoding="utf-8"))
+        with open(_tot_path, "r", encoding="utf-8") as _f_tot:
+            _tot_data = json.load(_f_tot)
         for _item in _tot_data:
             _raw_sym = _item.get("symbol", "").strip().upper()
             if _raw_sym:
@@ -184,29 +185,13 @@ MONTH_NAME_MAP: dict[str, int] = {
 }
 
 
-def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
+def _calc_monthly_expiry_date(
+    exch: str, underlying: str, yr: int, mo: int, is_option: bool = False
+) -> date:
     """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS."""
-    exch_up = (exch or "NSE").upper()
-    if exch_up in ("NSE", "NFO", "BSE", "BFO"):
-        from market.calendar import get_monthly_expiry_for_month
+    from market.instruments import _calc_monthly_expiry_date as _inst_calc
 
-        return get_monthly_expiry_for_month(underlying, yr, mo)
-
-    _, num_days = monthrange(yr, mo)
-    if exch_up == "MCX":
-        if "CRUDE" in underlying.upper():
-            exp_day = min(19, num_days)
-            d = date(yr, mo, exp_day)
-        else:
-            d = date(yr, mo, num_days)
-    else:
-        d = date(yr, mo, num_days)
-    try:
-        from market.calendar import get_adjusted_expiry_date
-
-        return get_adjusted_expiry_date(d, exch_up if exch_up in ("BSE", "MCX") else "NFO")
-    except Exception:
-        return d
+    return _inst_calc(exch, underlying, yr, mo, is_option=is_option)
 
 
 def parse_contract_expiry(symbol: str) -> Optional[date]:
@@ -375,9 +360,13 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
 
     comm_symbols = [
         _resolve_commodity_contract("CRUDEOIL", ref_time=now),
+        _resolve_commodity_contract("CRUDEOILM", ref_time=now),
         _resolve_commodity_contract("NATURALGAS", ref_time=now),
+        _resolve_commodity_contract("NATGASMINI", ref_time=now),
         _resolve_commodity_contract("GOLD", ref_time=now),
+        _resolve_commodity_contract("GOLDM", ref_time=now),
         _resolve_commodity_contract("SILVER", ref_time=now),
+        _resolve_commodity_contract("SILVERM", ref_time=now),
         _resolve_commodity_contract("COPPER", ref_time=now),
         _resolve_commodity_contract("ZINC", ref_time=now),
         _resolve_currency_contract("USDINR"),
@@ -387,7 +376,8 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
     if ref_time is None:
         from market.contract_selection import get_commodity_option_grid
 
-        comm_symbols.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=2, as_of=now))
+        for u in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
+            comm_symbols.extend(get_commodity_option_grid(u, strikes_per_side=2, as_of=now))
 
     # Authoritative pre-subscription filter: drop symbols the published master does
     # not list. A degraded snapshot may hide a newly listed contract, so it only
@@ -412,7 +402,7 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
                 master = None
             # An unavailable master cannot prove a symbol unlisted; keep it rather
             # than dropping possibly valid exposure or discovery contracts.
-            if master is None or symbol in master:
+            if not master or symbol in master:
                 kept.append(symbol)
         pruned = len(comm_symbols) - len(kept)
         if pruned > 0:

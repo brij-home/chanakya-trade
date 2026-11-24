@@ -362,9 +362,19 @@ class PaperBroker(BrokerAPI):
         """Get last traded price; fallback to stored avg_price."""
         from market.quotes import get_ltp
 
-        for exchange in ("NSE", "BSE", "NFO"):
+        if ":" in symbol:
             try:
-                return get_ltp(f"{exchange}:{symbol}")
+                val = get_ltp(symbol)
+                if val and val > 0:
+                    return val
+            except Exception:
+                pass
+
+        for exchange in ("MCX", "NSE", "BSE", "NFO", "CDS"):
+            try:
+                val = get_ltp(f"{exchange}:{symbol}")
+                if val and val > 0:
+                    return val
             except Exception:
                 continue
         # Last resort — stored cost basis

@@ -54,9 +54,8 @@ from __future__ import annotations
 
 
 import atexit
-
 from collections import defaultdict, deque
-
+import concurrent.futures
 import logging
 
 import math
@@ -130,6 +129,10 @@ from engine.detectors import (
     detect_opening_range_breakout,
     detect_pre_inflection_dryup,
     detect_squeeze_breakout,
+    detect_breakout_retest_setups,
+    detect_institutional_reversals,
+    detect_chart_pattern_setups,
+    detect_strat_scalp_setups,
     get_multibagger_universe,
 )
 
@@ -6223,29 +6226,22 @@ class AutoAlertEngine:
                     act_str = str((alert.actionable_plan or {}).get("action", "")).strip().upper()
 
                     if is_opt_prem:
+                        # In option premium space (trading contract premium), long option buys (CE or PE)
+                        # profit on premium expansion upwards; only net option sellers profit on premium dropping.
                         is_short_pos = (
-                            act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str
+                            act_str.startswith("SELL")
+                            or "SHORT" in act_str
+                            or "WRITE" in act_str
                         ) and "BUY" not in act_str
-
-                    elif act_str in ("BUY_PE", "BUY_PUT") or alert.direction in (
-                        "BEARISH",
-                        "SHORT",
-                        "SELL",
-                    ):
+                    elif act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
                         is_short_pos = True
-
-                    elif (
-                        act_str.startswith("BUY")
-                        or "LONG" in act_str
-                        or alert.direction in ("BULLISH", "LONG")
-                    ):
-                        is_short_pos = False
-
+                    elif act_str in ("BUY_PE", "BUY_PUT"):
+                        # Buying a put while tracking underlying spot: underlying target is downward
+                        is_short_pos = True
                     elif alert.target_level > 0 and alert.target_level != alert.trigger_level:
                         is_short_pos = alert.target_level < alert.trigger_level
-
                     else:
-                        is_short_pos = False
+                        is_short_pos = alert.direction in ("BEARISH", "SHORT", "SELL")
 
                     if not is_short_pos and alert.ltp > alert.no_chase_boundary:
                         logger.info(
@@ -7415,12 +7411,21 @@ class AutoAlertEngine:
                     "SMT_SWEEP",
                     "INDEX_CALL_SETUP",
                     "INDEX_PUT_SETUP",
+                    "INDEX_MICRO_SCALP",
+                    "INTRADAY_BREAKDOWN_SPARK",
+                    "INTRADAY_BREAKOUT_SPARK",
                 )
 
                 min_ew_conf = (
                     85
                     if alert_type
-                    in ("INDEX_CONTAGION", "SMT_SWEEP", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+                    in (
+                        "INDEX_CONTAGION",
+                        "SMT_SWEEP",
+                        "INDEX_CALL_SETUP",
+                        "INDEX_PUT_SETUP",
+                        "INDEX_MICRO_SCALP",
+                    )
                     else (88 if alert_type in _early_warn_whitelist else 90)
                 )
 
@@ -7587,18 +7592,30 @@ class AutoAlertEngine:
                 "SMT_SWEEP",
                 "INDEX_CALL_SETUP",
                 "INDEX_PUT_SETUP",
+                "INDEX_MICRO_SCALP",
+                "INTRADAY_BREAKDOWN_SPARK",
+                "INTRADAY_BREAKOUT_SPARK",
             )
 
             is_whitelisted_ew = bool(
-                alert.stage == "EARLY_WARNING"
+                alert.stage in ("EARLY_WARNING", "PRIMED", "IGNITED")
                 and alert.confidence
                 >= (
                     85
-                    if alert.alert_type
-                    in ("INDEX_CONTAGION", "SMT_SWEEP", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+                    if (
+                        alert.alert_type
+                        in (
+                            "INDEX_CONTAGION",
+                            "SMT_SWEEP",
+                            "INDEX_CALL_SETUP",
+                            "INDEX_PUT_SETUP",
+                            "INDEX_MICRO_SCALP",
+                        )
+                        or is_index
+                    )
                     else 88
                 )
-                and alert.alert_type in _ew_whitelist_apex
+                and (alert.alert_type in _ew_whitelist_apex or is_index or is_fno_stock)
             )
 
             is_apex_opportunity = bool(
@@ -8679,6 +8696,98 @@ class AutoAlertEngine:
                             False,
                             f"Counter-trend short suppressed: NIFTY up +{nifty_chg:.2f}% without Sector Breakdown or Sell Volume",
                         )
+
+        # 10e. Cross-Asset Intermarket Macro Headwind Guard (Crude, US 10Y, USDINR, DXY)
+        # Transmits real-time global commodity & rate shocks onto domestic Indian equities
+        if not is_non_equity:
+            try:
+                from analysis.intermarket_transmission import (
+                    compute_symbol_transmission,
+                    SymbolMacroTransmission,
+                )
+
+                mock_score = metrics.get("macro_transmission_score")
+                trans: Optional[SymbolMacroTransmission] = None
+                if mock_score is not None:
+                    trans = SymbolMacroTransmission(
+                        symbol=alert.symbol,
+                        sector=metrics.get("sector_id", "GENERAL_EQUITY"),
+                        primary_driver=metrics.get("macro_driver", "brent"),
+                        primary_driver_change_pct=float(metrics.get("macro_driver_chg_pct", 0.0) or 0.0),
+                        net_transmission_score=float(mock_score),
+                        transmission_direction=(
+                            "BEARISH_HEADWIND"
+                            if float(mock_score) <= -35.0
+                            else ("BULLISH_TAILWIND" if float(mock_score) >= 35.0 else "NEUTRAL")
+                        ),
+                        transmission_lag_mins=5,
+                        is_spillover_active=abs(float(mock_score)) >= 30.0,
+                        actionable_guidance="",
+                        falsification_warning=(
+                            f"Macro drag {float(mock_score):+.0f}pts"
+                            if abs(float(mock_score)) >= 35.0
+                            else None
+                        ),
+                    )
+                elif not is_test_runner:
+                    trans = compute_symbol_transmission(alert.symbol)
+
+                if trans and trans.is_spillover_active:
+                    metrics["macro_driver"] = trans.primary_driver
+                    metrics["macro_driver_chg_pct"] = trans.primary_driver_change_pct
+                    metrics["macro_transmission_score"] = trans.net_transmission_score
+                    metrics["macro_direction"] = trans.transmission_direction
+
+                    is_bull = alert.direction in ("BULLISH", "LONG", "BUY") or op_type == "CE"
+                    is_bear = alert.direction in ("BEARISH", "SHORT", "SELL") or op_type == "PE"
+
+                    # Severe adverse headwind (score magnitude >= 50, e.g. Brent +3% on Paints/OMCs or -3% on ONGC)
+                    if (
+                        is_bull
+                        and trans.transmission_direction == "BEARISH_HEADWIND"
+                        and trans.net_transmission_score <= -50.0
+                    ):
+                        if not (rvol >= 2.5 and alert.confidence >= 94):
+                            return (
+                                False,
+                                f"Cross-asset macro headwind: {trans.primary_driver.upper()} ({trans.primary_driver_change_pct:+.2f}%) creates adverse drag ({trans.net_transmission_score:+.0f}pts). Long suppressed.",
+                            )
+                    elif (
+                        is_bear
+                        and trans.transmission_direction == "BULLISH_TAILWIND"
+                        and trans.net_transmission_score >= 50.0
+                    ):
+                        if not (rvol >= 2.5 and alert.confidence >= 94):
+                            return (
+                                False,
+                                f"Cross-asset macro tailwind: {trans.primary_driver.upper()} ({trans.primary_driver_change_pct:+.2f}%) creates strong support ({trans.net_transmission_score:+.0f}pts). Short suppressed.",
+                            )
+                    # Moderate headwinds (score -35 to -50): deduct conviction friction
+                    elif (
+                        is_bull
+                        and trans.transmission_direction == "BEARISH_HEADWIND"
+                        and trans.net_transmission_score <= -35.0
+                    ):
+                        alert.confidence = max(50, alert.confidence - 8)
+                        if trans.falsification_warning:
+                            alert.record_audit("MACRO_HEADWIND_NOTED", trans.falsification_warning)
+                    elif (
+                        is_bear
+                        and trans.transmission_direction == "BULLISH_TAILWIND"
+                        and trans.net_transmission_score >= 35.0
+                    ):
+                        alert.confidence = max(50, alert.confidence - 8)
+                        if trans.falsification_warning:
+                            alert.record_audit("MACRO_TAILWIND_NOTED", trans.falsification_warning)
+                    elif (is_bull and trans.transmission_direction == "BULLISH_TAILWIND") or (
+                        is_bear and trans.transmission_direction == "BEARISH_HEADWIND"
+                    ):
+                        alert.confidence = min(98, alert.confidence + 4)
+                        metrics["macro_confluence"] = True
+            except Exception as e_trans:
+                logger.debug(
+                    f"[AutoAlertEngine] Intermarket transmission scrutiny skipped: {e_trans}"
+                )
 
         # 11. Trap & False Breakout Preventions (Exhaustion Wick, Overextended VWAP & Defending Wall)
 
@@ -11214,13 +11323,22 @@ class AutoAlertEngine:
 
                 pnl_str = f" ({alert.pnl_pct:+.1f}%)" if alert.pnl_pct is not None else ""
 
-                alert.headline = f"⏱️ {tag} VELOCITY STAGNATION SCRATCH{pnl_str}: {inst_label}"
+                is_stagnation_loss = bool(
+                    (alert.pnl_pct is not None and alert.pnl_pct <= -15.0)
+                    or (r_mult is not None and r_mult <= -0.8)
+                )
+                if is_stagnation_loss:
+                    alert.headline = f"⏱️ {tag} VELOCITY TIME-STOP LOSS{pnl_str}: {inst_label}"
+                    alert.target_status = "VELOCITY_LOSS"
+                    alert.trailing_decision = "VELOCITY_LOSS"
+                else:
+                    alert.headline = f"⏱️ {tag} VELOCITY STAGNATION SCRATCH{pnl_str}: {inst_label}"
 
                 alert.summary = reason
 
                 if hasattr(alert, "record_audit"):
                     alert.record_audit(
-                        "STAGNATION_SCRATCH",
+                        "TIME_STOP_EXIT",
                         reason,
                         actor="VELOCITY_ENGINE",
                         details={
@@ -11232,13 +11350,29 @@ class AutoAlertEngine:
 
                 self._save(sync=True)
 
+            # Record outcome in detector circuit breaker
+            try:
+                from engine.detector_circuit_breaker import detector_circuit_breaker
+
+                cb_outcome = "LOSS" if is_stagnation_loss else "SCRATCH"
+                detector_circuit_breaker.record_outcome(
+                    alert_id=alert.alert_id,
+                    symbol=alert.symbol,
+                    alert_type=alert.alert_type,
+                    outcome=cb_outcome,
+                    r_multiple=alert.r_multiple or 0.0,
+                    pnl_pct=alert.pnl_pct or 0.0,
+                )
+            except Exception as e_cb:
+                logger.debug(f"[AutoAlertEngine] Circuit breaker recording error: {e_cb}")
+
             self._dispatch(alert)
 
             logger.info(
-                f"[AutoAlertEngine] Alert {alert.alert_id} STAGNATION SCRATCH ({loop_context}): {reason}"
+                f"[AutoAlertEngine] Alert {alert.alert_id} STAGNATION EXIT ({loop_context}): {reason}"
             )
 
-            return False
+            return is_stagnation_loss
 
         elif is_session_close:
             with self._lock:
@@ -14379,7 +14513,7 @@ class AutoAlertEngine:
                         or tgt_ltp_batch.get(alert.symbol)
                     )
 
-                    if live_spot and live_spot >= 5000:
+                    if live_spot and live_spot > 0:
                         alert.underlying_spot = live_spot
 
                 # Spread-specific in-flight lifecycle evaluation
@@ -14845,7 +14979,12 @@ class AutoAlertEngine:
                                     f"[AutoAlertEngine] Datetime parse attempt suppressed: {e}"
                                 )
 
-                        if created_dt:
+                        is_swing = any(
+                            s in str(getattr(alert, "time_horizon", "") or "").upper()
+                            or s in str((getattr(alert, "actionable_plan", {}) or {}).get("time_horizon", "")).upper()
+                            for s in ("SWING", "POSITIONAL")
+                        )
+                        if created_dt and not is_swing:
                             elapsed_sec = (now_dt - created_dt).total_seconds()
 
                             if elapsed_sec >= 900.0:  # > 15 minutes
@@ -14937,7 +15076,12 @@ class AutoAlertEngine:
                                     f"[AutoAlertEngine] Datetime parse attempt suppressed: {e}"
                                 )
 
-                        if created_dt:
+                        is_swing = any(
+                            s in str(getattr(alert, "time_horizon", "") or "").upper()
+                            or s in str((getattr(alert, "actionable_plan", {}) or {}).get("time_horizon", "")).upper()
+                            for s in ("SWING", "POSITIONAL")
+                        )
+                        if created_dt and not is_swing:
                             elapsed_sec = (now_dt - created_dt).total_seconds()
 
                             if elapsed_sec >= 2700.0:  # >= 45 minutes
@@ -15381,7 +15525,12 @@ class AutoAlertEngine:
             if len(self._alerts) > self._max_buffer:
                 self._alerts.pop()
 
-            self._save()
+            is_test_env = bool(
+                os.environ.get("CHANAKYA_TESTING") == "1"
+                or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            if is_test_env:
+                self._save()
 
         self._dispatch(alert)
 
@@ -15444,17 +15593,41 @@ class AutoAlertEngine:
         else:
             is_opt = alert_type == "GAMMA_BLAST"
 
-            strike_val = 24500.0 if symbol in ("NIFTY", "BANKNIFTY") else 2900.0
+            if symbol in ("NIFTY", "BANKNIFTY"):
+                strike_val = 24500.0 if symbol == "NIFTY" else 51500.0
+                spot_val = 24450.0 if symbol == "NIFTY" else 51400.0
+            elif symbol == "RELIANCE":
+                strike_val = 1300.0
+                spot_val = 1280.0
+            else:
+                strike_val = 1000.0
+                spot_val = 980.0
 
-            contract_sym = f"{symbol}26SEP{format_strike(strike_val)}CE" if is_opt else None
-
-            exp_date_val = "2026-09-24" if is_opt else None
+            if is_opt:
+                now_dt = datetime.now(IST)
+                try:
+                    from market.instruments import _calc_monthly_expiry_date
+                    exp_d = _calc_monthly_expiry_date("NSE", symbol, now_dt.year, now_dt.month, is_option=True)
+                    if now_dt.date() > exp_d:
+                        next_mo = now_dt.month + 1 if now_dt.month < 12 else 1
+                        next_yr = now_dt.year if now_dt.month < 12 else now_dt.year + 1
+                        exp_d = _calc_monthly_expiry_date("NSE", symbol, next_yr, next_mo, is_option=True)
+                    yr_short = exp_d.strftime("%y")
+                    mo_str = exp_d.strftime("%b").upper()
+                    exp_date_val = exp_d.strftime("%Y-%m-%d")
+                    contract_sym = f"NSE:{symbol}{yr_short}{mo_str}{format_strike(strike_val)}CE"
+                except Exception:
+                    yr_short = now_dt.strftime("%y")
+                    mo_str = now_dt.strftime("%b").upper()
+                    exp_date_val = now_dt.strftime("%Y-%m-%d")
+                    contract_sym = f"NSE:{symbol}{yr_short}{mo_str}{format_strike(strike_val)}CE"
+            else:
+                contract_sym = None
+                exp_date_val = None
 
             exp_type_val = "MONTHLY" if is_opt else None
 
-            spot_val = 24450.0 if symbol in ("NIFTY", "BANKNIFTY") else 2860.0
-
-            prem_val = 145.0 if is_opt else 2860.0
+            prem_val = 145.0 if is_opt else (spot_val if spot_val else 2860.0)
 
             alert = AutoAlert(
                 alert_id=alert_id,
@@ -15469,9 +15642,9 @@ class AutoAlertEngine:
                     "Coiling for momentum expansion."
                 ),
                 ltp=prem_val,
-                trigger_level=strike_val if is_opt else 2880.0,
-                target_level=320.0 if is_opt else 3050.0,
-                stop_loss=95.0 if is_opt else 2820.0,
+                trigger_level=strike_val if is_opt else (spot_val if spot_val else 2880.0),
+                target_level=320.0 if is_opt else (round(spot_val * 1.05, 1) if spot_val else 3050.0),
+                stop_loss=95.0 if is_opt else (round(spot_val * 0.98, 1) if spot_val else 2820.0),
                 strike=strike_val if is_opt else None,
                 option_type="CE" if is_opt else None,
                 contract_symbol=contract_sym,
@@ -15508,7 +15681,12 @@ class AutoAlertEngine:
             if len(self._alerts) > self._max_buffer:
                 self._alerts.pop()
 
-            self._save()
+            is_test_env = bool(
+                os.environ.get("CHANAKYA_TESTING") == "1"
+                or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            if is_test_env:
+                self._save()
 
         self._dispatch(alert)
 
@@ -16108,6 +16286,20 @@ class AutoAlertEngine:
         stock_candidates: list[AutoAlert] = []
 
         now_ist = datetime.now(IST)
+        from market.calendar import is_market_open
+
+        # Only run during active equity/NFO session (09:16 – 15:25 IST) on open trading days
+        is_active_session = is_market_open("FNO", ref_dt=now_ist) and (
+            (now_ist.hour > 9 or (now_ist.hour == 9 and now_ist.minute >= 16))
+            and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 25))
+        )
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        )
+
+        if not is_active_session and not is_test_runner:
+            return []
 
         if targets is not None:
             pass
@@ -16283,13 +16475,18 @@ class AutoAlertEngine:
             local_stock: list[AutoAlert] = []
 
             try:
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     return (local_idx, local_stock)
@@ -16930,7 +17127,23 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
 
-        targets = list(self.watched_equities)
+        from engine.alert_preferences import alert_preferences
+
+        fno_index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
+        fno_stock_allowed = alert_preferences.is_segment_allowed("FNO_STOCK")
+
+        targets: list[str] = []
+        if fno_index_allowed:
+            for idx_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
+                if idx_sym not in targets:
+                    targets.append(idx_sym)
+        if fno_stock_allowed:
+            for eq_sym in self.watched_equities:
+                if eq_sym not in targets:
+                    targets.append(eq_sym)
+        elif not fno_index_allowed:
+            targets = list(self.watched_equities)
+
         clean_targets = [canonical_alert_symbol(s) for s in targets]
         eod_cache: dict[str, Any] = {}
         try:
@@ -16938,15 +17151,22 @@ class AutoAlertEngine:
         except Exception as e_eod:
             logger.debug(f"[AutoAlertEngine] Batch EOD load error in SMC OB retest: {e_eod}")
 
-        def _evaluate_sym(sym: str) -> list[AutoAlert]:
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
 
+        def _evaluate_sym(sym: str) -> list[AutoAlert]:
             try:
                 clean = canonical_alert_symbol(sym)
+                exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
                 ltp = 0.0
 
                 if quotes_map:
                     q = (
-                        quotes_map.get(f"NSE:{clean}")
+                        quotes_map.get(f"{exch}:{clean}")
+                        or quotes_map.get(f"NSE:{clean}")
                         or quotes_map.get(clean)
                         or quotes_map.get(f"NSE:{sym}")
                         or quotes_map.get(sym)
@@ -16955,6 +17175,44 @@ class AutoAlertEngine:
                     if q and hasattr(q, "last_price") and q.last_price > 0:
                         ltp = float(q.last_price)
 
+                if ltp <= 0 and not is_test_env:
+                    try:
+                        from market.quotes import get_ltp
+
+                        fetched = get_ltp(f"{exch}:{clean}")
+                        if fetched and float(fetched) > 0:
+                            ltp = float(fetched)
+                    except Exception:
+                        pass
+
+                # 1. Try Intraday 15m Order Blocks first during active market hours
+                df_15m = None
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_15m = get_market_matrix().get_candles_df(clean, timeframe="15m", limit=80)
+                except Exception:
+                    df_15m = None
+
+                if (df_15m is None or len(df_15m) < 15) and not is_test_env:
+                    try:
+                        df_15m = get_ohlcv(clean, exchange=exch, interval="15m", days=5)
+                    except Exception:
+                        df_15m = None
+
+                if df_15m is not None and len(df_15m) >= 15:
+                    alerts_15m = detect_smc_orderblock_retest(
+                        symbol=sym,
+                        df=df_15m,
+                        ltp=ltp,
+                        exchange=exch,
+                        rvol=None,
+                        timeframe="15m",
+                    )
+                    if alerts_15m:
+                        return alerts_15m
+
+                # 2. Fall back to Daily EOD Order Blocks
                 df = eod_cache.get(clean) or eod_cache.get(sym)
                 if df is None or len(df) < 20:
                     try:
@@ -16963,15 +17221,16 @@ class AutoAlertEngine:
                         df = get_eod_df(clean, days=250)
                     except Exception:
                         df = None
-                if df is None or len(df) < 20:
-                    df = get_ohlcv(sym, exchange="NSE", interval="day", days=250)
+                if (df is None or len(df) < 20) and not is_test_env:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=250)
 
                 return detect_smc_orderblock_retest(
                     symbol=sym,
                     df=df,
                     ltp=ltp,
-                    exchange="NSE",
+                    exchange=exch,
                     rvol=None,
+                    timeframe="day",
                 )
 
             except Exception as e:
@@ -16992,6 +17251,419 @@ class AutoAlertEngine:
             except concurrent.futures.TimeoutError:
                 logger.warning(
                     f"[AutoAlertEngine] SMC OB retest timeout (15s) reached. Proceeding with {len(found)} alerts."
+                )
+
+        return found
+
+    def scan_breakout_retests(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans liquid index derivatives and active equities for institutional
+        Breakout-Retest and Asymmetric Continuation setups (4-stage protocol).
+        """
+        import concurrent.futures
+        from engine.detectors.breakout_retest import detect_breakout_retest_setups
+        from engine.alert_identity import canonical_alert_symbol
+        from market.history import get_ohlcv
+        from engine.eod_store import get_cached_ohlcv_batch
+
+        found: list[AutoAlert] = []
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        targets = list(base_indices)
+        for eq_sym in list(self.watched_equities)[:25]:
+            if eq_sym not in targets:
+                targets.append(eq_sym)
+
+        clean_targets = [canonical_alert_symbol(s) for s in targets]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=60)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in breakout retest: {e_eod}")
+
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+
+        def _eval_sym(sym: str) -> list[AutoAlert]:
+            try:
+                clean = canonical_alert_symbol(sym)
+                exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+                ltp = self.resolve_quote_ltp(clean, quotes_map=quotes_map)
+
+                # 1. Try Intraday 15m first during active market hours
+                df_15m = None
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_15m = get_market_matrix().get_candles_df(clean, timeframe="15m", limit=80)
+                except Exception:
+                    df_15m = None
+
+                if (df_15m is None or len(df_15m) < 15) and not is_test_env:
+                    try:
+                        df_15m = get_ohlcv(clean, exchange=exch, interval="15m", days=5)
+                    except Exception:
+                        df_15m = None
+
+                if df_15m is not None and len(df_15m) >= 15:
+                    alerts_15m = detect_breakout_retest_setups(
+                        symbol=sym,
+                        df=df_15m,
+                        ltp=ltp,
+                        exchange=exch,
+                        rvol=None,
+                        timeframe="15m",
+                        quotes_map=quotes_map,
+                    )
+                    if alerts_15m:
+                        return alerts_15m
+
+                # 2. Fall back to Daily EOD bars
+                df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=60)
+                    except Exception:
+                        df = None
+                if (df is None or len(df) < 20) and not is_test_env:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=60)
+
+                return detect_breakout_retest_setups(
+                    symbol=sym,
+                    df=df,
+                    ltp=ltp,
+                    exchange=exch,
+                    rvol=None,
+                    timeframe="day",
+                    quotes_map=quotes_map,
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Breakout retest error on {sym}: {e}")
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+            future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in targets}
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=12.0):
+                    alerts = fut.result()
+                    for alert in alerts:
+                        if alert and self.record_alert(alert):
+                            found.append(alert)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[AutoAlertEngine] Breakout retest timeout reached. Proceeding with {len(found)} alerts."
+                )
+
+        return found
+
+    def scan_institutional_reversals(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans benchmark indices and top liquid equities for 3-phase institutional reversals
+        (Exhaustion -> Liquidity Sweep/Divergence -> Micro-CHoCH / Candlestick Confirmation).
+        """
+        from engine.detectors.institutional_reversal import detect_institutional_reversals
+        from engine.eod_store import get_cached_ohlcv_batch
+
+        found: list[AutoAlert] = []
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        targets = list(base_indices)
+        for eq_sym in list(self.watched_equities)[:25]:
+            if eq_sym not in targets:
+                targets.append(eq_sym)
+
+        clean_targets = [canonical_alert_symbol(s) for s in targets]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=60)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in institutional reversal: {e_eod}")
+
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+
+        def _eval_sym(sym: str) -> list[AutoAlert]:
+            try:
+                clean = canonical_alert_symbol(sym)
+                exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+                ltp = self.resolve_quote_ltp(clean, quotes_map=quotes_map)
+
+                # 1. Try Intraday 15m first
+                df_15m = None
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_15m = get_market_matrix().get_candles_df(clean, timeframe="15m", limit=80)
+                except Exception:
+                    df_15m = None
+
+                if (df_15m is None or len(df_15m) < 15) and not is_test_env:
+                    try:
+                        df_15m = get_ohlcv(clean, exchange=exch, interval="15m", days=5)
+                    except Exception:
+                        df_15m = None
+
+                if df_15m is not None and len(df_15m) >= 15:
+                    alerts_15m = detect_institutional_reversals(
+                        symbol=sym,
+                        df=df_15m,
+                        ltp=ltp,
+                        exchange=exch,
+                        timeframe="15m",
+                        quotes_map=quotes_map,
+                    )
+                    if alerts_15m:
+                        return alerts_15m
+
+                # 2. Fall back to Daily EOD bars
+                df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=60)
+                    except Exception:
+                        df = None
+                if (df is None or len(df) < 20) and not is_test_env:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=60)
+
+                return detect_institutional_reversals(
+                    symbol=sym,
+                    df=df,
+                    ltp=ltp,
+                    exchange=exch,
+                    timeframe="day",
+                    quotes_map=quotes_map,
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Institutional reversal error on {sym}: {e}")
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+            future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in targets}
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=12.0):
+                    alerts = fut.result()
+                    for alert in alerts:
+                        if alert and self.record_alert(alert):
+                            found.append(alert)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[AutoAlertEngine] Institutional reversal timeout reached. Proceeding with {len(found)} alerts."
+                )
+
+        return found
+
+    def scan_chart_pattern_setups(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans benchmark indices and top liquid equities for classical and geometric chart patterns
+        (Double Bottom W, Double Top M, Inverse H&S, H&S, High-Tight Bull/Bear Flags, Triangles).
+        """
+        from engine.detectors.chart_pattern_detector import detect_chart_pattern_setups
+        from engine.eod_store import get_cached_ohlcv_batch
+
+        found: list[AutoAlert] = []
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        targets = list(base_indices)
+        for eq_sym in list(self.watched_equities)[:25]:
+            if eq_sym not in targets:
+                targets.append(eq_sym)
+
+        clean_targets = [canonical_alert_symbol(s) for s in targets]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=60)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in chart patterns: {e_eod}")
+
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+
+        def _eval_sym(sym: str) -> list[AutoAlert]:
+            try:
+                clean = canonical_alert_symbol(sym)
+                exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+                ltp = self.resolve_quote_ltp(clean, quotes_map=quotes_map)
+
+                # 1. Try Intraday 15m first
+                df_15m = None
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_15m = get_market_matrix().get_candles_df(clean, timeframe="15m", limit=80)
+                except Exception:
+                    df_15m = None
+
+                if (df_15m is None or len(df_15m) < 15) and not is_test_env:
+                    try:
+                        df_15m = get_ohlcv(clean, exchange=exch, interval="15m", days=5)
+                    except Exception:
+                        df_15m = None
+
+                if df_15m is not None and len(df_15m) >= 15:
+                    alerts_15m = detect_chart_pattern_setups(
+                        symbol=sym,
+                        df=df_15m,
+                        ltp=ltp,
+                        exchange=exch,
+                        timeframe="15m",
+                        quotes_map=quotes_map,
+                    )
+                    if alerts_15m:
+                        return alerts_15m
+
+                # 2. Fall back to Daily EOD bars
+                df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 20:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=60)
+                    except Exception:
+                        df = None
+                if (df is None or len(df) < 20) and not is_test_env:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=60)
+
+                return detect_chart_pattern_setups(
+                    symbol=sym,
+                    df=df,
+                    ltp=ltp,
+                    exchange=exch,
+                    timeframe="day",
+                    quotes_map=quotes_map,
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Chart pattern setup error on {sym}: {e}")
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+            future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in targets}
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=12.0):
+                    alerts = fut.result()
+                    for alert in alerts:
+                        if alert and self.record_alert(alert):
+                            found.append(alert)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[AutoAlertEngine] Chart pattern setups timeout reached. Proceeding with {len(found)} alerts."
+                )
+
+        return found
+
+    def scan_strat_scalps(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans benchmark indices and top liquid equities for institutional Strat 2-1-2 setups
+        and Toby Crabel NR7 volatility compression scalps on 5m micro-timeframes.
+        """
+        from engine.detectors.strat_scalper import detect_strat_scalp_setups
+        from engine.eod_store import get_cached_ohlcv_batch
+
+        found: list[AutoAlert] = []
+        base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        targets = list(base_indices)
+        for eq_sym in list(self.watched_equities)[:25]:
+            if eq_sym not in targets:
+                targets.append(eq_sym)
+
+        clean_targets = [canonical_alert_symbol(s) for s in targets]
+        eod_cache: dict[str, Any] = {}
+        try:
+            eod_cache = get_cached_ohlcv_batch(clean_targets, days=60)
+        except Exception as e_eod:
+            logger.debug(f"[AutoAlertEngine] Batch EOD load error in strat scalper: {e_eod}")
+
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+
+        def _eval_sym(sym: str) -> list[AutoAlert]:
+            try:
+                clean = canonical_alert_symbol(sym)
+                exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+                ltp = self.resolve_quote_ltp(clean, quotes_map=quotes_map)
+
+                # 1. Try Intraday 5m first
+                df_5m = None
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_5m = get_market_matrix().get_candles_df(clean, timeframe="5m", limit=80)
+                except Exception:
+                    df_5m = None
+
+                if (df_5m is None or len(df_5m) < 10) and not is_test_env:
+                    try:
+                        df_5m = get_ohlcv(clean, exchange=exch, interval="5m", days=3)
+                    except Exception:
+                        df_5m = None
+
+                if df_5m is not None and len(df_5m) >= 10:
+                    alerts_5m = detect_strat_scalp_setups(
+                        symbol=sym,
+                        df=df_5m,
+                        ltp=ltp,
+                        exchange=exch,
+                        timeframe="5m",
+                        quotes_map=quotes_map,
+                    )
+                    if alerts_5m:
+                        return alerts_5m
+
+                # 2. Fall back to 15m or Daily EOD bars
+                df = eod_cache.get(clean) or eod_cache.get(sym)
+                if df is None or len(df) < 15:
+                    try:
+                        from engine.eod_store import get_eod_df
+
+                        df = get_eod_df(clean, days=30)
+                    except Exception:
+                        df = None
+                if (df is None or len(df) < 15) and not is_test_env:
+                    df = get_ohlcv(sym, exchange=exch, interval="day", days=30)
+
+                return detect_strat_scalp_setups(
+                    symbol=sym,
+                    df=df,
+                    ltp=ltp,
+                    exchange=exch,
+                    timeframe="day",
+                    quotes_map=quotes_map,
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Strat scalp setup error on {sym}: {e}")
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+            future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in targets}
+            try:
+                for fut in concurrent.futures.as_completed(future_to_sym, timeout=12.0):
+                    alerts = fut.result()
+                    for alert in alerts:
+                        if alert and self.record_alert(alert):
+                            found.append(alert)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"[AutoAlertEngine] Strat scalper timeout reached. Proceeding with {len(found)} alerts."
                 )
 
         return found
@@ -19152,30 +19824,60 @@ class AutoAlertEngine:
 
         from engine.alert_preferences import alert_preferences
 
+        now_dt = datetime.now(IST)
+        from market.calendar import is_market_open
+        from config.discovery_policy import get_discovery_policy
+
+        policy = get_discovery_policy()
+        # Active equity/NFO session (09:16 – 15:25 IST) on open trading days
+        is_fno_equity_open = is_market_open("FNO", ref_dt=now_dt) and (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 25))
+        )
+        # Active international commodity session (15:30 – 23:30 IST) when policy permits
+        is_mcx_open = policy.allows("COMMODITY") and is_market_open("MCX", ref_dt=now_dt) and (
+            now_dt.hour >= 15 or (now_dt.hour == 9 and now_dt.minute < 15)
+        )
+        is_active_session = is_fno_equity_open or is_mcx_open
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        )
+
+        if not is_active_session and not is_test_runner:
+            return []
+
         index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
 
-        targets = list(self._watched_indices) if index_allowed else []
+        targets: list[str] = []
+        if is_fno_equity_open or is_test_runner:
+            if index_allowed:
+                targets.extend(list(self._watched_indices))
 
-        eq_list = [s for s in self.watched_equities if s not in targets]
+            eq_list = [s for s in self.watched_equities if s not in targets]
 
-        if quotes_map:
+            if quotes_map:
 
-            def _mover_velocity_score(sym: str) -> float:
+                def _mover_velocity_score(sym: str) -> float:
 
-                q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
 
-                if not q:
-                    return 0.0
+                    if not q:
+                        return 0.0
 
-                chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
+                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
 
-                vol = float(getattr(q, "volume", 0.0) or 0.0)
+                    vol = float(getattr(q, "volume", 0.0) or 0.0)
 
-                return chg * (2.0 if vol > 1000000 else (1.5 if vol > 250000 else 1.0))
+                    return chg * (2.0 if vol > 1000000 else (1.5 if vol > 250000 else 1.0))
 
-            eq_list.sort(key=_mover_velocity_score, reverse=True)
+                eq_list.sort(key=_mover_velocity_score, reverse=True)
 
-        targets.extend(eq_list)
+            targets.extend(eq_list)
+
+        if is_mcx_open:
+            # Seed liquid MCX energy & bullion option underlyings during commodity sessions
+            targets.extend([s for s in ("CRUDEOIL", "NATURALGAS", "GOLD") if s not in targets])
 
         now_dt = datetime.now(IST)
 
@@ -19975,7 +20677,7 @@ class AutoAlertEngine:
             or ("PYTEST_CURRENT_TEST" in os.environ)
         )
 
-        if not is_test_env and (curr_t < dtime(10, 15) or curr_t > dtime(14, 30)):
+        if not is_test_env and not (dtime(9, 35) <= curr_t <= dtime(15, 15)):
             return []
 
         from market.history import get_ohlcv
@@ -20194,7 +20896,8 @@ class AutoAlertEngine:
         is_preopen = now_dt.hour == 9 and 5 <= now_dt.minute <= 14
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         # Check and auto-trigger background model calibration if stale for today's session
@@ -20726,7 +21429,8 @@ class AutoAlertEngine:
         )
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         if not is_active_session and not is_test_runner:
@@ -20921,11 +21625,13 @@ class AutoAlertEngine:
                     "BANKNIFTY": 0.45,  # High-volatility bank index
                     "FINNIFTY": 0.28,  # Lower-vol financial services index
                     "MIDCPNIFTY": 0.30,  # Mid-cap index, moderate volatility
+                    "SENSEX": 0.25,  # BSE benchmark index
+                    "BANKEX": 0.40,  # BSE banking index
                 }
 
                 if (
                     benchmark_is_bearish
-                    and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY")
+                    and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "SENSEX", "BANKEX")
                     and not is_test_runner
                 ):
                     sym_bounce = (
@@ -21046,13 +21752,18 @@ class AutoAlertEngine:
                     if ohlcv_map is not None and df_5m is not None:
                         ohlcv_map[f"{sym}:5m"] = df_5m
 
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     logger.debug(
@@ -21361,7 +22072,8 @@ class AutoAlertEngine:
         )
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         if not is_active_session and not is_test_runner:
@@ -21745,13 +22457,18 @@ class AutoAlertEngine:
                     if ohlcv_map is not None and df_5m is not None:
                         ohlcv_map[f"{sym}:5m"] = df_5m
 
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     logger.debug(
@@ -22121,7 +22838,8 @@ class AutoAlertEngine:
         from market.calendar import is_market_open
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         is_active = is_market_open("FNO", ref_dt=now_dt) and (
@@ -22182,13 +22900,18 @@ class AutoAlertEngine:
                     sym, interval="3m", exchange=exch, days=1, ttl=15.0
                 )
 
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     return local_alerts
@@ -22342,7 +23065,8 @@ class AutoAlertEngine:
         from market.calendar import is_market_open
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         is_active = is_market_open("FNO", ref_dt=now_dt) and (
@@ -22410,13 +23134,18 @@ class AutoAlertEngine:
 
                 df_5m = self._get_cached_index_ohlcv(sym, interval="5m", exchange=exch, days=1)
 
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     return local_alerts
@@ -22491,7 +23220,8 @@ class AutoAlertEngine:
         from market.calendar import is_market_open
 
         is_test_runner = (
-            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         )
 
         is_active = is_market_open("FNO", ref_dt=now_dt) and (
@@ -22539,13 +23269,18 @@ class AutoAlertEngine:
 
                 vwap_val = self._extract_quote_val(q_obj, "vwap", "average_price")
 
-                chain = chains_map.get(sym) if chains_map is not None else None
+                chain = (
+                    (chains_map.get(sym) or chains_map.get(clean_sym))
+                    if chains_map is not None
+                    else None
+                )
 
                 if chain is None:
                     chain = get_options_chain(sym)
 
                     if chains_map is not None and chain:
                         chains_map[sym] = chain
+                        chains_map[clean_sym] = chain
 
                 if not chain:
                     continue
@@ -22698,6 +23433,27 @@ class AutoAlertEngine:
         # Resolve active cycle targets (<= 15 targets: Benchmark Indices + Staggered Batches/Surge Stocks)
         active_cycle_targets = self._get_prioritized_targets(max_targets=15)
 
+        # Step 1.9: Pre-populate chains_map for active cycle targets to eliminate parallel thread REST stampedes
+        if active_cycle_targets:
+            for _tgt in active_cycle_targets:
+                _c_tgt = (
+                    _tgt.upper()
+                    .replace("NSE:", "")
+                    .replace("BSE:", "")
+                    .replace("NFO:", "")
+                    .replace("-INDEX", "")
+                    .strip()
+                )
+                if _c_tgt not in chains_map and _tgt not in chains_map:
+                    try:
+                        # Reads directly from RAM / SWR cache, or fetches sequentially with pacing
+                        _ch = get_options_chain(_c_tgt)
+                        if _ch:
+                            chains_map[_c_tgt] = _ch
+                            chains_map[_tgt] = _ch
+                    except Exception as _ce_tgt:
+                        logger.debug(f"[AutoAlertEngine] Target chain pre-warm skipped for {_tgt}: {_ce_tgt}")
+
         # Step 2: Concurrent evaluation of all orthogonal detectors (bounded max_workers=12)
 
         import concurrent.futures
@@ -22834,6 +23590,38 @@ class AutoAlertEngine:
         if self._should_run_detector("smc_ob_retest", 60.0):
             tasks.append(
                 ("smc_ob_retest", lambda: self.scan_smc_orderblock_retests(quotes_map=quotes_map))
+            )
+
+        if self._should_run_detector("breakout_retest", 45.0):
+            tasks.append(
+                (
+                    "breakout_retest",
+                    lambda: self.scan_breakout_retests(quotes_map=quotes_map),
+                )
+            )
+
+        if self._should_run_detector("institutional_reversal", 60.0):
+            tasks.append(
+                (
+                    "institutional_reversal",
+                    lambda: self.scan_institutional_reversals(quotes_map=quotes_map),
+                )
+            )
+
+        if self._should_run_detector("chart_patterns", 75.0):
+            tasks.append(
+                (
+                    "chart_patterns",
+                    lambda: self.scan_chart_pattern_setups(quotes_map=quotes_map),
+                )
+            )
+
+        if self._should_run_detector("strat_scalps", 30.0):
+            tasks.append(
+                (
+                    "strat_scalps",
+                    lambda: self.scan_strat_scalps(quotes_map=quotes_map),
+                )
             )
 
         # Boost defined-risk neutral (non-directional) frequency during midday compression lull (11:45 - 13:15 IST)
@@ -23336,8 +24124,18 @@ class AutoAlertEngine:
             # Case 1: Option alert, but tick is for the UNDERLYING SPOT (e.g. NIFTY 50 Index tick for a NIFTY PE option)
 
             if is_opt and is_underlying_match and not is_contract_match:
-                # Update underlying spot price on the alert
+                # Plausibility Guard: Reject corrupt spot ticks deviating > 22% from last known spot
+                known_spot = getattr(alert, "underlying_spot", 0.0) or 0.0
+                if known_spot > 0:
+                    dev_pct = abs(ltp - known_spot) / known_spot
+                    if dev_pct > 0.22:
+                        logger.warning(
+                            f"[AutoAlertEngine] 🛑 Discarded corrupt spot tick for {alert.symbol}: "
+                            f"ltp={ltp} deviates {dev_pct*100:.1f}% from known spot {known_spot}"
+                        )
+                        continue
 
+                # Update underlying spot price on the alert
                 alert.underlying_spot = ltp
 
                 # Check if underlying spot violated structural spot SL
@@ -24432,7 +25230,12 @@ class AutoAlertEngine:
 
                 if is_golden_hours_window and commodity_allowed:
                     try:
-                        self.scan_commodities_now(targets=["CRUDEOIL", "NATURALGAS", "GOLD"])
+                        comm_targets = (
+                            self.watched_commodities
+                            if getattr(self, "watched_commodities", None)
+                            else ["CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ZINC"]
+                        )
+                        self.scan_commodities_now(targets=comm_targets)
 
                     except Exception as e_comm_fast:
                         logger.debug(
@@ -25335,8 +26138,23 @@ class AutoAlertEngine:
 
                 time.sleep(0.1)
 
+                is_test_env = (
+                    "PYTEST_CURRENT_TEST" in os.environ
+                    or "pytest" in sys.modules
+                    or os.environ.get("CHANAKYA_TESTING") == "1"
+                )
+
                 with self._lock:
-                    snapshot = list(self._alerts)
+                    if not is_test_env:
+                        snapshot = [
+                            a
+                            for a in self._alerts
+                            if getattr(a, "environment", "") not in ("TEST", "MOCK", "SYNTHETIC")
+                            and not (getattr(a, "metrics", {}) or {}).get("is_test")
+                            and not (getattr(a, "alert_id", "") or "").startswith("test-")
+                        ]
+                    else:
+                        snapshot = list(self._alerts)
 
                 self._repository.save(snapshot)
 
@@ -25371,7 +26189,16 @@ class AutoAlertEngine:
 
         if sync or is_test_env or not getattr(self, "_is_running", False):
             with self._lock:
-                snapshot = list(self._alerts)
+                if not is_test_env:
+                    snapshot = [
+                        a
+                        for a in self._alerts
+                        if getattr(a, "environment", "") not in ("TEST", "MOCK", "SYNTHETIC")
+                        and not (getattr(a, "metrics", {}) or {}).get("is_test")
+                        and not (getattr(a, "alert_id", "") or "").startswith("test-")
+                    ]
+                else:
+                    snapshot = list(self._alerts)
 
             self._repository.save(snapshot)
 
