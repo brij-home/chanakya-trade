@@ -161,7 +161,7 @@ def test_fyers_headless_auto_login_step5_transient_retry():
         app_id="APP-100",
         secret_key="secret",
         fy_id="USER123",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
 
@@ -211,7 +211,7 @@ def test_fyers_is_authenticated_concurrent_deduplication():
         app_id="APP-100",
         secret_key="secret",
         fy_id="USER123",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = ""
@@ -254,7 +254,7 @@ def test_fyers_handle_auth_failure_preserves_fresh_session():
         app_id="APP-100",
         secret_key="secret",
         fy_id="USER123",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = "FRESH_TOKEN"

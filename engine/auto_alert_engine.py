@@ -632,7 +632,11 @@ class AutoAlertEngine:
                         try:
                             c_str = str(a.created_at).replace(" IST", "").strip()
 
-                            a_ts = datetime.fromisoformat(c_str).timestamp()
+                            a_dt = datetime.fromisoformat(c_str)
+                            if a_dt.tzinfo is None:
+                                a_dt = a_dt.replace(tzinfo=IST)
+
+                            a_ts = a_dt.timestamp()
 
                         except Exception as e_suppressed:
                             logger.debug(
@@ -705,6 +709,8 @@ class AutoAlertEngine:
                             c_str = str(a.created_at).replace(" IST", "").strip()
 
                             a_dt = datetime.fromisoformat(c_str)
+                            if a_dt.tzinfo is None:
+                                a_dt = a_dt.replace(tzinfo=IST)
 
                             a_epoch = a_dt.timestamp()
 
@@ -3957,7 +3963,11 @@ class AutoAlertEngine:
                         try:
                             c_str = (active_a.created_at or "").replace(" IST", "").strip()
 
-                            a_ts = datetime.fromisoformat(c_str).timestamp()
+                            a_dt = datetime.fromisoformat(c_str)
+                            if a_dt.tzinfo is None:
+                                a_dt = a_dt.replace(tzinfo=IST)
+
+                            a_ts = a_dt.timestamp()
 
                         except Exception as e_suppressed:
                             logger.debug(
@@ -5978,7 +5988,11 @@ class AutoAlertEngine:
                         try:
                             c_str = (cand_a.created_at or "").replace(" IST", "").strip()
 
-                            cand_ts = datetime.fromisoformat(c_str).timestamp()
+                            cand_dt = datetime.fromisoformat(c_str)
+                            if cand_dt.tzinfo is None:
+                                cand_dt = cand_dt.replace(tzinfo=IST)
+
+                            cand_ts = cand_dt.timestamp()
 
                             # 25-minute lock for index options, 45 minutes for equities
 

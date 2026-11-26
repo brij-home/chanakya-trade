@@ -8,6 +8,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from market.ws_subscription_manager import WsSubscriptionManager, CORE_BASE_SYMBOLS
 
 
@@ -320,6 +322,7 @@ def test_ws_subscription_manager_remove_invalid_symbols(tmp_path):
 
 def test_fyers_socket_patch_send_message_suppression():
     """Verify FyersDataSocket monkeypatch suppresses WebSocketConnectionClosedException."""
+    pytest.importorskip("fyers_apiv3", reason="fyers_apiv3 is an optional broker SDK")
     from fyers_apiv3.FyersWebsocket import data_ws
     from websocket._exceptions import WebSocketConnectionClosedException
 

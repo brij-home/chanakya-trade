@@ -139,7 +139,7 @@ def test_get_profile_auto_reauths_with_totp():
         app_id="TEST-100",
         secret_key="secret",
         fy_id="FAK999",
-        totp_secret="BASE32SECRET",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = "stale_token"
@@ -257,7 +257,7 @@ def test_fyers_headless_auto_login_429_triggers_cooldown_and_suppresses_repeat_c
         app_id="TEST-100",
         secret_key="secret",
         fy_id="FAK999",
-        totp_secret="BASE32SECRET",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = ""
@@ -296,7 +296,7 @@ def test_fyers_headless_auto_login_success_clears_backoff():
         app_id="TEST-100",
         secret_key="secret",
         fy_id="FAK999",
-        totp_secret="BASE32SECRET",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = ""
@@ -379,7 +379,7 @@ def test_fyers_complete_login_profile_minus_360_triggers_backoff_and_preserves_t
         app_id="TEST-100",
         secret_key="secret",
         fy_id="FAK999",
-        totp_secret="BASE32SECRET",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         pin="1234",
     )
     api._access_token = ""

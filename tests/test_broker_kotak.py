@@ -43,7 +43,7 @@ def test_kotak_init():
         mobile_number="9876543210",
         ucc="K12345",
         password="secret_pass",
-        totp_secret="BASE32SECRET3232",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         mpin="123456",
         environment="prod",
     )
@@ -86,7 +86,7 @@ def test_kotak_totp_login_flow(monkeypatch, isolated_kotak_token_file):
         mobile_number="9876543210",
         ucc="KOTAK001",
         password="test_password",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         mpin="654321",
     )
 

@@ -38,7 +38,7 @@ def test_is_authenticated_applies_backoff_on_invalid_ip(monkeypatch):
     broker = FlattradeAPI(
         user_id="FT100",
         password="pwd",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         api_key="FT_API_KEY",
         api_secret="FT_API_SECRET",
     )
@@ -90,7 +90,7 @@ def test_headless_login_persists_session_and_normalizes_profile(tmp_path, monkey
     broker = FlattradeAPI(
         user_id="FT100",
         password="pwd",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         api_key="FT_API_KEY",
         api_secret="FT_API_SECRET",
     )
@@ -148,7 +148,7 @@ def test_login_rejected_by_authapi(monkeypatch):
     broker = FlattradeAPI(
         user_id="FT100",
         password="pwd",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         api_key="FT_API_KEY",
         api_secret="FT_API_SECRET",
     )
