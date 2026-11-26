@@ -19,7 +19,6 @@ from config.discovery_policy import allows_context_symbol, get_discovery_policy
 import os
 import threading
 import time
-from calendar import monthrange
 from collections import OrderedDict
 from datetime import date, datetime
 from pathlib import Path
@@ -27,7 +26,9 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_WS_SUBSCRIPTIONS = 5000  # FYERS API v3 Data Socket supports up to 5,000 symbols concurrently
+MAX_WS_SUBSCRIPTIONS = (
+    4999  # Fyers API v3 Data Socket strictly enforces < 5,000 symbols (code -99 at 5000+)
+)
 
 # Permanent base set: key indices/commodities + top liquid institutional equities
 CORE_BASE_SYMBOLS: list[str] = [
@@ -584,7 +585,7 @@ class WsSubscriptionManager:
 
     def cleanse_closed_session_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
         """
-        At 15:30 IST market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
+        At derivative market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
         from both core derivatives and dynamic subscriptions to liberate WebSocket slots and memory
         for evening commodity and currency trading.
         Permanent baseline equities, indices, and active MCX commodities are strictly preserved.
@@ -593,7 +594,9 @@ class WsSubscriptionManager:
             from market.calendar import is_market_open
             import os
 
-            if is_market_open("NSE") and not os.environ.get("CHANAKYA_TESTING"):
+            if (is_market_open("NFO") or is_market_open("NSE")) and not os.environ.get(
+                "CHANAKYA_TESTING"
+            ):
                 return []
         except Exception as e_mkt_open:
             logger.debug(
@@ -849,28 +852,33 @@ class WsSubscriptionManager:
     def get_diagnostics(self) -> dict[str, Any]:
         """Return WebSocket subscription capacity, metrics, and breakdown."""
         with self._lock:
-            core_count = len(self._core_symbols)
-            dynamic_count = len(self._dynamic_symbols)
-            total = core_count + dynamic_count
-            util_pct = (
-                round(total / self._max_subscriptions * 100, 1) if self._max_subscriptions else 0.0
-            )
+            core_syms = set(self._core_symbols)
+            dyn_syms = set(self._dynamic_symbols)
             recent_dynamic = list(self._dynamic_symbols.keys())[-10:]
-            return {
-                "max_capacity": self._max_subscriptions,
-                "total_subscribed": total,
-                "core_count": core_count,
-                "dynamic_count": dynamic_count,
-                "utilization_pct": util_pct,
-                "recent_symbols": recent_dynamic,
-                "anchored_spots": dict(self._anchored_spots),
-                "discovery_profile": get_discovery_policy().profile,
-                "retained_out_of_scope_symbols": [
-                    s
-                    for s in self._core_symbols | set(self._dynamic_symbols)
-                    if not allows_context_symbol(s)
-                ],
-            }
+            anchored = dict(self._anchored_spots)
+            max_subs = self._max_subscriptions
+
+        core_count = len(core_syms)
+        dynamic_count = len(dyn_syms)
+        total = core_count + dynamic_count
+        util_pct = round(total / max_subs * 100, 1) if max_subs else 0.0
+        profile = get_discovery_policy().profile
+        retained_out_of_scope = (
+            [s for s in (core_syms | dyn_syms) if not allows_context_symbol(s)]
+            if profile == "FNO_ONLY"
+            else []
+        )
+        return {
+            "max_capacity": max_subs,
+            "total_subscribed": total,
+            "core_count": core_count,
+            "dynamic_count": dynamic_count,
+            "utilization_pct": util_pct,
+            "recent_symbols": recent_dynamic,
+            "anchored_spots": anchored,
+            "discovery_profile": profile,
+            "retained_out_of_scope_symbols": retained_out_of_scope,
+        }
 
 
 # Global singleton

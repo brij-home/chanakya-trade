@@ -75,6 +75,62 @@ class OutboxWorker:
                 if is_test:
                     return True
 
+                alert_id_kw = payload.get("alert_id") or None
+                sig_id = payload.get("signal_id") or payload.get("signal_ref")
+                stage_u = str(payload.get("stage", "") or "").upper()
+                is_milestone_payload = bool(
+                    payload.get("is_update")
+                    or (payload.get("update_number") or 0) > 0
+                    or payload.get("achieved_milestones")
+                    or payload.get("is_invalidated")
+                    or stage_u
+                    in (
+                        "INVALIDATED",
+                        "EXPIRED",
+                        "CANCELLED",
+                        "DISQUALIFIED",
+                        "SETUP_DISQUALIFIED",
+                        "TIME_STOP_EXIT",
+                        "TIME_STOP_SCRATCH",
+                        "RUNNER_EXIT",
+                        "PROFIT_SECURED",
+                        "BREAKEVEN_EXIT",
+                        "TRAILING_STOP_EXIT",
+                        "IN_FLIGHT_WARNING",
+                        "T0_5_ACHIEVED",
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "T3_ACHIEVED",
+                        "TRAIL_UPDATE",
+                        "STOP_LOSS_HIT",
+                        "SPREAD_FREE_ROLL",
+                        "SPREAD_PROFIT_70",
+                        "SPREAD_SHORT_STRIKE_TOUCH",
+                        "SPREAD_STOP_LOSS",
+                        "FREE_ROLL_UNLOCKED",
+                        "COMPLETED",
+                        "SUPERSEDED",
+                    )
+                )
+
+                # If synchronous _dispatch() already delivered this non-milestone setup,
+                # skip duplicate redelivery and let outbox acknowledge cleanly.
+                if (
+                    alert_id_kw
+                    and not is_milestone_payload
+                    and int(entry.get("event_version") or 1) == 1
+                    and hasattr(self.store, "get_alert")
+                ):
+                    try:
+                        persisted = self.store.get_alert(alert_id_kw)
+                        if isinstance(persisted, dict) and persisted.get("telegram_dispatched"):
+                            logger.debug(
+                                f"[OutboxWorker] Skipping already-dispatched initial Telegram alert {alert_id_kw}"
+                            )
+                            return True
+                    except Exception as e_chk:
+                        logger.debug(f"[OutboxWorker] Persisted dispatch check note: {e_chk}")
+
                 # Render the alert payload dict into a Telegram-formatted string.
                 # send_push() expects a str as its first argument; passing the raw
                 # dict causes "expected string or bytes-like object, got 'dict'".
@@ -93,7 +149,11 @@ class OutboxWorker:
                         or "Alert"
                     )
 
-                alert_id_kw = payload.get("alert_id") or None
+                is_up = payload.get("is_update")
+                if is_up is None and is_milestone_payload:
+                    is_up = True
+                reply_to = payload.get("reply_to_message_id")
+                dis_notif = payload.get("disable_notification")
                 target_chat_id = payload.get("chat_id") or payload.get("target_chat_id")
                 if not target_chat_id:
                     try:
@@ -108,17 +168,31 @@ class OutboxWorker:
                         logger.debug(f"[OutboxWorker] Segment lookup note: {e_seg}")
                         target_chat_id = None
 
+                import inspect
+
+                def _invoke_push(fn):
+                    kw = dict(
+                        parse_mode="HTML",
+                        chat_id=target_chat_id,
+                        alert_id=alert_id_kw,
+                        signal_id=sig_id,
+                        is_update=is_up,
+                        reply_to_message_id=reply_to,
+                        disable_notification=dis_notif,
+                    )
+                    try:
+                        if "wait" in inspect.signature(fn).parameters:
+                            kw["wait"] = True
+                    except (TypeError, ValueError) as e_sig:
+                        logger.debug(f"[OutboxWorker] Signature inspection skipped: {e_sig}")
+                    return fn(rendered_text, **kw)
+
                 try:
                     from bot.telegram_bot import get_telegram_bot
 
                     bot = get_telegram_bot()
                     if bot and hasattr(bot, "send_push"):
-                        res = bot.send_push(
-                            rendered_text,
-                            parse_mode="HTML",
-                            chat_id=target_chat_id,
-                            alert_id=alert_id_kw,
-                        )
+                        res = _invoke_push(bot.send_push)
                         if res is False:
                             raise RuntimeError("Telegram send_push returned False")
                         return True
@@ -127,12 +201,7 @@ class OutboxWorker:
 
                 from bot.telegram_bot import send_push
 
-                res = send_push(
-                    rendered_text,
-                    parse_mode="HTML",
-                    chat_id=target_chat_id,
-                    alert_id=alert_id_kw,
-                )
+                res = _invoke_push(send_push)
                 if res is False:
                     raise RuntimeError("Telegram send_push returned False")
                 return True

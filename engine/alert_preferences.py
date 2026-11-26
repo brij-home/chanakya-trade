@@ -1025,9 +1025,9 @@ class AlertPreferencesManager:
                         )
                 return True, "Allowed milestone"
 
-            # Early warning check — threshold mirrors _dispatch() gate:
-            # 82% for high-conviction positional and crypto types, 90% for all others.
-            if stage == "EARLY_WARNING" and not ch_pref.allow_early_warnings:
+            # Early warning / Primed / Stalk check — threshold mirrors _dispatch() gate:
+            # 82% for high-conviction positional, structural, and crypto types, 90% for all others.
+            if stage in ("EARLY_WARNING", "PRIMED", "STALK") and not ch_pref.allow_early_warnings:
                 if isinstance(alert, dict):
                     alt_type = str(alert.get("alert_type") or "").upper()
                 else:
@@ -1040,6 +1040,15 @@ class AlertPreferencesManager:
                     "GAMMA_BLAST",
                     "COMMODITY_MOMENTUM",
                     "CURRENCY_BREAKOUT",
+                    "SMC_ORDERBLOCK_RETEST",
+                    "SQUEEZE_BREAKOUT",
+                    "SQUEEZE_BREAKDOWN",
+                    "BREAKOUT_RETEST",
+                    "LIQUIDITY_INVERSION",
+                    "TURTLE_SOUP",
+                    "CHART_DOUBLE_BOTTOM",
+                    "CHART_DOUBLE_TOP",
+                    "CHART_BULL_FLAG",
                     # Crypto early-warning types (funding squeeze build-up,
                     # Deribit max pain gravity pull, SMC OB approach)
                     "CRYPTO_SQUEEZE",
@@ -1113,6 +1122,22 @@ class AlertPreferencesManager:
 
             if conf < effective_min_conf:
                 return False, f"Confidence {conf}% below {channel} threshold {effective_min_conf}%"
+
+            if channel == "telegram":
+                try:
+                    from engine.confidence_calibrator import (
+                        evaluate_telegram_confidence_calibration,
+                    )
+
+                    cal_ok, _cal_rep, cal_reason = evaluate_telegram_confidence_calibration(
+                        alert, effective_min_conf, is_lifecycle_update=False
+                    )
+                    if not cal_ok:
+                        return False, cal_reason
+                except Exception as e_cal:
+                    logger.debug(
+                        f"[engine.alert_preferences] Confidence calibration check skipped: {e_cal}"
+                    )
 
             return True, "Allowed"
 

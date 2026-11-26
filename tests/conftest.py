@@ -7,11 +7,14 @@ All fixtures produce deterministic, synthetic data — no network calls.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
 import pytest
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
 if worker_id:
@@ -102,69 +105,115 @@ def _supply_test_vix_fixture(monkeypatch: pytest.MonkeyPatch, request: pytest.Fi
 
 @pytest.fixture(autouse=True)
 def _isolate_fyers_rate_gate_and_circuit_breaker():
-    """Defensively reset rate gate, circuit breaker, and regime cache before and after each test."""
+    """Reset rate gate, circuit breaker, and caches for any imported modules between tests."""
 
     def _do_reset():
-        try:
-            from bot.telegram_bot import _push_executor, _push_lock
+        if "bot.telegram_bot" in sys.modules:
+            try:
+                from bot.telegram_bot import _push_executor, _push_lock
 
-            with _push_lock:
-                if _push_executor is not None:
-                    _push_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        try:
-            from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+                with _push_lock:
+                    if _push_executor is not None:
+                        _push_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        if "market.fyers_circuit_breaker" in sys.modules:
+            try:
+                from market.fyers_circuit_breaker import get_fyers_circuit_breaker
 
-            get_fyers_circuit_breaker().reset()
-        except Exception:
-            pass
-        try:
-            from brokers.fyers import _reset_auth_backoff
+                get_fyers_circuit_breaker().reset()
+            except Exception:
+                pass
+        if "brokers.fyers" in sys.modules:
+            try:
+                from brokers.fyers import _reset_auth_backoff
 
-            _reset_auth_backoff()
-        except Exception:
-            pass
-        try:
-            from market.fyers_rate_gate import get_fyers_rate_gate
+                _reset_auth_backoff()
+            except Exception:
+                pass
+        if "market.fyers_rate_gate" in sys.modules:
+            try:
+                from market.fyers_rate_gate import get_fyers_rate_gate
 
-            gate = get_fyers_rate_gate()
-            gate.reset_state()
-            gate.reset_daily_quota(requests=0)
-        except Exception:
-            pass
-        try:
-            from engine.equity_adaptive_regime import (
-                _EQUITY_REGIME_CACHE,
-                _EQUITY_REGIME_CACHE_LOCK,
-            )
+                gate = get_fyers_rate_gate()
+                gate.reset_state()
+                gate.reset_daily_quota(requests=0)
+            except Exception:
+                pass
+        if "market.flattrade_rate_gate" in sys.modules:
+            try:
+                from market.flattrade_rate_gate import get_flattrade_rate_gate
 
-            with _EQUITY_REGIME_CACHE_LOCK:
-                _EQUITY_REGIME_CACHE.clear()
-        except Exception:
-            pass
+                get_flattrade_rate_gate().reset_state()
+            except Exception:
+                pass
+        if "engine.equity_adaptive_regime" in sys.modules:
+            try:
+                from engine.equity_adaptive_regime import (
+                    _EQUITY_REGIME_CACHE,
+                    _EQUITY_REGIME_CACHE_LOCK,
+                )
 
-        try:
-            from engine.llm_deadline import reset_deadline_slots
+                with _EQUITY_REGIME_CACHE_LOCK:
+                    _EQUITY_REGIME_CACHE.clear()
+            except Exception:
+                pass
+        if "engine.market_matrix" in sys.modules:
+            try:
+                from engine.market_matrix import get_market_matrix
 
-            reset_deadline_slots()
-        except Exception:
-            pass
+                get_market_matrix().clear()
+            except Exception:
+                pass
+        if "engine.eod_store" in sys.modules:
+            try:
+                from engine.eod_store import clear_l1_caches
 
-        try:
-            from market.quotes import clear_quote_cache
+                clear_l1_caches()
+            except Exception:
+                pass
+        if "market.history" in sys.modules:
+            try:
+                from market.history import clear_df_memory_cache
 
-            clear_quote_cache()
-        except Exception:
-            pass
+                clear_df_memory_cache()
+            except Exception:
+                pass
+        if "engine.llm_deadline" in sys.modules:
+            try:
+                from engine.llm_deadline import reset_deadline_slots
 
-        try:
-            import market.sentiment as ms
+                reset_deadline_slots()
+            except Exception:
+                pass
+        if "market.quotes" in sys.modules:
+            try:
+                from market.quotes import clear_quote_cache
 
-            ms._BREADTH_CACHE = None
-            ms._BREADTH_CACHE_TS = 0.0
-        except Exception:
-            pass
+                clear_quote_cache()
+            except Exception:
+                pass
+        if "market.sentiment" in sys.modules:
+            try:
+                import market.sentiment as ms
+
+                ms._BREADTH_CACHE = None
+                ms._BREADTH_CACHE_TS = 0.0
+            except Exception:
+                pass
+        if "market.fyers_tbt_manager" in sys.modules:
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager, fyers_tbt_manager
+
+                if FyersTbtManager._instance is not None:
+                    FyersTbtManager._instance.reset_for_testing()
+                if (
+                    fyers_tbt_manager is not None
+                    and fyers_tbt_manager is not FyersTbtManager._instance
+                ):
+                    fyers_tbt_manager.reset_for_testing()
+            except Exception:
+                pass
 
     _do_reset()
     yield
@@ -217,34 +266,51 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Safely cleans up session temp directory if created for this process."""
-    try:
-        import shutil
+    """Safely cleans up session temp directory and xdist worker data dirs on exit."""
+    import shutil
 
+    try:
         basetemp = getattr(config.option, "basetemp", None)
         if basetemp and Path(basetemp).name.startswith("pytest-tmp-") and Path(basetemp).exists():
             shutil.rmtree(basetemp, ignore_errors=True)
     except Exception:
         pass
+    if worker_id and _TEST_DATA_DIR.exists():
+        try:
+            shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
+        except Exception:
+            pass
+    elif not worker_id:
+        for _gw_dir in _TEST_DATA_DIR.parent.glob(".pytest_trading_platform_gw*"):
+            try:
+                shutil.rmtree(_gw_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+_CALIBRATION_SEEDED = False
 
 
 @pytest.fixture(autouse=True)
 def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
-    try:
-        home_cal = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
-        repo_cal = (
-            Path(__file__).resolve().parent.parent
-            / "data"
-            / "calibration"
-            / "index_calibration.json"
-        )
-        if not home_cal.exists() and repo_cal.exists():
-            home_cal.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
+    global _CALIBRATION_SEEDED
+    if not _CALIBRATION_SEEDED:
+        _CALIBRATION_SEEDED = True
+        try:
+            home_cal = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if not home_cal.exists() and repo_cal.exists():
+                home_cal.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
 
-            shutil.copy2(repo_cal, home_cal)
-    except Exception:
-        pass
+                shutil.copy2(repo_cal, home_cal)
+        except Exception:
+            pass
 
     """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
     global _PROCESS_ALLOW_NETWORK
@@ -259,171 +325,187 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
     monkeypatch.setenv("TRADING_MODE", "PAPER")
     if "network" not in request.keywords:
         monkeypatch.setenv("CHANAKYA_TESTING", "1")
+        monkeypatch.setenv("AI_PROVIDER", "")
+        monkeypatch.setenv("AI_MODEL", "")
         monkeypatch.setenv("AI_FAST_PROVIDER", "")
         monkeypatch.setenv("AI_FAST_MODEL", "")
         monkeypatch.setenv("AI_DEEP_PROVIDER", "")
-        monkeypatch.setenv("GROQ_API_KEY", "")
-        monkeypatch.setenv("GEMINI_API_KEY", "")
-        monkeypatch.setenv("OPENAI_API_KEY", "")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-        monkeypatch.setenv("NVIDIA_API_KEY", "")
-        monkeypatch.setenv("OPENROUTER_API_KEY", "")
+        for _key_var in (
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEYS",
+            "GOOGLE_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "NVIDIA_API_KEY",
+            "OPENROUTER_API_KEY",
+            "CEREBRAS_API_KEY",
+            "SAMBANOVA_API_KEY",
+            "DEEPINFRA_API_KEY",
+            "TOGETHER_API_KEY",
+        ):
+            monkeypatch.setenv(_key_var, "")
+        try:
+            import pandas as _pd
+            import yfinance as _yf
 
-    try:
-        from collections import OrderedDict
-        import market.quotes as mq
+            class _OfflineTestTicker:
+                def __init__(self, *args, **kwargs):
+                    self.info = {}
+                    self.fast_info = {}
+                    self.options = ()
+                    self.financials = _pd.DataFrame()
+                    self.quarterly_financials = _pd.DataFrame()
+                    self.balance_sheet = _pd.DataFrame()
+                    self.cashflow = _pd.DataFrame()
+                    self.major_holders = _pd.DataFrame()
+                    self.institutional_holders = _pd.DataFrame()
 
-        if not isinstance(mq._QUOTE_CACHE, OrderedDict):
-            mq._QUOTE_CACHE = OrderedDict()
-        with mq._quote_cache_lock:
-            mq._QUOTE_CACHE.clear()
-        with mq._in_flight_quote_lock:
-            mq._in_flight_quote_events.clear()
-    except Exception:
-        pass
+                def history(self, *args, **kwargs):
+                    return _pd.DataFrame()
 
-    try:
-        from market.fyers_tbt_manager import FyersTbtManager
+                def option_chain(self, *args, **kwargs):
+                    from types import SimpleNamespace
 
-        tbt_mgr = FyersTbtManager()
-        tbt_mgr.reset_for_testing()
-    except Exception:
-        pass
+                    return SimpleNamespace(calls=_pd.DataFrame(), puts=_pd.DataFrame())
 
-    try:
-        from market.order_book import clear_depth_books
+            monkeypatch.setattr(_yf, "Ticker", _OfflineTestTicker)
+            monkeypatch.setattr(_yf, "download", lambda *args, **kwargs: _pd.DataFrame())
+        except Exception:
+            pass
 
-        clear_depth_books()
-    except Exception:
-        pass
+    def _clear_loaded_runtime_caches() -> None:
+        if "market.quotes" in sys.modules:
+            try:
+                from collections import OrderedDict
+                import market.quotes as mq
 
-    try:
-        from market.universe_depth_radar import clear_radar_cache
+                if not isinstance(mq._QUOTE_CACHE, OrderedDict):
+                    mq._QUOTE_CACHE = OrderedDict()
+                with mq._quote_cache_lock:
+                    mq._QUOTE_CACHE.clear()
+                with mq._in_flight_quote_lock:
+                    mq._in_flight_quote_events.clear()
+            except Exception:
+                pass
+        if "market.fyers_tbt_manager" in sys.modules:
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager
 
-        clear_radar_cache()
-    except Exception:
-        pass
+                if FyersTbtManager._instance is not None:
+                    FyersTbtManager._instance.reset_for_testing()
+            except Exception:
+                pass
+        if "market.order_book" in sys.modules:
+            try:
+                from market.order_book import clear_depth_books
 
-    try:
-        from engine.market_regime_gate import clear_cached_regime
+                clear_depth_books()
+            except Exception:
+                pass
+        if "market.universe_depth_radar" in sys.modules:
+            try:
+                from market.universe_depth_radar import clear_radar_cache
 
-        clear_cached_regime()
-    except Exception:
-        pass
+                clear_radar_cache()
+            except Exception:
+                pass
+        if "engine.market_regime_gate" in sys.modules:
+            try:
+                from engine.market_regime_gate import clear_cached_regime, clear_index_tide_cache
 
-    try:
-        from engine.index_velocity import clear_velocity_cache
+                clear_cached_regime()
+                clear_index_tide_cache()
+            except Exception:
+                pass
+        if "engine.index_velocity" in sys.modules:
+            try:
+                from engine.index_velocity import clear_velocity_cache
 
-        clear_velocity_cache()
-    except Exception:
-        pass
+                clear_velocity_cache()
+            except Exception:
+                pass
+        if "market.websocket" in sys.modules:
+            try:
+                from market.websocket import FyersWebSocket
 
-    try:
-        from market.websocket import FyersWebSocket
+                ws = FyersWebSocket._instance
+                if ws:
+                    with ws._lock:
+                        ws._ticks.clear()
+            except Exception:
+                pass
+        if "market.options" in sys.modules:
+            try:
+                from market.options import _CHAIN_CACHE, _EXPIRIES_CACHE, _SNAPSHOT_CACHE
 
-        ws = FyersWebSocket._instance
-        if ws:
-            with ws._lock:
-                ws._ticks.clear()
-    except Exception:
-        pass
+                _CHAIN_CACHE.clear()
+                _EXPIRIES_CACHE.clear()
+                _SNAPSHOT_CACHE.clear()
+            except Exception:
+                pass
+        if "market.history" in sys.modules:
+            try:
+                from market.history import _df_memory_cache, _df_memory_cache_lock
 
-    try:
-        from market.options import _CHAIN_CACHE, _EXPIRIES_CACHE, _SNAPSHOT_CACHE
+                with _df_memory_cache_lock:
+                    _df_memory_cache.clear()
+            except Exception:
+                pass
+        if "engine.daily_levels" in sys.modules:
+            try:
+                from engine.daily_levels import clear_daily_levels_cache
 
-        _CHAIN_CACHE.clear()
-        _EXPIRIES_CACHE.clear()
-        _SNAPSHOT_CACHE.clear()
-    except Exception:
-        pass
+                clear_daily_levels_cache()
+            except Exception:
+                pass
+        if "engine.trade_plan" in sys.modules:
+            try:
+                from engine.trade_plan import clear_trade_plan_cache
 
-    try:
-        from market.history import _df_memory_cache, _df_memory_cache_lock
+                clear_trade_plan_cache()
+            except Exception:
+                pass
+        if "engine.thematic_peer_sympathy" in sys.modules:
+            try:
+                from engine.thematic_peer_sympathy import thematic_sympathy_engine
 
-        with _df_memory_cache_lock:
-            _df_memory_cache.clear()
-    except Exception:
-        pass
+                thematic_sympathy_engine.clear_sympathy_session_state()
+            except Exception:
+                pass
+        if "engine.detector_circuit_breaker" in sys.modules:
+            try:
+                from engine.detector_circuit_breaker import detector_circuit_breaker
 
-    try:
-        from engine.daily_levels import clear_daily_levels_cache
+                detector_circuit_breaker.reset_all()
+            except Exception:
+                pass
+        if "engine.risk_limits" in sys.modules:
+            try:
+                from engine.risk_limits import risk_limits
 
-        clear_daily_levels_cache()
-    except Exception:
-        pass
-    try:
-        from engine.trade_plan import clear_trade_plan_cache
+                risk_limits.reset_all()
+            except Exception:
+                pass
+        if "engine.market_dynamics_governor" in sys.modules:
+            try:
+                mod = sys.modules["engine.market_dynamics_governor"]
+                gov = getattr(mod, "_governor_instance", None) or getattr(
+                    mod, "market_dynamics_governor", None
+                )
+                if gov is not None and hasattr(gov, "_vix_cache"):
+                    gov._vix_cache = (0.0, None)
+            except Exception:
+                pass
 
-        clear_trade_plan_cache()
-    except Exception:
-        pass
-    try:
-        from engine.market_regime_gate import clear_index_tide_cache
-
-        clear_index_tide_cache()
-    except Exception:
-        pass
-    try:
-        from engine.thematic_peer_sympathy import thematic_sympathy_engine
-
-        thematic_sympathy_engine.clear_sympathy_session_state()
-    except Exception:
-        pass
-
-    try:
-        from engine.detector_circuit_breaker import detector_circuit_breaker
-
-        detector_circuit_breaker.reset_all()
-    except Exception:
-        pass
-
-    try:
-        from engine.risk_limits import risk_limits
-
-        risk_limits.reset_all()
-    except Exception:
-        pass
+    _clear_loaded_runtime_caches()
 
     try:
         yield
     finally:
         _PROCESS_ALLOW_NETWORK = False
-        try:
-            from engine.market_regime_gate import clear_cached_regime
-
-            clear_cached_regime()
-        except Exception:
-            pass
-        try:
-            from market.universe_depth_radar import clear_radar_cache
-
-            clear_radar_cache()
-        except Exception:
-            pass
-        try:
-            from market.fyers_tbt_manager import FyersTbtManager
-
-            FyersTbtManager().reset_for_testing()
-        except Exception:
-            pass
-        try:
-            from market.order_book import clear_depth_books
-
-            clear_depth_books()
-        except Exception:
-            pass
-        try:
-            from engine.index_velocity import clear_velocity_cache
-
-            clear_velocity_cache()
-        except Exception:
-            pass
-        try:
-            from engine.daily_levels import clear_daily_levels_cache
-
-            clear_daily_levels_cache()
-        except Exception:
-            pass
+        _clear_loaded_runtime_caches()
 
 
 @pytest.fixture(autouse=True)
@@ -514,9 +596,9 @@ def isolate_learning_engine(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def seed_test_rrg_cache():
-    """Ensure analysis cache has deterministic RRG sector matrix for zero-network testing."""
+    """Ensure analysis cache has deterministic RRG sector matrix once per worker session."""
     try:
         from engine.analysis_cache import analysis_cache
         from analysis.sector_rotation import (
@@ -559,9 +641,12 @@ def seed_test_rrg_cache():
 _BASE_OHLCV_DF: pd.DataFrame | None = None
 
 
-def _get_base_ohlcv_df() -> pd.DataFrame:
+def _get_base_ohlcv_df() -> "pd.DataFrame":
     global _BASE_OHLCV_DF
     if _BASE_OHLCV_DF is None:
+        import numpy as np
+        import pandas as pd
+
         np.random.seed(42)
         n = 200
         dates = pd.date_range("2025-01-01", periods=n, freq="B")
@@ -637,105 +722,118 @@ def weak_fundamentals() -> dict:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Clean up any singleton background services when pytest finishes."""
-    try:
-        from market.websocket import ws_manager
-
-        ws_manager.stop(timeout=0.2)
-    except Exception:
-        pass
-    try:
-        from market.fyers_order_stream import fyers_order_stream
-
-        fyers_order_stream.stop(timeout=0.2)
-    except Exception:
-        pass
-    try:
-        from market.fyers_tbt_manager import fyers_tbt_manager
-
-        fyers_tbt_manager.stop(timeout=0.2)
-    except Exception:
-        pass
-    try:
-        from market.mstock_websocket import mstock_ws
-
-        mstock_ws.stop(timeout=0.2)
-    except Exception:
-        pass
-    try:
-        from market.kotak_websocket import kotak_ws
-
-        kotak_ws.stop()
-    except Exception:
-        pass
-    try:
-        from market.tick_store import tick_store
-
-        tick_store.stop(timeout=0.2)
-    except Exception:
-        pass
-    try:
-        from market.ticker_stream import ticker_stream
-
-        ticker_stream.stop(timeout=0.2)
-    except Exception:
-        pass
+    """Clean up imported singleton background services & DB handles when pytest finishes."""
+    for mod_name, attr_name, stop_kw in (
+        ("market.websocket", "ws_manager", {"timeout": 0.2}),
+        ("market.fyers_order_stream", "fyers_order_stream", {"timeout": 0.2}),
+        ("market.fyers_tbt_manager", "fyers_tbt_manager", {"timeout": 0.2}),
+        ("market.mstock_websocket", "mstock_ws", {"timeout": 0.2}),
+        ("market.kotak_websocket", "kotak_ws", {}),
+        ("market.tick_store", "tick_store", {"timeout": 0.2}),
+        ("market.ticker_stream", "ticker_stream", {"timeout": 0.2}),
+    ):
+        if mod_name in sys.modules:
+            try:
+                obj = getattr(sys.modules[mod_name], attr_name, None)
+                if obj is not None:
+                    obj.stop(**stop_kw)
+            except Exception:
+                pass
+    if "engine.eod_store" in sys.modules:
+        try:
+            sys.modules["engine.eod_store"].reset_store_connections()
+        except Exception:
+            pass
+    if "engine.sqlite_store" in sys.modules:
+        try:
+            st = getattr(sys.modules["engine.sqlite_store"], "alert_sqlite_store", None)
+            if st is not None and hasattr(st, "close"):
+                st.close()
+        except Exception:
+            pass
 
 
 @pytest.fixture(autouse=True)
 def reset_auto_alert_engine_pacing():
-    """Ensure hermetic test isolation for AutoAlertEngine state & daily levels."""
+    """Ensure hermetic test isolation for AutoAlertEngine & daily levels when loaded."""
 
     def _do_reset():
-        try:
-            from engine.auto_alert_engine import auto_alert_engine
+        if "engine.auto_alert_engine" in sys.modules:
+            try:
+                auto_alert_engine = getattr(
+                    sys.modules["engine.auto_alert_engine"], "auto_alert_engine", None
+                )
 
-            if auto_alert_engine is not None:
-                auto_alert_engine._alerts.clear()
-                auto_alert_engine._directional_quarantine.clear()
-                auto_alert_engine._directional_failure_history.clear()
-                auto_alert_engine._stopped_strike_quarantine.clear()
-                auto_alert_engine._alert_index.clear()
-                auto_alert_engine._recent_pacing.clear()
-                auto_alert_engine._sector_daily_telegram.clear()
-                auto_alert_engine._daily_index_telegram.clear()
-                auto_alert_engine._index_half_telegram.clear()
-                auto_alert_engine._sector_hourly_telegram.clear()
-                for k in auto_alert_engine._hourly_telegram_dispatches:
-                    auto_alert_engine._hourly_telegram_dispatches[k].clear()
-                auto_alert_engine._hourly_index_directional.clear()
-                auto_alert_engine._hourly_fno_stock_directional.clear()
-                try:
-                    from engine.sqlite_store import alert_sqlite_store
+                if auto_alert_engine is not None:
+                    auto_alert_engine._alerts.clear()
+                    auto_alert_engine._directional_quarantine.clear()
+                    auto_alert_engine._directional_failure_history.clear()
+                    auto_alert_engine._stopped_strike_quarantine.clear()
+                    auto_alert_engine._alert_index.clear()
+                    auto_alert_engine._recent_pacing.clear()
+                    auto_alert_engine._sector_daily_telegram.clear()
+                    auto_alert_engine._daily_index_telegram.clear()
+                    auto_alert_engine._index_half_telegram.clear()
+                    auto_alert_engine._sector_hourly_telegram.clear()
+                    for k in auto_alert_engine._hourly_telegram_dispatches:
+                        auto_alert_engine._hourly_telegram_dispatches[k].clear()
+                    auto_alert_engine._hourly_index_directional.clear()
+                    auto_alert_engine._hourly_fno_stock_directional.clear()
+                    if "engine.sqlite_store" in sys.modules:
+                        try:
+                            from engine.sqlite_store import alert_sqlite_store
 
-                    alert_sqlite_store.clear()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            from engine.daily_levels import get_daily_levels_store
-            from config.paths import app_data_path
+                            alert_sqlite_store.clear()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        if "engine.daily_levels" in sys.modules:
+            try:
+                from engine.daily_levels import get_daily_levels_store
+                from config.paths import app_data_path
 
-            store = get_daily_levels_store()
-            with store._lock:
-                store._memory_cache.clear()
-                store._persist_dir = app_data_path("daily_levels")
-                store._persist_dir.mkdir(parents=True, exist_ok=True)
-                for f in store._persist_dir.glob("*.json"):
-                    try:
-                        f.unlink()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                store = get_daily_levels_store()
+                with store._lock:
+                    store._memory_cache.clear()
+                    store._persist_dir = app_data_path("daily_levels")
+                    if store._persist_dir.exists():
+                        for f in store._persist_dir.glob("*.json"):
+                            try:
+                                f.unlink()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
-        try:
-            from engine.llm_deadline import reset_deadline_slots
+        if "engine.market_matrix" in sys.modules:
+            try:
+                from engine.market_matrix import get_market_matrix
 
-            reset_deadline_slots()
-        except Exception:
-            pass
+                get_market_matrix().clear()
+            except Exception:
+                pass
+        if "engine.eod_store" in sys.modules:
+            try:
+                from engine.eod_store import clear_l1_caches
+
+                clear_l1_caches()
+            except Exception:
+                pass
+        if "market.history" in sys.modules:
+            try:
+                from market.history import clear_df_memory_cache
+
+                clear_df_memory_cache()
+            except Exception:
+                pass
+        if "engine.llm_deadline" in sys.modules:
+            try:
+                from engine.llm_deadline import reset_deadline_slots
+
+                reset_deadline_slots()
+            except Exception:
+                pass
 
     _do_reset()
     yield

@@ -961,21 +961,27 @@ def detect_gamma_blast(
             )
 
             clean_und = canonical_alert_symbol(underlying or "")
-            index_spot_fallback = {
-                "SENSEX": 160.0,
-                "BANKEX": 150.0,
-                "BANKNIFTY": 110.0,
-                "FINNIFTY": 45.0,
-                "MIDCPNIFTY": 28.0,
-                "NIFTY": 50.0,
-            }.get(clean_und, max(1.0, round(spot * 0.005, 1)))
+            vix_val = locals().get("india_vix") or locals().get("vix_val")
+            vix_scale = (
+                max(0.75, min(2.0, (float(vix_val) / 15.0) ** 0.5))
+                if vix_val and float(vix_val) > 0
+                else 1.0
+            )
+            dyn_spot_risk = max(5.0, round(spot * 0.0020 * vix_scale, 1))
 
             structural_spot_sl_ce = (
                 float(getattr(tp, "invalidation_stop", 0.0) or 0.0)
                 if tp and getattr(tp, "invalidation_stop", None)
-                else round(spot - index_spot_fallback, 1)
+                else round(spot - dyn_spot_risk, 1)
             )
-            disaster_stop_ce = round(opt_ltp * 0.68, 1) if opt_ltp else None
+            opt_risk_ce = (
+                abs(float(opt_ltp) - float(sl_premium)) if (opt_ltp and sl_premium) else 0.0
+            )
+            disaster_stop_ce = (
+                round(max(0.5, opt_ltp - max(opt_ltp * 0.35, opt_risk_ce * 1.5)), 1)
+                if opt_ltp
+                else None
+            )
 
             alerts.append(
                 AutoAlert(
@@ -1782,21 +1788,27 @@ def detect_gamma_blast(
             )
 
             clean_und = canonical_alert_symbol(underlying or "")
-            index_spot_fallback = {
-                "SENSEX": 160.0,
-                "BANKEX": 150.0,
-                "BANKNIFTY": 110.0,
-                "FINNIFTY": 45.0,
-                "MIDCPNIFTY": 28.0,
-                "NIFTY": 50.0,
-            }.get(clean_und, max(1.0, round(spot * 0.005, 1)))
+            vix_val = locals().get("india_vix") or locals().get("vix_val")
+            vix_scale = (
+                max(0.75, min(2.0, (float(vix_val) / 15.0) ** 0.5))
+                if vix_val and float(vix_val) > 0
+                else 1.0
+            )
+            dyn_spot_risk = max(5.0, round(spot * 0.0020 * vix_scale, 1))
 
             structural_spot_sl_pe = (
                 float(getattr(tp, "invalidation_stop", 0.0) or 0.0)
                 if tp and getattr(tp, "invalidation_stop", None)
-                else round(spot + index_spot_fallback, 1)
+                else round(spot + dyn_spot_risk, 1)
             )
-            disaster_stop_pe = round(opt_ltp * 0.68, 1) if opt_ltp else None
+            opt_risk_pe = (
+                abs(float(opt_ltp) - float(sl_premium)) if (opt_ltp and sl_premium) else 0.0
+            )
+            disaster_stop_pe = (
+                round(max(0.5, opt_ltp - max(opt_ltp * 0.35, opt_risk_pe * 1.5)), 1)
+                if opt_ltp
+                else None
+            )
 
             alerts.append(
                 AutoAlert(

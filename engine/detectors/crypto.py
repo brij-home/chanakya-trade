@@ -14,14 +14,14 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 import pandas as pd
 
+from config.constants import IST
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.crypto")
-IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_CRYPTO = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 _CRYPTO_VOL_ARB_COOLDOWN: dict[str, float] = {}

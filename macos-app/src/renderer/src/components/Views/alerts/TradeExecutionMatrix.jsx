@@ -348,6 +348,13 @@ export function TradeExecutionMatrix({
 
   // Stage Hit Calculations from SSOT lifecycle
   const isTimeStop = lifecycle?.isTimeStop ?? false
+  const isScratchDirective = Boolean(
+    lifecycle?.isScratchDirective ||
+    alert?.stage === 'IN_FLIGHT_WARNING' ||
+    (alert?.headline && alert.headline.includes('SCRATCH')) ||
+    (alert?.summary && alert.summary.includes('SCRATCH')) ||
+    alert?.trailing_decision?.includes('SCRATCH')
+  )
   const isExpired = lifecycle?.isExpired ?? false
   const isInvalidated = lifecycle?.isInvalidated ?? false
   const isSLHit = lifecycle ? lifecycle.isSLHit : false
@@ -546,24 +553,30 @@ export function TradeExecutionMatrix({
 
         {/* 2. ENTRY TRIGGER */}
         <div className={`p-1.5 rounded-lg transition-all ${
-          isExtended
+          isScratchDirective
+            ? 'bg-amber-100/90 dark:bg-amber-500/20 border border-amber-400 dark:border-amber-500/50 shadow-sm'
+            : isExtended
             ? 'bg-amber-100/80 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/40 shadow-sm'
             : currentPrice && !isSLHit
             ? 'bg-amber-50/90 dark:bg-gold/15 border border-amber-300 dark:border-gold/50 shadow-sm'
             : 'bg-amber-50/60 dark:bg-gold/5 border border-amber-200 dark:border-gold/25'
         }`}>
           <div className="flex items-center justify-between text-[11px]">
-            <span className={`font-black uppercase tracking-wider ${isExtended ? 'text-amber-800 dark:text-amber-400' : 'text-amber-800 dark:text-gold'}`}>
-              {isNeutralSpread ? '⚡ Net Credit' : isExtended ? '🛑 No Chase' : '⚡ Entry Trigger'}
+            <span className={`font-black uppercase tracking-wider ${isScratchDirective ? 'text-amber-800 dark:text-amber-300' : isExtended ? 'text-amber-800 dark:text-amber-400' : 'text-amber-800 dark:text-gold'}`}>
+              {isScratchDirective ? '⏱️ Scratch Active' : isNeutralSpread ? '⚡ Net Credit' : isExtended ? '🛑 No Chase' : '⚡ Entry Trigger'}
             </span>
-            <span className={`font-bold ${isExtended ? 'text-amber-900 bg-amber-200/80 dark:text-amber-300 dark:bg-amber-500/20 px-1 rounded' : 'text-amber-800 dark:text-amber-300'}`}>
-              {isNeutralSpread ? 'CREDIT' : isExtended ? `EXTENDED +${extendedPct}%` : (isUpward ? 'BUY' : 'SELL')}
+            <span className={`font-bold ${isScratchDirective ? 'text-amber-900 bg-amber-200/90 dark:text-amber-200 dark:bg-amber-500/30 px-1 rounded' : isExtended ? 'text-amber-900 bg-amber-200/80 dark:text-amber-300 dark:bg-amber-500/20 px-1 rounded' : 'text-amber-800 dark:text-amber-300'}`}>
+              {isScratchDirective ? 'SCRATCH CMP' : isNeutralSpread ? 'CREDIT' : isExtended ? `EXTENDED +${extendedPct}%` : (isUpward ? 'BUY' : 'SELL')}
             </span>
           </div>
           <div className="text-xs font-black text-amber-950 dark:text-amber-200 mt-0.5">
             {currSym}{formatNum(levels?.entry)}
           </div>
-          {isExtended ? (
+          {isScratchDirective ? (
+            <div className="text-[10px] text-amber-800 dark:text-amber-300 font-bold truncate" title="Velocity stagnation directive active. Do not enter fresh positions. Exit/scratch open positions near CMP.">
+              🛑 POSITION STAGNANT — EXIT AT CMP
+            </div>
+          ) : isExtended ? (
             <div className="text-[10px] text-amber-800 dark:text-amber-300 font-bold truncate" title="Price is extended beyond buy zone. Wait for pullback to 50-SMA or secondary base consolidation.">
               ⏳ WAIT FOR PULLBACK
             </div>
@@ -1093,7 +1106,11 @@ export function TradeExecutionMatrix({
                 </span>
               </div>
               <div className="my-1.5 font-sans text-slate-700 dark:text-slate-200 text-[11px] leading-snug">
-                {isNeutralSpread ? (
+                {isScratchDirective ? (
+                  <span className="text-amber-800 dark:text-amber-300 font-bold">
+                    SCRATCH DIRECTIVE ACTIVE: Momentum dried up after extended time in trade. Scratch open position near market price/breakeven to eliminate theta bleed. Fresh entries are strictly suppressed.
+                  </span>
+                ) : isNeutralSpread ? (
                   <>
                     Execute wings first ({hedgedSpreadData?.allLegs?.[0]?.strikeLabel || 'BUY PE'} &amp; {hedgedSpreadData?.allLegs?.[3]?.strikeLabel || 'BUY CE'}) for margin relief, then SELL short corridor strikes ({hedgedSpreadData?.profitCorridor || 'Corridor'}). Collect net credit.
                   </>

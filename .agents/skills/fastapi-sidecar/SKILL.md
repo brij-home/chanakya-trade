@@ -28,7 +28,9 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 | `/` | `GET` | HTML broker login dashboard |
 | `/<broker>/login` | `GET` | Initiate OAuth flow |
 | `/<broker>/callback` | `GET` | Receive auth code/token from broker |
-| `/api/mode` | `GET` | Canonical server-authoritative mode (`DEMO`, `PAPER`, `LIVE`) |
+| `/api/mode` | `GET` | Canonical server-authoritative mode (`DEMO`, `PAPER`, `LIVE`) + `discovery_policy` |
+| `/api/system/health-hub` | `GET` | OpsDeck health hub (circuit breaker, RateGate, 50D TBT slots, `broker_failover`, `code_provenance`) |
+| `/api/fyers/margin-check` | `GET` / `POST` | Rate-gated Fyers Multi-Order SPAN margin + Apr-2026 statutory charges preflight |
 | `/api/reconciliation` | `GET` | Live broker vs internal ledger reconciliation (`UNAVAILABLE` if disconnected) |
 | `/api/status` | `GET` | Active broker session status |
 | `/api/portfolio` | `GET` | Combined positions & holdings |
@@ -89,11 +91,12 @@ The frontend must always display the current feed mode so the user knows their d
 14. **Typeahead Safety**: Dynamically calculate viewport boundaries to prevent overflow/clipping.
 
 ### CI/CD & Tiered Validation
-15. **Pre-Commit Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --fast` (< 20s) before any commit.
-16. **Pre-Push Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --full` (< 40s) for full 2,188+ test matrix.
-17. **Cleanup Utility**: Run `.venv\Scripts\python.exe scripts/cleanup.py` to kill orphaned workers and free port 8765.
-18. **Async Event Loop Health**: Heavy synchronous quant evaluations, bulk database queries, or network scraping MUST be offloaded using `asyncio.to_thread(...)` so SSE streaming and heartbeat connections never freeze.
-19. **Traceable Error Logging**: Endpoints must never silently swallow exceptions with bare `pass`. Log all exceptions with `logger.error(..., exc_info=True)` and return honest structured JSON error responses with correlation IDs.
+15. **SSE Publishing Contract**: Publish alert/system events via `event_bus.publish_domain_event(...)` or `event_bus.publish_sync(...)` (never call nonexistent `event_bus.broadcast()`), using `default=str` JSON serialization.
+16. **Pre-Commit Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --fast` (and `npm.cmd --prefix macos-app test -- --run` on Windows PowerShell) before any commit.
+17. **Pre-Push Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --full` for full multi-worker verification.
+18. **Cleanup Utility**: Run `.venv\Scripts\python.exe scripts/cleanup.py` to kill orphaned workers and free port 8765.
+19. **Async Event Loop Health**: Heavy synchronous quant evaluations, bulk database queries, or network scraping MUST be offloaded using `asyncio.to_thread(...)` so SSE streaming and heartbeat connections never freeze.
+20. **Traceable Error Logging**: Endpoints must never silently swallow exceptions with bare `pass`. Log all exceptions with `logger.error(..., exc_info=True)` and return honest structured JSON error responses with correlation IDs.
 
 ---
 

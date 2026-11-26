@@ -133,7 +133,12 @@ def test_smc_orderblock_bullish_retest():
     assert plan["action"] == "BUY"
     assert "no_chase_rule" in plan
     assert "runner_target" in plan
-    assert alert.no_chase_boundary == 102.0  # Equal to ob.top
+    # Invariant: spot ceiling preserved in spot_no_chase_boundary when option plan is resolved
+    if alert.contract_symbol and alert.option_premium:
+        assert alert.spot_no_chase_boundary == 102.0
+        assert alert.no_chase_boundary == round(alert.option_premium * 1.05, 2)
+    else:
+        assert alert.no_chase_boundary == 102.0
     assert plan["no_chase_boundary"] == "₹102.00"
 
 
@@ -165,7 +170,12 @@ def test_smc_orderblock_bearish_retest():
     assert alert.metrics["rr_t2"] >= 3.0
     assert alert.metrics["ob_type"] == "SUPPLY"
     assert alert.actionable_plan["action"] == "SELL_SHORT"
-    assert alert.no_chase_boundary == 198.0  # Equal to ob.bottom
+    # Invariant: spot ceiling preserved in spot_no_chase_boundary when option plan is resolved
+    if alert.contract_symbol and alert.option_premium:
+        assert alert.spot_no_chase_boundary == 198.0
+        assert alert.no_chase_boundary == round(alert.option_premium * 1.05, 2)
+    else:
+        assert alert.no_chase_boundary == 198.0
     assert alert.actionable_plan["no_chase_boundary"] == "₹198.00"
 
 

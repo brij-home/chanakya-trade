@@ -88,7 +88,7 @@ def get_nse_client() -> httpx.Client:
                 )
                 _NSE_LAST_INIT = 0.0
 
-    # Refresh homepage cookies if older than TTL
+    # Refresh homepage cookies if older than TTL (with 30s backoff on failure)
     if now - _NSE_LAST_INIT > _NSE_COOKIE_TTL:
         with _CLIENT_LOCK:
             if now - _NSE_LAST_INIT > _NSE_COOKIE_TTL and _NSE_CLIENT and not _NSE_CLIENT.is_closed:
@@ -96,6 +96,7 @@ def get_nse_client() -> httpx.Client:
                     _NSE_CLIENT.get("https://www.nseindia.com", timeout=5.0)
                     _NSE_LAST_INIT = now
                 except Exception as exc:
+                    _NSE_LAST_INIT = now - (_NSE_COOKIE_TTL - 30.0)
                     logger.debug("NSE cookie warm-up note: %s", exc)
 
     return _NSE_CLIENT

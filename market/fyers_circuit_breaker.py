@@ -131,7 +131,7 @@ class FyersCircuitBreaker:
                 or "per day" in err_lower
             )
 
-            # Check token expiration / invalid token errors (e.g. daily session reset at 06:00 IST)
+            # Check token expiration / invalid token errors (e.g. daily session reset at 06:30 IST)
             is_token_expired = (
                 status_code in (-14, -15, -16, -17, 401, 403)
                 or "token is invalid" in err_lower

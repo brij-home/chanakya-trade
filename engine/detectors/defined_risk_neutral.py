@@ -195,6 +195,30 @@ def detect_defined_risk_neutral(
     if is_inside_camarilla:
         evidence_score += 1
 
+    # Compute session VWAP from intraday candles when available (avoid blind 0.0)
+    spot_vwap = 0.0
+    if candles is not None and len(candles) >= 2:
+        try:
+            c_df = candles
+            if hasattr(candles.index, "date"):
+                today_d = datetime.now(IST).date()
+                sub = candles[candles.index.date == today_d]
+                if len(sub) >= 2:
+                    c_df = sub
+                else:
+                    last_d = candles.index.date[-1]
+                    c_df = candles[candles.index.date == last_d]
+            vols = c_df["volume"].values if "volume" in c_df.columns else c_df["Volume"].values
+            highs = c_df["high"].values if "high" in c_df.columns else c_df["High"].values
+            lows = c_df["low"].values if "low" in c_df.columns else c_df["Low"].values
+            closes = c_df["close"].values if "close" in c_df.columns else c_df["Close"].values
+            tot_v = float(vols.sum())
+            if tot_v > 0:
+                tp_arr = (highs + lows + closes) / 3.0
+                spot_vwap = round(float((tp_arr * vols).sum() / tot_v), 2)
+        except Exception:
+            spot_vwap = 0.0
+
     # Require at least 2 confirming range-bound signals (or index in low VIX <= 16.5 with narrow range)
     if evidence_score < 2 and not (ctx.is_index and vix <= 16.5 and is_narrow_day):
         return None
@@ -346,6 +370,7 @@ def detect_defined_risk_neutral(
         lot_size=lot_size,
         metrics={
             "strategy": "IRON_CONDOR",
+            "vwap": spot_vwap,
             "vix": round(vix, 2),
             "adx": adx_val,
             "lot_size": lot_size,

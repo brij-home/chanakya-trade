@@ -1,4 +1,4 @@
-> **Current safety contract (31 October 2026):** Read `docs/SAFETY_CONTRACTS.md` before any change. It supersedes older weekday, STT, session, synthetic-data and one-lot-floor examples in this document. Live platform order placement also requires owner-controlled `LIVE_EXECUTION_QUALIFIED=1`; do not set it until the documented account-ledger, recovery, protection and broker acceptance criteria are complete. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
+> **Current safety & calibration baseline (25 November 2026):** Read `docs/SAFETY_CONTRACTS.md` and `docs/FNO_DESK_ROADMAP.md` before any change. They supersede older weekday, STT, session, synthetic-data, and one-lot-floor examples. Live platform order placement requires owner-controlled `LIVE_EXECUTION_QUALIFIED=1`; do not set it until the documented account-ledger, recovery, protection and broker acceptance criteria are complete. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
 
 # AGENTS.md — ChanakyaTrade Agent Guidelines
 
@@ -9,7 +9,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (48 Core Invariants)](#2-safety--trading-guardrails-48-core-invariants)
+- [2. Safety & Trading Guardrails (Core Invariants)](#2-safety--trading-guardrails-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -19,34 +19,35 @@
 
 ## 1. Project Overview & Component Map
 
-**Owner focus (updated 1 November 2026):** Prioritize NSE/BSE index options, followed by stock F&O during active derivative sessions. Read `docs/FNO_DESK_ROADMAP.md` for the target policy and implementation checkpoint. `config.discovery_policy` is the discovery-scope authority; the default is `FNO_ONLY`, with explicit `FNO_PRIORITY` and `BALANCED` legacy/research profiles. Strict scope has no test-mode bypass. Preserve lifecycle/exit monitoring for existing exposure, including out-of-scope symbols. Persisted subscriptions with unknown exposure purpose are retained and exposed diagnostically until account-bound subscription purpose/reconciliation is implemented; do not claim complete resource exclusivity or deployment from the profile name. Context cash constituents may inform index/F&O signals without generating a competing cash-trading desk. Do not add providers, LLMs or subscriptions as claimed alpha without held-out evidence.
+**Owner focus (updated 25 November 2026):** Prioritize NSE/BSE index options, followed by stock F&O during active derivative sessions. Read `docs/FNO_DESK_ROADMAP.md` for the target policy and implementation checkpoint. `config.discovery_policy` is the discovery-scope authority; the default is `FNO_ONLY`, with explicit `FNO_PRIORITY` and `BALANCED` legacy/research profiles. Strict scope has no test-mode bypass. Preserve lifecycle/exit monitoring for existing exposure, including out-of-scope symbols. Persisted subscriptions with unknown exposure purpose are retained and exposed diagnostically until account-bound subscription purpose/reconciliation is implemented; do not claim complete resource exclusivity or deployment from the profile name. Context cash constituents (e.g. `engine.feature_bus.compute_constituent_lead_lag`) may inform index/F&O signals strictly read-only without generating a competing cash-trading desk. Do not add providers, LLMs or subscriptions as claimed alpha without held-out evidence.
 
-`ChanakyaTrade` is an institutional-grade **AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence** for Indian Markets (**NSE, BSE, NFO, MCX**).
+`ChanakyaTrade` is an institutional-grade **AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence** for Indian Markets (**NSE, BSE, NFO, BFO, MCX**).
 
 | Directory | Responsibility | Key Modules |
 | :--- | :--- | :--- |
 | **`agent/`** | Multi-agent reasoning, smart funnel, screening & debates | [`smart_funnel.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/smart_funnel.py), [`multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py), [`personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py), [`tools.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/tools.py) |
-| **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC & Multibagger | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`volume_profile.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/volume_profile.py), [`multibagger.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/multibagger.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), [`dcf.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/dcf.py) |
-| **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py), [`shoonya.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/shoonya.py), [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py), [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`mstock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mstock.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
-| **`engine/`** | Backtesting, risk gate, execution, sizing, ring buffer, lifecycle & cache | [`ring_buffer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/ring_buffer.py), [`alert_identity.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_identity.py), [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py), [`alert_postmortem_runner.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_postmortem_runner.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py) |
-| **`market/`** | Market feeds, options chain, quotes, order book & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`order_book.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/order_book.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`mstock_websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/mstock_websocket.py) |
-| **`web/`** | FastAPI sidecar API (port `8765`), OAuth, SSE & MCP Bridge | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`mcp.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/mcp.py), [`auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py), [`skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) |
-| **`app/`** | Interactive REPL, CLI commands & launcher | [`main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py), [`repl.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/repl.py), [`commands/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/commands) |
-| **`ui/`** | Rich terminal TUI & Textual widgets | [`app.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/app.py), [`widgets/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/widgets) |
-| **`bot/`** | Telegram bot for remote trade management | [`telegram_bot.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/bot/telegram_bot.py) |
-| **`config/`** | Centralized constants, encoding, credentials & paths | [`constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py), [`encoding.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/encoding.py), [`credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) |
-| **`tests/`** | Comprehensive unit & integration tests | [`conftest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/conftest.py), 90+ test suites (deterministic, synthetic data) |
+| **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC, OBI/VPIN & Regime | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`order_flow.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/order_flow.py), [`regime_governor.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/regime_governor.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py) |
+| **`brokers/`** | Broker unified abstraction (Fyers Prime primary + Flattrade hot standby) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py), [`flattrade.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/flattrade.py), [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py), [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
+| **`engine/`** | Signal bus, scrutiny, risk gate, OMS execution, sizing, replay & outbox | [`auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py), [`feature_bus.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/feature_bus.py), [`signal_enrichment.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/signal_enrichment.py), [`order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py), [`pretrade.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/pretrade.py), [`charges.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/charges.py), [`options_replay.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/options_replay.py), [`backtest_vectorized.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest_vectorized.py) |
+| **`market/`** | Feeds, effective-dated schedules, rate gate, TBT/OrderSocket, Greeks & MWPL | [`rule_schedule.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/rule_schedule.py), [`instruments.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py), [`fyers_rate_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/fyers_rate_gate.py), [`fyers_tbt_manager.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/fyers_tbt_manager.py), [`fyers_order_stream.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/fyers_order_stream.py), [`vectorized_greeks.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/vectorized_greeks.py), [`fno_ban.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/fno_ban.py) |
+| **`web/`** | FastAPI sidecar API (port `8765`), OAuth, SSE & tiered MCP Bridge | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`mcp.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/mcp.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`routers/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/routers) |
+| **`app/` & `ui/`** | Interactive REPL, CLI commands & Textual terminal TUI | [`main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py), [`repl.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/repl.py), [`ui/app.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/app.py) |
+| **`bot/`** | Telegram delivery bot (`wait=True`, `429 Retry-After` backoff) & templates | [`telegram_bot.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/bot/telegram_bot.py), [`alert_templates.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/bot/alert_templates.py) |
+| **`config/`** | Centralized constants, storage paths, discovery scope, encoding & credentials | [`constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py), [`paths.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/paths.py), [`discovery_policy.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/discovery_policy.py), [`credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) |
+| **`tests/`** | Deterministic unit, contract & release-safety regression suites | [`conftest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/conftest.py), [`test_verified_market_safety.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_verified_market_safety.py) |
 
 ---
 
-## 2. Safety & Trading Guardrails (48 Core Invariants)
+## 2. Safety & Trading Guardrails (Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
 1. **Default to Paper/Mock Mode**: `TRADING_MODE=PAPER` is the safety default. Never execute real broker orders without explicit user intent and double-confirmation.
 2. **Credential & Secret Protection**: Never commit, log, or hardcode API keys, TOTP secrets, or passwords. Use OS keychain storage via `config.credentials`.
 3. **SEBI IPv4 Network Binding**: Indian broker APIs enforce whitelisted IPv4 addresses. Keep the `socket.getaddrinfo` override intact in [`app/main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py).
-4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Centralized constants live in [`config/constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py).
+4. **Effective-Dated Market Hours & CAS Cutoffs (`market.rule_schedule`):**
+   - Never hardcode static `15:30` / `15:15` exit cutoffs. Derive segment closes and entry/squareoff cutoffs exclusively from [`market/rule_schedule.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/rule_schedule.py) (`derivative_close`, `cash_continuous_close`, `is_cas_window`, `closing_vwap_window`, `intraday_entry_cutoff`, `intraday_squareoff_cutoff`).
+   - SEBI Oct 15, 2026 / Dec 7, 2026 CAS boundary: Cash continuous closes at `15:30 IST`, Closing Auction Session (CAS) runs `15:30–15:40 IST`, equity derivatives close at `15:45 IST` (except expiring index contracts which remain `15:30 IST`), and expiry settlement uses the `15:00–15:30` closing VWAP window. Pre-Dec 7 fixtures retain their historical close/CAS times. MCX runs to `23:30`/`23:55 IST`.
 5. **Advisory Risk Friction (Co-Pilot, Not Police)**: When behavioral flags (loss streak ≥3, pyramiding into losers, daily loss cap) trigger, present mindful friction with coaching alternatives and double-confirmation — never hard-block without an escape path.
 6. **Live Execution Pipeline — Fail-Closed Contract** (enforced in [`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
    - `execute_order_intent()` MUST pass `assert_live_execution_allowed()` before claiming `SUBMITTING`, then pass the supported-order-shape guard, pilot safety gate, `validate_pretrade()`, and only then call real `get_execution_broker().place_order()`. Denied deployments and unsupported shapes remain `CONFIRMED`; never label an order `SUBMITTING` if no broker request was made.
@@ -57,7 +58,8 @@
    - Provider-specific Fyers order/GTT/smart/multileg routes and untracked position mutations MUST NOT call broker mutation methods directly. Route supported modifications through an OMS-owned `order_id`; block unsupported shapes. Panic-exit must use the central audited coordinator and report `PENDING_RECONCILIATION` until broker state confirms flatness.
    - **Confirmation Boundary**: A `PREVIEW` is not executable. The client must submit the exact server-generated `preview_hash` to transition it to `CONFIRMED`; only `CONFIRMED → SUBMITTING` is permitted, atomically.
    - **Idempotency Semantics**: Each user order intent has a cryptographically random idempotency key. Reuse a key only to retry the same request; never derive it from order fields or use `INSERT OR REPLACE` on the order ledger.
-   - **Instrument Authority**: Exchange and segment are resolved from the canonical instrument master at the server boundary. Client-provided venue/segment overrides must be rejected, not trusted.
+   - **Instrument Authority**: Exchange and segment are resolved from the canonical instrument master at the server boundary. Client-provided venue/segment overrides must be rejected, not trusted. Also enforce exchange-appropriate BSE/BFO vs NSE/NFO holidays and fail-closed inside-spread protection on live `MARKET` option orders in [`engine/pretrade.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/pretrade.py).
+   - **OrderSocket Stream & Account-Scoped Recovery**: [`fyers_order_stream.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/fyers_order_stream.py) binds idempotently to `apply_fyers_stream_order_update()` / `apply_fyers_stream_trade_fill()` and `recover_stale_inflight_orders()` in `order_lifecycle.py` with strict `account_id` mismatch rejection and deterministic broker fill timestamps.
 7. **Mode Banner Truthfulness** (`GET /api/mode` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
    - The canonical mapping is: `OBSERVE → DEMO`, `SIMULATE → PAPER`, `EXECUTE → LIVE`.
    - Do NOT add a fourth mode or let an unknown backend mode silently default to `PAPER`. Add it to the map or raise.
@@ -190,15 +192,15 @@
 
 30. **Canonical Storage Path Resolution (Zero Hardcoded Home Paths)**:
    - Hardcoding `Path.home() / ".trading_platform"` or raw user home directories in any module is strictly prohibited.
-   - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_HOME`, and multi-environment portability.
+   - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_DATA` / `TRADING_PLATFORM_HOME`, and multi-environment portability.
 
-31. **Stale Assumption Elimination & Market Master Authority (October 2026 Mandate)**:
-   - System components, detectors, risk planners, backtest engines, and AI conversational explanations MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot sizes 75/50/25, legacy Sensex lot size 10, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Oct 2024 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
+31. **Stale Assumption Elimination & Market Master Authority (25 November 2026 Mandate)**:
+   - System components, detectors, risk planners, backtest engines, and AI conversational explanations MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot sizes 75/50/25, legacy Sensex lot size 10 or ignoring the Jan 25, 2027 20→25 transition, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Apr 2026 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
    - All instrument specifications, lot sizes, tick sizes, expiry structures, statutory charges, and circuit boundaries MUST resolve exclusively from canonical SSOT modules:
-     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES` (Active: NIFTY 65, BANKNIFTY 30, FINNIFTY 60, MIDCPNIFTY 120, SENSEX 20, BANKEX 30)
-     - Expiry architecture & single-weekly index rule: `engine.alert_expiry.classify_expiry_type`
+     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES` and `market.instruments.get_fno_lot_size(symbol, expiry_date=...)` (`NIFTY 65`, `BANKNIFTY 30`, `FINNIFTY 60`, `MIDCPNIFTY 120`, `SENSEX 20` before `2027-01-25` / `25` for `2027-01-25+` per BSE Notice `20260930-58`, `BANKEX 30`)
+     - Expiry & CAS session schedule: `market.rule_schedule` & `engine.alert_expiry.classify_expiry_type`
      - Nominal price tiers & dynamic risk clamping: `engine.dynamic_risk.resolve_price_tier` and `clamp_dynamic_risk`
-     - Statutory taxes & STT schedule: `engine.charges.calculate_charges`
+     - Statutory taxes & Apr 2026 STT schedule: `engine.charges.calculate_transaction_charges` (0.05% Futures sell, 0.15% Options sell/exercise)
    - Zero ad-hoc local guesswork or legacy pre-2024 heuristics permitted anywhere in code, tests, docstrings, or AI conversational examples.
 
 32. **Timeframe-Agnostic & Adaptive Risk Invariant**:
@@ -229,8 +231,8 @@
      3. Verify secondary button actions (e.g. sync, reset, clear, purge) actually invoke valid backend methods without runtime exceptions, missing imports, or unhandled 500 errors.
      4. Never leave the user to discover broken buttons, missing card fields, or runtime import errors.
 
-36. **Temporal Anchoring & Knowledge Currency Standard (October 2026 Mandate)**:
-   - **System Clock SSOT**: Analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / system prompt anchor, e.g. `2026-10-17`).
+36. **Temporal Anchoring & Knowledge Currency Standard (25 November 2026 Mandate)**:
+   - **System Clock SSOT**: Analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / current session, e.g. `2026-11-25`).
    - **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
    - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
 
@@ -249,10 +251,10 @@
     - **Position Sizing as Capital Governor**: Never artificially squeeze the stop-loss distance to fit a trade into a retail account. Always scale position size (`shares` or `lots` via `engine.position_sizer.calculate_position_size`) downward to match the account's fixed risk mandate.
     - **Shift-Left Invariant Guard**: Enforced statically via `tests/test_anti_pattern_and_hardcoding_invariants.py`.
 
-39. **Microstructure Order Flow Toxicity (VPIN) & Informed Execution Guard**:
-    - Volume-Synchronized Probability of Toxicity (`analysis/order_flow.compute_vpin`) must govern all momentum breakout entries. Session volume is partitioned into equal volume buckets ($V_{\text{bucket}}$), signed via standard normal CDF on standardized price returns.
+39. **Causal Microstructure Order Flow Toxicity (VPIN) & 50-Depth OBI Guard**:
+    - Volume-Synchronized Probability of Toxicity (`analysis/order_flow.compute_vpin`) must run strictly **causally** (rolling window with `min_periods`, zero future-DF variance or volume look-ahead leakage).
     - When $\text{VPIN} \ge 0.70$ (`EXTREME_TOXICITY`), informed institutional flow is aggressively liquidating or initiating toxic flow; market chasing is strictly prohibited (demote to limit retest or veto).
-    - Setup execution tact MUST adapt based on toxicity: `LOW_TOXICITY` allows aggressive trend riding, while `HIGH_TOXICITY` enforces tight limit entry discount boundaries.
+    - 50-depth TBT order books (`market.order_book.BisectDepthBook.multi_layer_obi`) separate top `L1–5`, mid `L6–25`, and deep `L26–50` resting pressure with weighted microprice rather than treating L1 alone as institutional truth.
 
 40. **Adversarial Red-Teaming Trap Invalidation Gate (Zero Retail SFP & Barrier Collisions)**:
     - Every trade setup MUST survive the 4-point adversarial falsification audit in `engine/trap_invalidator.py`:
@@ -274,11 +276,9 @@
       4. *DXY / USDINR*: Strong dollar depresses metals (`TATASTEEL`, `JSWSTEEL`), while weak rupee boosts IT and Pharma exporters.
     - Long setups colliding into severe macro headwinds (score $\le -60$) must be suppressed or held for limit confirmation.
 
-43. **SEBI Mandatory Physical Delivery & 15:15 MOC Guardian Compliance Invariant**:
-    - Per SEBI regulations, all stock options (NFO single-stock derivatives) expiring In-The-Money (ITM) require mandatory physical delivery of shares. Cash settlement applies ONLY to Index options (`NIFTY`, `BANKNIFTY`, `FINNIFTY`, `SENSEX`).
-    - In expiry week ($T-4$ to $T-0$), physical delivery margin escalates from 20% to 100% of the entire stock lot value.
-    - The engine MUST audit all open stock derivative positions via `engine.eod_rebalancer.audit_open_positions_for_physical_delivery`. Any ITM stock option within 1 day of expiry must be closed or rolled over to the next month before 15:15 IST to prevent broker RMS penalty liquidation.
-    - Market-On-Close (MOC) Guardian at 15:15–15:30 IST verifies pending intraday MIS orders to ensure clean pre-cutoff execution.
+43. **SEBI Physical Delivery, Intraday FutEq MWPL & Effective-Dated MOC Compliance**:
+    - Stock options expiring ITM carry mandatory physical delivery and expiry-week margin escalation. Audit open positions via `engine.eod_rebalancer.audit_open_positions_for_physical_delivery` and tag intraday FutEq Delta-OI utilization (`>= 60%` / `>= 95%` via `market/fno_ban.py`).
+    - Market-On-Close (MOC) square-off cutoffs MUST use `market.rule_schedule.intraday_squareoff_cutoff()` (`15:15` pre-Dec 7 / expiring index / cash vs `15:30` post-Dec 7 non-expiring derivatives with `15:45` close), never static hardcoded cutoff strings.
 
 44. **Real-Time Options Volatility Surface & 25-Delta IV Skew Invariant**:
     - Real-time options analysis must evaluate the 25-Delta Risk Reversal Skew ($\text{IV}_{25\Delta \text{Put}} - \text{IV}_{25\Delta \text{Call}}$), 25-Delta Butterfly Smile Curvature, and Volatility Risk Premium ($\text{VRP} = \text{ATM IV} - \text{HV}_{20\text{d}}$).
@@ -290,8 +290,9 @@
     - All market feeds, caches, warehouse stores, and calculated metrics (VWAP, daily levels, ATR, OHLCV) MUST strictly enforce active-market session freshness.
     - Active Market Warehouse Freshness: In-market historical warehouse bars (`kite_interval != "day"`) must never lag by more than 1.5 bar intervals (`max(intv_sec * 1.5, 90.0s)`) before evicting and re-fetching live broker bars from Fyers.
     - Granular In-Memory Caching: High-frequency intraday bars in Tier 1 (`_df_memory_cache`) enforce strict sub-minute TTLs (15s for 1m, 30s for 3m, 45s for 5m, 90s for 15m).
-    - Session VWAP Dynamism: During active trading hours (09:15–15:30 IST), `VwapSessionCache` enforces a reactive TTL of $\le 60\text{s}$, with day-rollover purging. VWAP calculations must synthesize the latest price tick via `include_live_candle=True`.
+    - Session VWAP Dynamism: During active trading hours (`09:15` to canonical `market.rule_schedule` close — `15:30` cash/expiring index, `15:45` non-expiring derivatives from `2026-12-07`), `VwapSessionCache` enforces a reactive TTL of $\le 60\text{s}$, with day-rollover purging and `include_live_candle=True`.
     - Detector Temporal Gate: All intraday setup detectors (`index_put_setup`, `index_call_setup`, `gamma_blast`, etc.) must assert that the latest bar timestamp in `active_ohlcv` is within 15 minutes of the current live clock during market hours; any scan with lagging bars must fail closed immediately with `DATA_FEED_STALE`.
+    - Historical Chunk Fidelity: Multi-chunk OHLCV fetches (`market/history.py`, `brokers/fyers.py`) track partial chunk failures explicitly via `PARTIAL_DATA` provenance and never write partial history to EOD warehouse stores.
 
 46. **Spot-to-Option Delta Parity & Hedged Spread Mandate**:
     - Option stop loss and risk targets MUST be mathematically derived from the underlying Spot Structural Invalidation Stop Loss via option Delta ($\Delta$):
@@ -306,18 +307,14 @@
     - Once price has penetrated to the opposite side of VWAP, the mean-reversion setup is complete; entering there is chasing an extended move at the worst possible level (buying puts at the bottom or calls at the top).
     - Reversals must be caught early ($0.08\% \le \text{retreat} \le 0.35\%$ off the extreme). If price has already retreated $> 0.35\%$ (e.g. $> 80$ pts on Nifty), the entry is late and must be rejected to prevent immediate stop-loss whipsaw.
 
-48. **Verified Broker Data Realities & Zero Hallucinated Infrastructure Contract**:
-    - **Fyers Prime Tier Capabilities (`FYERS_PLAN=PRIME`)**:
-      - **Data Socket Capacity**: Up to **5,000 concurrent streaming symbols** (standard tier is capped at 100 symbols). This enables subscribing to the entire 180+ F&O stock universe, benchmark indices, and ATM options chain simultaneously.
-      - **Bulk Quotes API**: Up to **1,000 symbols per REST request** (standard tier is capped at 50) and 500,000 requests/day (10 req/s, 500 req/min).
-      - **Level-3 50-Depth TBT Socket**: Strictly supports up to **15 concurrent symbols** partitioned across 3 physical connections/workers (5 symbols per socket). Supported on **NSE CM & NFO only**; does NOT support BSE (SENSEX/BANKEX) or MCX.
-    - **Banned Broker Assumptions**:
-      - NEVER assume Fyers or Flattrade provides dedicated real-time Market Breadth, Sector Heatmap, or Pre-Calculated Sentiment APIs. Neither broker calculates these server-side.
-      - NEVER assume Fyers TBT 50-depth extends to the entire universe or covers BSE/MCX. Core trade decisions, stop-loss calculations, and alert filtering must operate robustly on standard streaming ticks and never hard-block if TBT is unavailable on non-NSE symbols.
-    - **Mandatory In-RAM Computation Invariant**:
-      - All market breadth (% above/below VWAP, advances/declines, AD ratio) and sector heatmaps MUST be computed strictly in-memory by `MarketMatrix` (`engine/market_matrix.py`), leveraged by Fyers Prime's 5,000-symbol streaming capacity.
-      - When Flattrade WebSocket is active, consume `ap` (session VWAP), `tbq` (total buy qty), `tsq` (total sell qty), `lp`, and `v` directly into `MarketMatrix.on_tick()`.
-    - **Zero-Tolerance for Theoretical Features**: Real capital is at risk. Always distinguish between what is physically active on your subscription vs theoretical marketing brochures. If a data point is not verified in live ticks or exchange masters, fall back to fail-closed deterministic quantitative models.
+48. **Verified Broker Data Realities, Split RateGate & Flattrade Failover Contract**:
+    - **Fyers Prime Tier (`FYERS_PLAN=PRIME`)**:
+      - **Split Rate Buckets**: Enforce separate `DATA` and `TRANSACTION` (`ORDER`) token buckets in `market/fyers_rate_gate.py` (`10 req/s`, `500 req/m`, `500k req/d` each) without letting data waits block head-waiter transactions.
+      - **Data Socket Capacity (5,000 symbols)**: Governed strictly by `config.discovery_policy` (`FNO_ONLY` default) — allocate capacity cleanly to active exposure, F&O options/futures, and read-only index constituent context (`engine/feature_bus.py`), rather than flooding all 5,000 slots with out-of-scope cash discovery.
+      - **Bulk Quotes API & Multiorder Margin**: Up to `1,000` symbols/request; `check_order_margin()` must pass `fyers_circuit_breaker` and `fyers_rate_gate` before querying `POST /api/v3/multiorder/margin`.
+      - **Level-3 50-Depth TBT Socket**: Strictly **15 symbols** across 3 sockets (5/socket), **NSE CM & NFO only** (BSE `SENSEX`/`BANKEX` and MCX use standard DataSocket 5-depth/ticks; never borrow NIFTY depth or synthesize BSE TBT).
+    - **Flattrade Secondary Failover**: When Fyers circuit breaker trips or returns empty chains/quotes, `market/options.py` / `market/history.py` decouple Fyers CB from Flattrade availability and route cleanly to `brokers/flattrade.py` (`subscribe_websocket()`, token map bridge, explicit `TPSeries` interval table, fail-closed `[]` on missing spot).
+    - **Banned Broker Assumptions & Mandatory In-RAM Computation**: Neither broker supplies server-side Market Breadth, Sector Heatmaps, or Sentiment APIs. All breadth metrics are computed in-memory by `MarketMatrix` (`engine/market_matrix.py`). Missing/unverified live ticks fail closed (`UNAVAILABLE`/`DEGRADED`).
 
 49. **Institutional Quantitative Metric Hierarchy & Anti-Oversimplification Protocol**:
     - **No Crude "rvol" Assumptions**: Never use unadjusted full-day cumulative volume (`vol / avg_20d`) for intraday session gates before 14:00 IST. At 09:30 AM, cumulative volume is naturally only ~15% of daily volume; using raw unadjusted RVOL guarantees catastrophic false negative rejections.
@@ -346,25 +343,25 @@
 
 ## 3. LLM Model Hierarchy & Multi-Key Resilience
 
-### Groq Cloud Active Models (Verified 17 Oct 2026)
+### Configured Active Defaults (`agent/core.py` — Verified 25 Nov 2026)
 
-| Priority | Model ID | Latency | Tool-Calling | Max Context / TPM | Best For |
-| :---: | :--- | :---: | :---: | :---: | :--- |
-| 1 | `qwen/qwen3.8-27b` | ~389 ms | ✅ Yes | 128k ctx / 30k TPM | **Fast-LLM**: Real-time tool calls (quotes, options, VPA), parallel debate rounds, deep synthesis |
-| 2 | `openai/gpt-oss-120b` | ~446 ms | ❌ No | 8k TPM (on-demand) | **Deep-LLM**: Pure-text reasoning (zero tools attached, <=1.5k tokens) |
-| 3 | `openai/gpt-oss-20b` | ~471 ms | ❌ No | High TPM | High-throughput fallback for text synthesis |
+| Priority | Model ID | Latency / Tooling | Best For |
+| :---: | :--- | :--- | :--- |
+| 1 | `qwen/qwen3.8-27b` | ~389 ms · ✅ Tool-calling | **Fast-LLM (Groq)**: Real-time tool calls, parallel debate rounds, synthesis |
+| 2 | `openai/gpt-oss-120b` | ~446 ms · ❌ No tools | **Deep-LLM (Groq)**: Pure-text reasoning (`<= 1.5k` tokens, zero tools attached) |
+| 3 | `openai/gpt-oss-20b` | ~471 ms · High TPM | High-throughput fallback for text synthesis |
 
 **Deprecated by Groq**: `qwen/qwen3.6-27b`, `groq/compound-mini`, and `llama-3.3-70b-versatile` have been removed from Groq Cloud (return 404). Do NOT reference them.
 
-### Other Supported LLM Providers
+### Other Supported LLM Providers (`agent/core.py`)
 
-| Provider | Env Var | Use Case |
+| Provider | Env Var | Configured Default(s) |
 | :--- | :--- | :--- |
-| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-3.8-flash`, `gemini-3.7-flash`) |
-| **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`qwen/qwen3.8-27b`) |
+| **Gemini** | `GEMINI_API_KEY` | `gemini-3.8-flash`, `gemini-3.8-flash-thinking`, `gemini-3.5-flash-lite` |
+| **NVIDIA NIM** | `NVIDIA_API_KEY` | `meta/llama-3.2-11b-vision-instruct` (or `qwen/qwen3.8-27b`) |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Multi-model gateway fallback |
-| **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-5-sonnet`) |
-| **OpenAI** | `OPENAI_API_KEY` | Deep reasoning (`gpt-4o`, `o3-mini`) |
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-4-7` |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o` |
 
 ### Dual-LLM Routing & Calibrated Token Budgets
 
@@ -385,12 +382,12 @@
 
 ### ⚡ Rapid Iteration Protocol (Zero Wait-Time Invariant)
 - **During Active Iteration & Debugging**:
-  - **DO NOT** run `scripts/validate_all.py` (which spins up 21 Vitest workers, Ruff, and full multi-worker Pytest smoke matrix, adding 1+ minute overhead per turn).
-  - **ONLY** run targeted pytest for the modified module/test:
-    `& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_specific.py -k "test_name" -q` (execution: 1–2s).
-  - Apply the targeted fix, run the specific test, restart the service with `scripts\service.ps1`, and respond immediately.
+  - **DO NOT** run `scripts/validate_all.py` on every minor edit (it spins up full Vitest + Ruff + multi-worker Pytest).
+  - Run targeted tests directly with the repo `.venv` / active Python 3.13 interpreter (on Windows PowerShell use `;` between commands and `npm.cmd` rather than `npm`):
+    `python -m pytest tests/test_verified_market_safety.py -q`
+  - Restart the background daemon via `scripts\service.ps1 -Action restart` after Python runtime edits.
 - **Pre-Push / Release Gate Only**:
-  - Reserve `validate_all.py --fast` or `--full` exclusively for when the user explicitly requests full pre-commit validation or when preparing a final release push.
+  - Reserve `validate_all.py --fast` / `--full` or full Vitest (`npm.cmd --prefix macos-app test -- --run`) for final verification.
 
 ```powershell
 # Services & Lifecycle (Detached background daemon — 0 agent tasks, no prompt lock)
@@ -398,14 +395,12 @@ powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action restart
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action status
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action stop
 
-# Targeted Test Execution (< 2s) — MANDATORY FOR RAPID ITERATION
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_auto_alerts.py -k "test_name" -q
+# Targeted Backend & Frontend Verification (Windows PowerShell)
+python -m pytest tests/test_verified_market_safety.py tests/test_rule_schedule_clock_sweep.py -q
+npm.cmd --prefix macos-app test -- --run
 
-# Fast Pre-Commit Gate (~60s) — USE ONLY ON EXPLICIT USER REQUEST OR FINAL PRE-PUSH
+# Fast Pre-Commit Gate — USE ONLY ON EXPLICIT USER REQUEST OR FINAL PRE-PUSH
 python scripts/validate_all.py --fast
-
-# Full CI/CD Pre-Push Gate (~90s)
-python scripts/validate_all.py --full
 ```
 
 ---

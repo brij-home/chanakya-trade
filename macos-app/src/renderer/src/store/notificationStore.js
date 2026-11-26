@@ -1,5 +1,7 @@
 ﻿import { create } from 'zustand'
 import { isTestOrSimAlert, isAlertActive, INDEX_LOT_SIZES } from '../components/Views/alerts/alertHelpers'
+import { getBaseUrl, useChatStore } from './chatStore'
+import { createVisibilityInterval } from '../utils/visibilityPoll'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
@@ -208,9 +210,7 @@ export function normalizeNotification(rawPayload) {
       if (rawLoss != null) {
         slNum = (rawLoss > 1000 && effLot > 1) ? Math.round((rawLoss / effLot) * 100) / 100 : rawLoss
       }
-      t1Num = Math.round(entryNum * 0.5 * 100) / 100
-      t2Num = Math.round(entryNum * 0.2 * 100) / 100
-      t3Num = 0
+      // Never synthesize client-side fallback targets (e.g. entry * 0.5); preserve backend/parsed levels only
     }
   } else {
     if (!entryNum) {
@@ -515,7 +515,7 @@ export const useNotificationStore = create((set, get) => ({
           const controller = new AbortController()
           const timer = setTimeout(() => controller.abort(), 8000)
           try {
-            const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
+            const directRes = await fetch(`${getBaseUrl(useChatStore.getState().port)}/skills/alerts/auto/list`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ view_mode: 'ALL', limit: 300 }),
@@ -552,7 +552,7 @@ export const useNotificationStore = create((set, get) => ({
     if (_pollTimer !== null) return // already running
     // Immediate first fetch (silent)
     useNotificationStore.getState().fetchAlerts(_callFn || call, false)
-    _pollTimer = setInterval(() => {
+    _pollTimer = createVisibilityInterval(() => {
       useNotificationStore.getState().fetchAlerts(_callFn, false)
     }, 30_000)
   },
@@ -562,7 +562,7 @@ export const useNotificationStore = create((set, get) => ({
    */
   stopPolling: () => {
     if (_pollTimer !== null) {
-      clearInterval(_pollTimer)
+      _pollTimer()
       _pollTimer = null
     }
   },

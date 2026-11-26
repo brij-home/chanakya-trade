@@ -16,7 +16,6 @@ logger = logging.getLogger("brokers.groww")
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -36,7 +35,9 @@ from .base import (
     UserProfile,
 )
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "groww.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("groww.json")
 BASE_URL = "https://api.groww.in/v1"
 AUTH_URL = "https://groww.in/auth/oauth"
 
@@ -81,8 +82,22 @@ class GrowwAPI(BrokerAPI):
 
     # ── HTTP helpers ──────────────────────────────────────────
 
+    def _get_client(self) -> httpx.Client:
+        client = getattr(self, "_http_client", None)
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=20,
+                    keepalive_expiry=60.0,
+                ),
+            )
+            self._http_client = client
+        return client
+
     def _get(self, path: str, params: dict | None = None) -> dict:
-        r = httpx.get(
+        r = self._get_client().get(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             params=params,
@@ -92,7 +107,7 @@ class GrowwAPI(BrokerAPI):
         return r.json()
 
     def _post(self, path: str, body: dict) -> dict:
-        r = httpx.post(
+        r = self._get_client().post(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             json=body,
@@ -102,7 +117,7 @@ class GrowwAPI(BrokerAPI):
         return r.json()
 
     def _delete(self, path: str) -> dict:
-        r = httpx.delete(
+        r = self._get_client().delete(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=10,
@@ -122,7 +137,7 @@ class GrowwAPI(BrokerAPI):
         return f"{AUTH_URL}/authorize?{urlencode(params)}"
 
     def complete_login(self, auth_code: str, **_) -> UserProfile:
-        r = httpx.post(
+        r = self._get_client().post(
             f"{AUTH_URL}/token",
             data={
                 "grant_type": "authorization_code",
@@ -168,7 +183,7 @@ class GrowwAPI(BrokerAPI):
 
     def logout(self) -> None:
         try:
-            httpx.post(
+            self._get_client().post(
                 f"{AUTH_URL}/revoke",
                 data={
                     "token": self._token.get("access_token", ""),

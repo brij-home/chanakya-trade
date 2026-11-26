@@ -198,13 +198,18 @@ async def get_market_regime():
             gov = await asyncio.to_thread(classify_market_regime)
             gov_dict = {
                 "regime": gov.regime,
-                "name": gov.name,
-                "breakout_weight": gov.breakout_weight,
-                "mean_reversion_weight": gov.mean_reversion_weight,
-                "position_size_multiplier": gov.position_size_multiplier,
+                "vix": gov.vix,
+                "is_orb_trapped": gov.is_orb_trapped,
+                "is_expiry_session": gov.is_expiry_session,
                 "min_scrutiny_score": gov.min_scrutiny_score,
+                "dominant_bias": gov.dominant_bias,
+                "guidance": gov.guidance,
+                "summary": gov.guidance,
                 "active_detectors": gov.active_detectors,
-                "summary": gov.summary,
+                "suppressed_detectors": gov.suppressed_detectors,
+                "classified_at": gov.classified_at,
+                "data_status": gov.data_status,
+                "unavailable_reasons": gov.unavailable_reasons,
             }
         except Exception as e_suppressed:
             logger.debug(
@@ -1172,9 +1177,17 @@ async def post_options_optimize_spreads_endpoint(req: dict[str, Any]):
     lot_size = int(req.get("lot_size", 0) or 0)
     if lot_size <= 0:
         try:
-            lot_size = get_lot_size(underlying) or 25
-        except Exception:
-            lot_size = 25
+            lot_size = int(get_lot_size(underlying) or 0)
+        except Exception as e_lot:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Canonical lot_size unavailable for '{underlying}': {e_lot}",
+            ) from e_lot
+    if lot_size <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Canonical lot_size unavailable for '{underlying}'. Supply explicit lot_size or sync master.",
+        )
 
     regime = str(req.get("regime", "NEUTRAL")).upper()
     dte_days = int(req.get("dte_days", 5) or 5)

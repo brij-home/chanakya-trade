@@ -217,9 +217,27 @@ def test_gamma_unpin_registered_in_detector_registry():
     assert "FNO_INDEX" in det.supported_segments
 
 
-def test_auto_alert_engine_scan_0dte_gamma_unpin(synthetic_nifty_chain):
+def test_auto_alert_engine_scan_0dte_gamma_unpin(synthetic_nifty_chain, monkeypatch):
     """Verify AutoAlertEngine.scan_0dte_gamma_unpin runs and records unpin alerts."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
     from engine.auto_alert_engine import AutoAlertEngine
+
+    # Pin test to NIFTY Tuesday weekly expiry afternoon so day-of-week never makes it flaky
+    ist = ZoneInfo("Asia/Kolkata")
+    tue_1415 = datetime(2026, 11, 24, 14, 15, 0, tzinfo=ist)
+    monkeypatch.setattr(
+        "market.calendar.is_expiry_day",
+        lambda sym, ref_date=None, exchange=None: sym == "NIFTY",
+    )
+    monkeypatch.setattr(
+        "market.fyers_tbt_manager.FyersTbtManager",
+        type("_TbtOff", (), {"is_connected": False}),
+    )
+    monkeypatch.setattr(
+        "engine.detectors.gamma_unpin_squeezer.datetime",
+        type("_Dt", (), {"now": staticmethod(lambda tz=None: tue_1415)}),
+    )
 
     engine = AutoAlertEngine()
     quotes_map = {

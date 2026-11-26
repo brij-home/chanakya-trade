@@ -28,7 +28,6 @@ logger = logging.getLogger("brokers.angelone")
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from brokers.base import (
@@ -46,7 +45,9 @@ from brokers.base import (
 )
 
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "angelone.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("angelone.json")
 
 # Exchange constants
 NSE = "NSE"

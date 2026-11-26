@@ -31,7 +31,6 @@ logger = logging.getLogger("brokers.upstox")
 import json
 import time
 from datetime import datetime, date
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -50,7 +49,9 @@ from brokers.base import (
     Order,
 )
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "upstox.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("upstox.json")
 
 UPSTOX_BASE = "https://api.upstox.com/v2"
 AUTH_BASE = "https://api.upstox.com"
@@ -109,15 +110,29 @@ class UpstoxAPI(BrokerAPI):
             "Accept": "application/json",
         }
 
+    def _get_client(self) -> httpx.Client:
+        client = getattr(self, "_http_client", None)
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=20,
+                    keepalive_expiry=60.0,
+                ),
+            )
+            self._http_client = client
+        return client
+
     def _get(self, path: str, **params) -> dict:
         url = f"{UPSTOX_BASE}{path}"
-        resp = httpx.get(url, headers=self._headers(), params=params, timeout=15)
+        resp = self._get_client().get(url, headers=self._headers(), params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
     def _post(self, path: str, data: dict) -> dict:
         url = f"{UPSTOX_BASE}{path}"
-        resp = httpx.post(
+        resp = self._get_client().post(
             url,
             headers={**self._headers(), "Content-Type": "application/json"},
             json=data,
@@ -138,7 +153,7 @@ class UpstoxAPI(BrokerAPI):
 
     def complete_login(self, auth_code: str = "", **kwargs) -> UserProfile:
         """Exchange the auth code received after browser login for an access token."""
-        resp = httpx.post(
+        resp = self._get_client().post(
             f"{AUTH_BASE}/login/authorization/token",
             data={
                 "code": auth_code,
@@ -420,7 +435,7 @@ class UpstoxAPI(BrokerAPI):
 
     def _delete(self, path: str, **params) -> dict:
         url = f"{UPSTOX_BASE}{path}"
-        resp = httpx.delete(url, headers=self._headers(), params=params, timeout=15)
+        resp = self._get_client().delete(url, headers=self._headers(), params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
@@ -455,7 +470,7 @@ class UpstoxAPI(BrokerAPI):
 
         try:
             url = f"{UPSTOX_BASE}/historical-candle/{instrument_key}/{upstox_interval}/{to_str}/{from_str}"
-            resp = httpx.get(url, headers=self._headers(), timeout=15)
+            resp = self._get_client().get(url, headers=self._headers(), timeout=15)
             resp.raise_for_status()
             data = resp.json()
 

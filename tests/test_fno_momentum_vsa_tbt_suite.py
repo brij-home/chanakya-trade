@@ -386,3 +386,194 @@ class TestOptionsMomentumDecouplingAndMidday:
         # In afternoon post 14:45, naked options are capped or mandated as defined-risk spreads
         assert alerts[0].preferred_vehicle == "SPREAD_ONLY"
         assert alerts[0].metrics.get("mandate_spread_afternoon") is True
+
+
+def test_options_momentum_uses_single_session_vwap_not_2day_cumulative():
+    """Verify 2-day OHLCV bars never pull yesterday's prices into today's session VWAP check."""
+    from datetime import datetime
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import pandas as pd
+    from config.constants import IST
+    from engine.detectors.options_momentum import detect_options_momentum_breakouts
+
+    now_dt = datetime(2026, 11, 25, 10, 5, 0, tzinfo=IST)
+    # Yesterday bars at 900 (lower), today bars at 1050 (higher); spot is 1020 -> BELOW today's VWAP 1050!
+    idx = pd.to_datetime(
+        [
+            "2026-11-24 15:10:00",
+            "2026-11-24 15:15:00",
+            "2026-11-24 15:20:00",
+            "2026-11-24 15:25:00",
+            "2026-11-25 09:50:00",
+            "2026-11-25 09:55:00",
+            "2026-11-25 10:00:00",
+        ]
+    )
+    closes = [900.0, 900.0, 900.0, 900.0, 1050.0, 1050.0, 1050.0]
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1.0 for c in closes],
+            "low": [c - 1.0 for c in closes],
+            "close": closes,
+            "volume": [100000, 100000, 100000, 100000, 10000, 10000, 10000],
+        },
+        index=idx,
+    )
+    q_obj = SimpleNamespace(
+        last_price=1020.0, change_pct=1.0, open=1010.0, high=1025.0, low=1008.0, vwap=0.0
+    )
+    ce_opt = SimpleNamespace(
+        symbol="NSE:SHRIRAMFIN26DEC1020CE",
+        option_type="CE",
+        strike=1020.0,
+        last_price=35.0,
+        volume=5000,
+        oi=2000,
+        oi_change=100,
+        pchange=12.0,
+        expiry="2026-12-31",
+        bid=34.8,
+        ask=35.2,
+        lot_size=300,
+    )
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:SHRIRAMFIN": q_obj}),
+        patch("market.options.get_options_chain", return_value=[ce_opt]),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch("engine.position_sizer.get_lot_size", return_value=300),
+        patch("engine.market_matrix.get_market_matrix") as mock_mm,
+        patch(
+            "analysis.sector_rotation.get_directional_sector_constituents",
+            return_value={"BULLISH": {"SHRIRAMFIN"}, "BEARISH": set()},
+        ),
+    ):
+        mock_mm.return_value.get_candles_df.return_value = None
+        alerts = detect_options_momentum_breakouts(
+            targets=["SHRIRAMFIN"], watched_indices=[], now_dt=now_dt
+        )
+    assert alerts == []
+
+
+def test_neutral_condor_preserves_breakevens_and_apex_sector_overflow():
+    """Verify DEFINED_RISK_NEUTRAL preserves lower_be/upper_be and preserves initial TG reason on milestones."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from engine.alert_model import AutoAlert
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    a = AutoAlert(
+        alert_id="aa-defined-risk-neutral-banknifty-condor-20261125",
+        alert_type="DEFINED_RISK_NEUTRAL",
+        stage="ACTIONABLE",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="NEUTRAL",
+        derivative_type="SPREAD",
+        headline="CONDOR",
+        summary="Neutral",
+        ltp=63964.0,
+        trigger_level=63964.0,
+        target_level=64400.0,
+        stop_loss=63500.0,
+    )
+    assert a.stop_loss == 63500.0
+    assert a.target_level == 64400.0
+    assert a.no_chase_boundary == 64400.0
+
+    # Verify already-invalidated alert does not append repeated Data integrity notices on reconstruction
+    inv = AutoAlert.from_dict(
+        {
+            "alert_id": "aa-opening-drive-ignition-ireda-bear-20261125",
+            "alert_type": "OPENING_DRIVE_IGNITION",
+            "stage": "INVALIDATED",
+            "is_invalidated": True,
+            "symbol": "IREDA",
+            "exchange": "NSE",
+            "direction": "BEARISH",
+            "headline": "IREDA",
+            "summary": "Invalidated",
+            "ltp": 0.91,
+            "trigger_level": 15.0,
+            "stop_loss": 13.48,
+            "target_level": 18.6,
+            "underlying_spot": 128.72,
+            "contract_symbol": "NSE:IREDA26DEC125PE",
+            "audit_trail": [],
+        }
+    )
+    assert not any(t.get("event") == "DATA_SANITY_WARNING" for t in inv.audit_trail)
+
+    # Verify Apex +1 sector overflow allows conf>=94 & scrutiny>=82 through 3/3 sector bucket
+    eng = AutoAlertEngine.__new__(AutoAlertEngine)
+    eng._lock = __import__("threading").RLock()
+    eng._alerts = []
+    eng._watched_indices = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
+    eng._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": [], "FNO_STOCK": [], "EQUITY": []}
+    eng._hourly_index_directional = []
+    eng._hourly_fno_stock_directional = []
+    eng._dispatch_cooldowns = {}
+    eng._dispatched_milestones = set()
+    now_ts = __import__("time").time()
+    eng._sector_hourly_telegram = {"fno:fmcg": [now_ts - 60, now_ts - 30, now_ts - 10]}
+    eng._sector_daily_telegram = {}
+    eng._daily_index_telegram = {}
+    eng._index_half_telegram = {}
+
+    dmart = AutoAlert(
+        alert_id="aa-options-momentum-dmart-ce-3500-20261125",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="DMART",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="DMART",
+        summary="DMART",
+        ltp=103.0,
+        trigger_level=103.0,
+        target_level=135.9,
+        stop_loss=84.0,
+        contract_symbol="NSE:DMART26DEC3500CE",
+        strike=3500.0,
+        option_type="CE",
+        confidence=96,
+        metrics={"sector_id": "fmcg", "conviction_tier": "APEX_CONFLUENCE"},
+        environment="LIVE",
+        is_live=True,
+    )
+    dmart.scrutiny = SimpleNamespace(score=83, tier="APEX_CONFLUENCE")
+    with patch("engine.alert_preferences.alert_preferences") as mock_prefs:
+        mock_prefs.telegram.min_confidence = 80
+        ok, _ = eng._eval_telegram_apex_gate(dmart, in_market=True, now_ts=now_ts)
+        assert ok is True
+
+
+def test_early_structural_whitelist_and_counter_trend_pe_alignment():
+    """Verify 82% SMC_ORDERBLOCK_RETEST EARLY_WARNING passes Telegram preferences when allowed."""
+    from engine.alert_model import AutoAlert
+    from engine.alert_preferences import AlertPreferencesManager
+
+    mgr = AlertPreferencesManager()
+    smc_ew = AutoAlert(
+        alert_id="aa-smc-orderblock-retest-reliance-20261125",
+        alert_type="SMC_ORDERBLOCK_RETEST",
+        stage="EARLY_WARNING",
+        symbol="RELIANCE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="SMC OB Retest",
+        summary="Coiling at unmitigated demand OB",
+        ltp=45.0,
+        trigger_level=46.0,
+        stop_loss=38.0,
+        target_level=62.0,
+        contract_symbol="NSE:RELIANCE26DEC1300CE",
+        strike=1300.0,
+        option_type="CE",
+        confidence=82,
+        environment="LIVE",
+        is_live=True,
+    )
+    ok_tg, reason_tg = mgr.explain_alert_allowed(smc_ew, channel="telegram")
+    assert ok_tg is True, reason_tg

@@ -287,6 +287,29 @@ class DetectionContext:
             segment=self.segment,
         )
 
+    @property
+    def shared_features(self) -> dict[str, Any]:
+        """Single-pass cached technical & STALK/PRIMED/IGNITED features from FeatureBus."""
+        try:
+            from engine.feature_bus import compute_shared_features
+
+            df = self.candles_5m if self.candles_5m is not None else self.candles_15m
+            return compute_shared_features(self.canonical_symbol, df)
+        except Exception as exc:
+            logger.debug("[DetectionContext] shared_features unavailable: %s", exc)
+            return {"symbol": self.canonical_symbol, "status": "UNAVAILABLE"}
+
+    @property
+    def constituent_lead_lag(self) -> dict[str, Any]:
+        """Read-only index constituent weighted impulse & VWAP alignment (NIFTY/BANKNIFTY)."""
+        try:
+            from engine.feature_bus import compute_constituent_lead_lag
+
+            return compute_constituent_lead_lag(self.canonical_symbol)
+        except Exception as exc:
+            logger.debug("[DetectionContext] constituent_lead_lag unavailable: %s", exc)
+            return {"index": self.canonical_symbol, "status": "UNAVAILABLE", "lead_bias": "NEUTRAL"}
+
 
 @runtime_checkable
 class BaseDetector(Protocol):

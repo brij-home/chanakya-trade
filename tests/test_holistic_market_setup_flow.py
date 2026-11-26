@@ -297,13 +297,13 @@ def test_afternoon_session_time_gate_alignment():
     spark_src = inspect.getsource(detect_intraday_mover_sparks)
     trend_src = inspect.getsource(detect_trend_day_pullback)
 
-    # Intraday spark must not shut off at 14:00; must run until 15:15
+    # Intraday spark must not shut off at 14:00; must run until canonical rule_schedule cutoff
     assert "dtime(14, 0)" not in spark_src
-    assert "dtime(15, 15)" in spark_src
+    assert ("intraday_entry_cutoff" in spark_src) or ("dtime(15, 15)" in spark_src)
 
-    # Trend day continuation must not shut off at 14:30; must run until 15:15
+    # Trend day continuation must not shut off at 14:30; must run until canonical rule_schedule cutoff
     assert "dtime(14, 30)" not in trend_src
-    assert "dtime(15, 15)" in trend_src
+    assert ("intraday_entry_cutoff" in trend_src) or ("dtime(15, 15)" in trend_src)
 
 
 def test_options_momentum_stock_volume_normalization():

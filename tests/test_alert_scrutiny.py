@@ -11,9 +11,11 @@ Verifies:
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 
+from config.constants import IST
 from engine.alert_scrutiny import AlertScrutinyAuditor, ScrutinyResult
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
@@ -336,6 +338,7 @@ def test_tier1_bearish_with_option_recommendation(auditor: AlertScrutinyAuditor)
         strike=13500.0,
         option_type="PE",
         option_premium=450.0,
+        created_at=f"{datetime.now(IST).strftime('%Y-%m-%d')} 11:30:00 IST",
         is_live=True,
         environment="LIVE",
     )
@@ -1097,6 +1100,7 @@ def test_tier1_exhaustion_radar_round_magnet_veto(auditor: AlertScrutinyAuditor)
             "rvol": 1.2,  # Normal RVOL (< 2.0x, so no punch-through exception)
             "vwap": 24450.0,
         },
+        created_at=f"{datetime.now(IST).strftime('%Y-%m-%d')} 11:30:00 IST",
         is_live=True,
         environment="LIVE",
     )

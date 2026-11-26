@@ -949,15 +949,19 @@ def test_compute_options_iv_skew_honest_state():
     from market.options import compute_options_iv_skew, OptionsContract
     from engine.options_backtest import bs_premium
 
+    from datetime import datetime, timedelta
+    from config.constants import IST
+
     spot = 61600.0
+    exp_7d = (datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d")
     # Chain with valid LTPs but zero broker IV
     c_ltp = bs_premium(spot, 61600.0, 7, 0.18, "CE")  # 18% Call IV
     p_ltp = bs_premium(spot, 61600.0, 7, 0.15, "PE")  # 15% Put IV
     chain_with_prices = [
         OptionsContract(
-            symbol="NSE:BANKNIFTY26NOV61600CE",
+            symbol="NSE:BANKNIFTY26DEC61600CE",
             underlying="BANKNIFTY",
-            expiry="2026-11-23",
+            expiry=exp_7d,
             strike=61600.0,
             option_type="CE",
             last_price=c_ltp,
@@ -967,9 +971,9 @@ def test_compute_options_iv_skew_honest_state():
             volume=50000,
         ),
         OptionsContract(
-            symbol="NSE:BANKNIFTY26NOV61600PE",
+            symbol="NSE:BANKNIFTY26DEC61600PE",
             underlying="BANKNIFTY",
-            expiry="2026-11-23",
+            expiry=exp_7d,
             strike=61600.0,
             option_type="PE",
             last_price=p_ltp,

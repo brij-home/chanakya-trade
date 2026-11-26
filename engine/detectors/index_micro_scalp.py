@@ -75,16 +75,27 @@ def detect_index_micro_scalp(
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
     if not is_test_runner and not ignore_time_gate:
-        if curr_time < dtime(9, 16) or curr_time > dtime(15, 15):
+        from market.rule_schedule import intraday_entry_cutoff
+
+        _ims_cutoff = intraday_entry_cutoff(now_dt.date(), is_derivative=True)
+        if curr_time < dtime(9, 16) or curr_time > _ims_cutoff:
             return []
-        # Midday Chop Gate (11:15 - 13:15 IST):
-        # 1-minute and 3-minute option breakouts during midday consolidation suffer high failure rates and theta bleed.
+        # Midday Range Chop vs Trend Expansion Gate (11:15 - 13:15 IST):
+        # 1-minute and 3-minute option breakouts during midday consolidation suffer high failure rates
+        # when trapped inside the morning range.
+        # EXEMPTION: Trend day expansions slicing Day Low (PE) or Day High (CE) with institutional thrust
+        # are active directional runners and must NOT be blocked.
         if dtime(11, 15) <= curr_time <= dtime(13, 15):
-            logger.debug(
-                f"[IndexMicroScalp] Midday chop window active (11:15-13:15 IST) for {clean_sym}. "
-                f"1m micro-scalps prohibited to avoid theta bleed."
+            is_trend_expansion = bool(
+                (day_low and day_low > 0 and spot <= day_low * 1.0010)
+                or (day_high and day_high > 0 and spot >= day_high * 0.9990)
             )
-            return []
+            if not is_trend_expansion:
+                logger.debug(
+                    f"[IndexMicroScalp] Midday chop window active (11:15-13:15 IST) for {clean_sym}. "
+                    f"1m micro-scalps within range prohibited to avoid theta bleed."
+                )
+                return []
 
         # Wide CPR Range-Chop Guard:
         # If daily CPR is wide (width >= 0.35%) and spot is trapped between Camarilla L3 and H3,
@@ -401,7 +412,16 @@ def detect_index_micro_scalp(
                 actionable_plan=actionable_blueprint.to_dict(),
                 metrics={
                     "strategy": "INDEX_MICRO_SCALP",
-                    "signals": ["OPTION_1MIN_BREAKOUT", f"SPOT_{direction}_MOMENTUM"],
+                    "signals": [
+                        "OPTION_1MIN_BREAKOUT",
+                        f"SPOT_{direction}_MOMENTUM",
+                        *(["VWAP_ALIGNMENT"] if effective_vwap > 0 else []),
+                        *(["DAY_LOW_BREAKDOWN"] if c_opt == "PE" and day_low > 0 else []),
+                        *(["DAY_HIGH_BREAKOUT"] if c_opt == "CE" and day_high > 0 else []),
+                        *(["VOL_OI_SURGE"] if c_vol_oi >= 1.2 else []),
+                    ],
+                    "spot": spot,
+                    "vwap": effective_vwap,
                     "contract": c_sym,
                     "strike": c_strk,
                     "option_type": c_opt,
@@ -494,7 +514,10 @@ def detect_fno_micro_scalp(
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
     if not is_test_runner and not ignore_time_gate:
-        if curr_time < dtime(9, 16) or curr_time > dtime(15, 15):
+        from market.rule_schedule import intraday_entry_cutoff
+
+        _ims_cutoff = intraday_entry_cutoff(now_dt.date(), is_derivative=True)
+        if curr_time < dtime(9, 16) or curr_time > _ims_cutoff:
             return []
         # Midday Chop Gate (11:15 - 13:15 IST)
         if dtime(11, 15) <= curr_time <= dtime(13, 15):

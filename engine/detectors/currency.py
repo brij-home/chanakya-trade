@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
+from config.constants import IST
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.currency")
-IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_CURRENCIES = ["USDINR", "EURINR", "GBPINR", "JPYINR"]
 

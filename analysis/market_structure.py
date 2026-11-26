@@ -1395,3 +1395,283 @@ def compute_mtf_alignment(
         "tf_15m_trend": tf_15m_trend,
         "htf_trend": htf_trend,
     }
+
+
+@dataclass
+class StructuralLocationConfluence:
+    """Structured multi-factor location & opposing-wall readout at current price."""
+
+    is_valid_location: bool
+    has_strong_location: bool
+    at_order_block: bool
+    in_fib_ote: bool
+    in_fvg: bool
+    at_liquidity_sweep: bool
+    has_opposing_wall: bool
+    opposing_wall_reason: Optional[str]
+    fib_retracement_pct: Optional[float]
+    nearest_ob_zone: Optional[tuple[float, float]]
+    location_tags: list[str]
+    location_score: int
+
+
+def evaluate_structural_location(
+    df: Optional[pd.DataFrame],
+    *,
+    spot: float,
+    direction: str = "BULLISH",
+    vwap: float = 0.0,
+    pdh: float = 0.0,
+    pdl: float = 0.0,
+    gex_data: Optional[dict[str, Any]] = None,
+    htf_df: Optional[pd.DataFrame] = None,
+    vp_data: Optional[Any] = None,
+    vol_oi_ratio: float = 0.0,
+    iv_val: Optional[float] = None,
+    rvol_val: float = 1.0,
+) -> StructuralLocationConfluence:
+    """
+    Evaluates whether spot/recent pullback is anchored at high-confluence structural
+    locations (unmitigated OB, Fib 0.50-0.786 OTE, FVG, Liquidity Sweep, HTF Value Area,
+    GEX Put/Call Walls & Gamma Flip, VWAP/PDH/PDL) while flagging immediate opposing
+    Supply/Demand OB or positive-gamma pin wall overhead/floor traps.
+    """
+    empty = StructuralLocationConfluence(
+        is_valid_location=False,
+        has_strong_location=False,
+        at_order_block=False,
+        in_fib_ote=False,
+        in_fvg=False,
+        at_liquidity_sweep=False,
+        has_opposing_wall=False,
+        opposing_wall_reason=None,
+        fib_retracement_pct=None,
+        nearest_ob_zone=None,
+        location_tags=[],
+        location_score=0,
+    )
+    if df is None or len(df) < 6 or spot <= 0:
+        return empty
+
+    norm_df = df.copy()
+    norm_df.columns = [str(c).lower() for c in norm_df.columns]
+    if not all(col in norm_df.columns for col in ("open", "high", "low", "close")):
+        return empty
+
+    is_bull = str(direction or "BULLISH").upper() in ("BULLISH", "LONG", "BUY")
+    tags: list[str] = []
+    score = 0
+
+    recent_low = float(norm_df["low"].iloc[-min(2, len(norm_df)) :].min())
+    recent_high = float(norm_df["high"].iloc[-min(2, len(norm_df)) :].max())
+    probe_px = recent_low if is_bull else recent_high
+
+    # 1. Fib Optimal Trade Entry (0.50 - 0.786 retracement of active impulse leg)
+    in_fib_ote = False
+    fib_retr_pct: Optional[float] = None
+    look_n = min(40, len(norm_df))
+    leg_df = norm_df.iloc[-look_n:]
+    leg_low = float(leg_df["low"].min())
+    leg_high = float(leg_df["high"].max())
+    leg_rng = leg_high - leg_low
+    if leg_rng > spot * 0.0025:
+        if is_bull:
+            retr = (leg_high - probe_px) / leg_rng
+        else:
+            retr = (probe_px - leg_low) / leg_rng
+        if 0.0 <= retr <= 1.0:
+            fib_retr_pct = round(retr * 100.0, 1)
+        if 0.60 <= retr <= 0.79:
+            in_fib_ote = True
+            tags.append(f"FIB_OTE_{fib_retr_pct:.0f}%")
+            score += 12
+        elif 0.48 <= retr < 0.60:
+            in_fib_ote = True
+            tags.append(f"FIB_50_RETRACE_{fib_retr_pct:.0f}%")
+            score += 8
+
+    # 2. SMC Swings, Unmitigated Order Blocks, FVG & Liquidity Sweeps
+    at_ob = False
+    in_fvg = False
+    at_sweep = False
+    has_opp_wall = False
+    opp_reason: Optional[str] = None
+    nearest_ob: Optional[tuple[float, float]] = None
+
+    try:
+        swing_win = 2 if len(norm_df) <= 60 else 3
+        swings = find_swing_points(norm_df, window=swing_win)
+        demand_obs, supply_obs = detect_order_blocks(norm_df, swings)
+        active_dem = [ob for ob in demand_obs if not getattr(ob, "mitigated", False)]
+        active_sup = [ob for ob in supply_obs if not getattr(ob, "mitigated", False)]
+
+        aligned_obs = active_dem if is_bull else active_sup
+        opposing_obs = active_sup if is_bull else active_dem
+
+        for ob in reversed(aligned_obs[-5:]):
+            lo = float(ob.bottom)
+            hi = float(ob.top)
+            if lo * 0.9965 <= probe_px <= hi * 1.0035 or lo * 0.9965 <= spot <= hi * 1.0035:
+                at_ob = True
+                nearest_ob = (round(lo, 2), round(hi, 2))
+                tags.append("DEMAND_OB" if is_bull else "SUPPLY_OB")
+                score += 12
+                break
+
+        for ob in reversed(opposing_obs[-5:]):
+            lo = float(ob.bottom)
+            hi = float(ob.top)
+            if is_bull and 0 < (lo - spot) <= (spot * 0.0035):
+                has_opp_wall = True
+                opp_reason = f"Unmitigated Supply OB overhead ₹{lo:,.1f}-₹{hi:,.1f} (<0.35% away)"
+                break
+            if (not is_bull) and 0 < (spot - hi) <= (spot * 0.0035):
+                has_opp_wall = True
+                opp_reason = f"Unmitigated Demand OB floor ₹{lo:,.1f}-₹{hi:,.1f} (<0.35% away)"
+                break
+
+        fvgs = [f for f in detect_fair_value_gaps(norm_df) if not getattr(f, "filled", False)]
+        want_fvg = "BULLISH" if is_bull else "BEARISH"
+        for fvg in reversed(fvgs[-5:]):
+            if getattr(fvg, "type", "") == want_fvg:
+                if float(fvg.bottom) * 0.997 <= probe_px <= float(fvg.top) * 1.003:
+                    in_fvg = True
+                    tags.append("BULL_FVG_FILL" if is_bull else "BEAR_FVG_FILL")
+                    score += 8
+                    break
+
+        sweeps = detect_liquidity_sweeps(norm_df, swings)
+        want_sw = "BULLISH_SWEEP" if is_bull else "BEARISH_SWEEP"
+        for sw in reversed(sweeps[-3:]):
+            if want_sw in str(getattr(sw, "type", "")):
+                at_sweep = True
+                tags.append("LIQ_SWEEP_LOW" if is_bull else "LIQ_SWEEP_HIGH")
+                score += 10
+                break
+    except Exception as e_smc:
+        logger.debug(f"[analysis.market_structure] Structural location check skipped: {e_smc}")
+
+    # 3. Structural Reference Anchors (VWAP / PDH / PDL — check pullback wick or spot proximity)
+    if vwap > 0 and (abs(probe_px - vwap) / vwap <= 0.0035 or abs(spot - vwap) / vwap <= 0.0035):
+        tags.append("VWAP_RETEST")
+        score += 5
+    if pdh > 0 and (abs(probe_px - pdh) / pdh <= 0.004 or abs(spot - pdh) / pdh <= 0.004):
+        tags.append("PDH_RETEST" if is_bull else "PDH_SUPPLY")
+        score += 6
+    if pdl > 0 and (abs(probe_px - pdl) / pdl <= 0.004 or abs(spot - pdl) / pdl <= 0.004):
+        tags.append("PDL_DEMAND" if is_bull else "PDL_RETEST")
+        score += 6
+
+    # 4. GEX / Dealer Gamma Flip & Call/Put OI Wall Magnets
+    if isinstance(gex_data, dict) and gex_data:
+        cw = float(gex_data.get("call_wall") or gex_data.get("gex_call_wall") or 0.0)
+        pw = float(gex_data.get("put_wall") or gex_data.get("gex_put_wall") or 0.0)
+        flip = float(gex_data.get("gex_flip_strike") or gex_data.get("zero_gamma_level") or 0.0)
+        gex_reg = str(gex_data.get("gamma_regime") or "").upper()
+        is_unpin_squeeze = bool(
+            float(vol_oi_ratio or 0.0) >= 2.5
+            or float(rvol_val or 0.0) >= 2.0
+            or (iv_val is not None and float(iv_val) >= 18.0)
+        )
+        if is_bull:
+            if pw > 0 and (abs(probe_px - pw) / pw <= 0.004 or abs(spot - pw) / pw <= 0.004):
+                tags.append("GEX_PUT_WALL_FLOOR")
+                score += 6
+            if flip > 0 and spot > flip and "NEGATIVE" in gex_reg:
+                tags.append("GEX_GAMMA_EXPANSION")
+                score += 5
+            if (
+                cw > spot
+                and ((cw - spot) / spot) <= 0.0030
+                and "POSITIVE" in gex_reg
+                and not is_unpin_squeeze
+            ):
+                has_opp_wall = True
+                opp_reason = (
+                    opp_reason or f"GEX Positive-Gamma Call Wall pin ₹{cw:,.0f} (<0.30% overhead)"
+                )
+        else:
+            if cw > 0 and (abs(probe_px - cw) / cw <= 0.004 or abs(spot - cw) / cw <= 0.004):
+                tags.append("GEX_CALL_WALL_CEIL")
+                score += 6
+            if flip > 0 and spot < flip and "NEGATIVE" in gex_reg:
+                tags.append("GEX_GAMMA_EXPANSION")
+                score += 5
+            if (
+                pw > 0
+                and spot > pw
+                and ((spot - pw) / spot) <= 0.0030
+                and "POSITIVE" in gex_reg
+                and not is_unpin_squeeze
+            ):
+                has_opp_wall = True
+                opp_reason = (
+                    opp_reason or f"GEX Positive-Gamma Put Wall pin ₹{pw:,.0f} (<0.30% below)"
+                )
+
+    # 5. HTF (15m / 1h / Daily) Volume Profile Value Area (VAH / VAL / POC)
+    vp_obj = vp_data
+    vp_src_df = htf_df if (htf_df is not None and len(htf_df) >= 8) else norm_df
+    if vp_obj is None and vp_src_df is not None and len(vp_src_df) >= 8:
+        try:
+            from analysis.volume_profile import compute_volume_profile
+
+            vp_obj = compute_volume_profile(vp_src_df)
+        except Exception as e_vp_loc:
+            logger.debug(f"[analysis.market_structure] HTF VP check skipped: {e_vp_loc}")
+    poc = vah = val = 0.0
+    if isinstance(vp_obj, (tuple, list)) and len(vp_obj) >= 3:
+        poc = float(vp_obj[0] or 0.0)
+        vah = float(vp_obj[1] or 0.0)
+        val = float(vp_obj[2] or 0.0)
+    elif isinstance(vp_obj, dict):
+        poc = float(vp_obj.get("poc_price") or vp_obj.get("poc") or 0.0)
+        vah = float(vp_obj.get("vah_price") or vp_obj.get("vah") or 0.0)
+        val = float(vp_obj.get("val_price") or vp_obj.get("val") or 0.0)
+    elif vp_obj is not None:
+        poc = float(getattr(vp_obj, "poc_price", None) or getattr(vp_obj, "poc", 0.0) or 0.0)
+        vah = float(getattr(vp_obj, "vah_price", None) or getattr(vp_obj, "vah", 0.0) or 0.0)
+        val = float(getattr(vp_obj, "val_price", None) or getattr(vp_obj, "val", 0.0) or 0.0)
+    if poc > 0:
+        if is_bull:
+            if val > 0 and (abs(probe_px - val) / val <= 0.004 or abs(spot - val) / val <= 0.004):
+                tags.append("HTF_VAL_BOUNCE")
+                score += 7
+            elif vah > 0 and spot >= vah * 0.998:
+                tags.append("HTF_VAH_BREAKOUT")
+                score += 6
+            elif abs(probe_px - poc) / poc <= 0.0035 or abs(spot - poc) / poc <= 0.0035:
+                tags.append("HTF_POC_RECLAIM")
+                score += 5
+        else:
+            if vah > 0 and (abs(probe_px - vah) / vah <= 0.004 or abs(spot - vah) / vah <= 0.004):
+                tags.append("HTF_VAH_REJECTION")
+                score += 7
+            elif val > 0 and spot <= val * 1.002:
+                tags.append("HTF_VAL_BREAKDOWN")
+                score += 6
+            elif abs(probe_px - poc) / poc <= 0.0035 or abs(spot - poc) / poc <= 0.0035:
+                tags.append("HTF_POC_REJECT")
+                score += 5
+
+    has_strong = bool(
+        at_ob
+        or in_fib_ote
+        or in_fvg
+        or at_sweep
+        or any(t.startswith(("HTF_", "GEX_")) for t in tags)
+    )
+    return StructuralLocationConfluence(
+        is_valid_location=bool(has_strong or score >= 5),
+        has_strong_location=has_strong,
+        at_order_block=at_ob,
+        in_fib_ote=in_fib_ote,
+        in_fvg=in_fvg,
+        at_liquidity_sweep=at_sweep,
+        has_opposing_wall=has_opp_wall,
+        opposing_wall_reason=opp_reason,
+        fib_retracement_pct=fib_retr_pct,
+        nearest_ob_zone=nearest_ob,
+        location_tags=tags,
+        location_score=min(30, score),
+    )

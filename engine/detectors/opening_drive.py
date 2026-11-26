@@ -23,21 +23,16 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from config.constants import IST
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.opening_drive")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _calculate_5m_atr(df: Any, period: int = 14) -> float:
@@ -144,7 +139,15 @@ def detect_opening_drive(
     range_pct = 0.0
 
     min_range_pct = 0.20 if (is_index or is_heavyweight) else 0.35
-    num_bars = min(len(df_today), 3)
+    # Opening Drive is strictly the opening bell momentum: Bar 0 (09:15-09:20),
+    # or Bar 1 (09:20-09:25) only if tightly anchored to the session opening price.
+    # Bar 2+ (post-09:25) represents late-session price action and cannot be an Opening Drive.
+    num_bars = min(len(df_today), 2)
+    session_open = (
+        float(df_today.iloc[0].get("open", df_today.iloc[0].get("Open", 0.0)))
+        if len(df_today) > 0
+        else 0.0
+    )
 
     for bar_idx in range(num_bars):
         cand_bar = df_today.iloc[bar_idx]
@@ -160,6 +163,11 @@ def detect_opening_drive(
         range_pct_i = (b_range / b_open) * 100.0
         if range_pct_i < min_range_pct:
             continue
+
+        # If evaluating Bar 1 (09:20-09:25), it must be reasonably anchored near session open
+        if bar_idx == 1 and session_open > 0:
+            if abs(b_open - session_open) / session_open * 100.0 > 0.45:
+                continue
 
         # Dynamic low/high diff tolerance: up to 0.20% on Bar 0, up to 0.25% on subsequent ignition bars
         max_diff = 0.20 if bar_idx == 0 else 0.25
@@ -330,20 +338,42 @@ def detect_opening_drive(
 
             dl = get_daily_levels(clean_sym)
             if dl and dl.camarilla:
+                h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
                 h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
                 l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
-                if is_bear_drive and l5 > 0 and abs(ltp - l5) / ltp <= 0.03 and ltp <= (l5 * 1.001):
-                    logger.info(
-                        f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla L5 Terminal Floor ₹{l5:,.1f}."
-                    )
-                    return None
-                elif (
-                    is_bull_drive and h5 > 0 and abs(ltp - h5) / ltp <= 0.03 and ltp >= (h5 * 0.999)
-                ):
-                    logger.info(
-                        f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla H5 Terminal Ceiling ₹{h5:,.1f}."
-                    )
-                    return None
+                if is_bear_drive:
+                    if l5 > 0 and abs(ltp - l5) / ltp <= 0.03 and ltp <= (l5 * 1.001):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla L5 Terminal Floor ₹{l5:,.1f}."
+                        )
+                        return None
+                    if (
+                        matched_bar_idx > 0
+                        and l4 > 0
+                        and abs(ltp - l4) / ltp <= 0.0015
+                        and ltp <= (l4 * 1.001)
+                    ):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Post-open bar {matched_bar_idx} spot ₹{ltp:,.1f} stalled into Camarilla L4 Floor ₹{l4:,.1f}."
+                        )
+                        return None
+                elif is_bull_drive:
+                    if h5 > 0 and abs(ltp - h5) / ltp <= 0.03 and ltp >= (h5 * 0.999):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla H5 Terminal Ceiling ₹{h5:,.1f}."
+                        )
+                        return None
+                    if (
+                        matched_bar_idx > 0
+                        and h4 > 0
+                        and abs(ltp - h4) / ltp <= 0.0015
+                        and ltp >= (h4 * 0.999)
+                    ):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Post-open bar {matched_bar_idx} spot ₹{ltp:,.1f} stalled into Camarilla H4 Ceiling ₹{h4:,.1f}."
+                        )
+                        return None
         except Exception as e_dl:
             logger.debug(f"[OpeningDrive] Daily levels check bypassed for {clean_sym}: {e_dl}")
 
@@ -556,7 +586,11 @@ def detect_opening_drive(
         logger.debug(f"[OpeningDrive] Daily levels lookup error for {clean_sym}: {e_dl}")
 
     # ── Option Resolution via Unified VIX-Aware Resolver ──────────
+    from engine.position_sizer import get_lot_size
     from engine.option_resolver import resolve_option_contract
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_index or (stock_lot_size > 1)
 
     resolved_opt = resolve_option_contract(
         symbol=clean_sym,
@@ -564,7 +598,7 @@ def detect_opening_drive(
         direction=direction,
         underlying_sl=sl_price,
         underlying_target=t1_price,
-        prefer_options=is_index,
+        prefer_options=should_prefer_opt,
     )
 
     has_opt = resolved_opt is not None and resolved_opt.entry_premium > 0
@@ -683,7 +717,11 @@ def detect_opening_drive(
             act_plan["strategy_type"] = resolved_opt.strategy_type
 
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if has_opt or lot_sz > 1 else "EQUITY")
+    alert_seg = (
+        "FNO_INDEX"
+        if is_index
+        else ("FNO_STOCK" if has_opt or lot_sz > 1 or stock_lot_size > 1 else "EQUITY")
+    )
     act_plan["segment"] = alert_seg
 
     metrics_dict: dict[str, Any] = {
@@ -733,7 +771,7 @@ def detect_opening_drive(
             day_high=bar_high,
             day_low=bar_low,
             atr_5m=atr_5m,
-            prefer_options=is_index,
+            prefer_options=should_prefer_opt,
         )
         if pullback_res:
             act_plan["limit_entry_zone"] = (
@@ -774,7 +812,9 @@ def detect_opening_drive(
         alert_type="OPENING_DRIVE_IGNITION",
         stage="IGNITED",
         symbol=clean_sym,
-        exchange="NFO" if (is_index or has_opt) else "NSE",
+        exchange="BFO"
+        if clean_sym in ("SENSEX", "BANKEX")
+        else ("NFO" if (is_index or has_opt) else "NSE"),
         direction=direction,
         headline=headline,
         summary=summary,

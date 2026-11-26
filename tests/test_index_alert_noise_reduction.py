@@ -367,21 +367,21 @@ def test_hbcm_symmetric_bypass_allows_call_setup_when_heavyweights_lag():
         expiry="2026-10-15",
     )
 
-    # 3 bears, 2 bulls: HDFCBANK (28% wt) and ICICIBANK (23% wt) are bullish (51% wt)
+    # 2 bulls, 2 bears, 1 neutral: HDFCBANK (28% wt) and ICICIBANK (23% wt) are bullish (51% wt)
     mock_constituents = [
         {"symbol": "HDFCBANK", "weight_pct": 28.0, "posture": "BULLISH"},
         {"symbol": "ICICIBANK", "weight_pct": 23.0, "posture": "BULLISH"},
         {"symbol": "RELIANCE", "weight_pct": 18.0, "posture": "BEARISH"},
         {"symbol": "INFY", "weight_pct": 10.0, "posture": "BEARISH"},
-        {"symbol": "TCS", "weight_pct": 8.0, "posture": "BEARISH"},
+        {"symbol": "TCS", "weight_pct": 8.0, "posture": "NEUTRAL"},
     ]
     hbcm_res = HBCMResult(
         index_symbol="NIFTY",
         direction_tested="BULLISH",
         confluence_pass=False,
         bullish_count=2,
-        bearish_count=3,
-        neutral_count=0,
+        bearish_count=2,
+        neutral_count=1,
         total_heavyweights=5,
         total_weight_represented_pct=87.0,
         summary="BEARISH_MAJORITY",

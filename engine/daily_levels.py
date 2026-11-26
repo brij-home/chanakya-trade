@@ -105,6 +105,9 @@ class DailyLevels:
     blueprint: dict[str, Any] = field(default_factory=dict)
     straddle: dict[str, Any] = field(default_factory=dict)
     virgin_cpr: dict[str, Any] = field(default_factory=dict)
+    demand_blocks: list[dict[str, Any]] = field(default_factory=list)
+    supply_blocks: list[dict[str, Any]] = field(default_factory=list)
+    confluence_clusters: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = ""
 
     @property
@@ -195,7 +198,11 @@ class DailyLevels:
             monthly=data.get("monthly") or {},
             pre_open=data.get("pre_open") or {},
             blueprint=data.get("blueprint") or {},
+            straddle=data.get("straddle") or {},
             virgin_cpr=data.get("virgin_cpr") or {},
+            demand_blocks=data.get("demand_blocks") or [],
+            supply_blocks=data.get("supply_blocks") or [],
+            confluence_clusters=data.get("confluence_clusters") or [],
             updated_at=data.get("updated_at", ""),
         )
 
@@ -383,16 +390,26 @@ class DailyLevelsStore:
                 except Exception:
                     s_dt = datetime.now(IST).date()
 
-                # Check if last bar is today's incomplete candle
-                last_dt = df_day.index[-1]
-                last_dt_str = (
-                    last_dt.strftime("%Y-%m-%d")
-                    if hasattr(last_dt, "strftime")
-                    else str(last_dt)[:10]
-                )
-                bar_idx = -2 if last_dt_str == s_date else -1
+                # Exclude session-date bar and any post-session future bars so simulated/local clocks
+                # never fail Rule 11 provenance check due to future-dated trailing bars in history.
+                try:
+                    _idx_dates = [
+                        (
+                            idx_v.date()
+                            if hasattr(idx_v, "date")
+                            else datetime.strptime(str(idx_v)[:10], "%Y-%m-%d").date()
+                        )
+                        for idx_v in df_day.index
+                    ]
+                    _hist_mask = [d_v < s_dt for d_v in _idx_dates]
+                    if any(_hist_mask):
+                        df_hist = df_day.loc[_hist_mask]
+                    else:
+                        df_hist = df_day
+                except Exception:
+                    df_hist = df_day
 
-                bar_dt = df_day.index[bar_idx]
+                bar_dt = df_hist.index[-1]
                 bar_dt_str = (
                     bar_dt.strftime("%Y-%m-%d") if hasattr(bar_dt, "strftime") else str(bar_dt)[:10]
                 )
@@ -416,10 +433,11 @@ class DailyLevelsStore:
                     )
                     df_day = None
                 else:
-                    pdh = float(df_day[col_h].iloc[bar_idx])
-                    pdl = float(df_day[col_l].iloc[bar_idx])
-                    pdc = float(df_day[col_c].iloc[bar_idx])
-                    pdo = float(df_day[col_o].iloc[bar_idx])
+                    pdh = float(df_hist[col_h].iloc[-1])
+                    pdl = float(df_hist[col_l].iloc[-1])
+                    pdc = float(df_hist[col_c].iloc[-1])
+                    pdo = float(df_hist[col_o].iloc[-1])
+                    df_day = df_hist
 
                     # Compute ATR-14
                     if len(df_day) >= 15:
@@ -767,6 +785,45 @@ class DailyLevelsStore:
         except Exception as e_vcpr:
             logger.debug(f"[DailyLevels] Virgin CPR calculation note for {clean}: {e_vcpr}")
 
+        # 11. Institutional Confluence & Liquidity Blocks (Demand & Supply)
+        demand_blocks: list[dict[str, Any]] = []
+        supply_blocks: list[dict[str, Any]] = []
+        clusters_all: list[dict[str, Any]] = []
+        try:
+            from analysis.confluence_engine import find_confluence_clusters
+
+            bull_clusters = find_confluence_clusters(
+                symbol=clean, ltp=spot_price, direction="BULLISH", df=df_day, exchange=exch
+            )
+            bear_clusters = find_confluence_clusters(
+                symbol=clean, ltp=spot_price, direction="BEARISH", df=df_day, exchange=exch
+            )
+            demand_blocks = [c.to_dict() for c in (bull_clusters or [])]
+            supply_blocks = [c.to_dict() for c in (bear_clusters or [])]
+            clusters_all = demand_blocks + supply_blocks
+
+            if demand_blocks:
+                top_d = demand_blocks[0]
+                blueprint["primary_demand_zone"] = [top_d["bottom"], top_d["top"]]
+                blueprint["demand_block_summary"] = top_d.get("summary", "")
+                blueprint["retest_stalk_long"] = (
+                    f"Stalk Long on retest of Demand Block (₹{top_d['bottom']:,.1f} - ₹{top_d['top']:,.1f}) "
+                    f"with volume dry-up (<0.85x) and rejection candle (Hammer/Engulfing/Strat 2-1-2)."
+                )
+            if supply_blocks:
+                top_s = supply_blocks[0]
+                blueprint["primary_supply_zone"] = [top_s["bottom"], top_s["top"]]
+                blueprint["supply_block_summary"] = top_s.get("summary", "")
+                blueprint["retest_stalk_short"] = (
+                    f"Stalk Short on retest of Supply Block (₹{top_s['bottom']:,.1f} - ₹{top_s['top']:,.1f}) "
+                    f"with volume dry-up (<0.85x) and rejection candle (Shooting Star/Engulfing/Strat 2-1-2)."
+                )
+            blueprint["breakout_retest_rule"] = (
+                "Wait for displacement candle + quiet retest pullback (RVOL < 0.85x). Do NOT market-chase."
+            )
+        except Exception as e_conf:
+            logger.debug(f"[DailyLevels] Confluence calculation note for {clean}: {e_conf}")
+
         dl = DailyLevels(
             symbol=clean,
             canonical_symbol=clean,
@@ -786,6 +843,9 @@ class DailyLevelsStore:
             pre_open=pre_open_dict,
             straddle=straddle_dict,
             virgin_cpr=virgin_cpr_data,
+            demand_blocks=demand_blocks,
+            supply_blocks=supply_blocks,
+            confluence_clusters=clusters_all,
             blueprint=blueprint,
             updated_at=now_iso,
         )
@@ -875,10 +935,10 @@ class DailyLevelsStore:
             logger.warning(f"[DailyLevels] Batch OHLCV fetch failed: {e_batch}")
             df_batch = {}
 
-        # 2. Batch fetch quotes in chunks to keep HTTP payloads bounded (<100 items per call)
+        # 2. Batch fetch quotes in Fyers Prime chunks (250/call vs 50) to reduce REST calls 5x
         quote_map: dict[str, Any] = {}
         try:
-            chunk_size = 50
+            chunk_size = 250
             for i in range(0, len(clean_syms), chunk_size):
                 chunk = clean_syms[i : i + chunk_size]
                 chunk_insts = [INDEX_INSTRUMENT_MAP.get(s, f"NSE:{s}") for s in chunk]
@@ -1168,8 +1228,8 @@ def evaluate_cpr_gate(
       1. Wide CPR Core Chop Containment:
          - Spot trapped strictly inside Wide CPR core [Bottom < spot < Top] -> VETO
       2. Wide CPR Boundary Wall Collision (Breakouts):
-         - Bullish: Spot testing Wide CPR Top resistance from below within boundary_proximity_pct -> VETO
-         - Bearish: Spot testing Wide CPR Bottom support from above within boundary_proximity_pct -> VETO
+         - Bullish: Spot testing Wide CPR Bottom resistance from below (or Top from below) within boundary_proximity_pct -> VETO
+         - Bearish: Spot testing Wide CPR Top support from above (or Bottom from above) within boundary_proximity_pct -> VETO
       3. Reversal Setups (is_reversal=True, e.g. SMT Sweep):
          - Bearish reversal at/above CPR Top is an institutional short rejection -> Confluence tag CPR_TOP_CONFLUENCE
          - Bullish reversal at/below CPR Bottom is an institutional spring -> Confluence tag CPR_BOTTOM_CONFLUENCE
@@ -1233,16 +1293,29 @@ def evaluate_cpr_gate(
             veto_reason = f"Spot ₹{spot:,.1f} trapped inside Wide CPR core [₹{cpr_bottom:,.1f} - ₹{cpr_top:,.1f}]"
         elif not is_reversal:
             if dir_upper in ("BULLISH", "LONG", "CE", "BUY"):
-                if spot < cpr_top and (cpr_top - spot) / max(1.0, spot) <= boundary_proximity_pct:
+                hit_bottom = (
+                    spot <= cpr_bottom
+                    and (cpr_bottom - spot) / max(1.0, spot) <= boundary_proximity_pct
+                )
+                hit_top = (
+                    spot < cpr_top and (cpr_top - spot) / max(1.0, spot) <= boundary_proximity_pct
+                )
+                if hit_bottom or hit_top:
+                    hit_wall = cpr_bottom if hit_bottom else cpr_top
                     is_vetoed = True
-                    veto_reason = f"Spot ₹{spot:,.1f} testing Wide CPR Top resistance ₹{cpr_top:,.1f} (Proximity < {boundary_proximity_pct * 100:.2f}%)"
+                    veto_reason = f"Spot ₹{spot:,.1f} testing Wide CPR resistance ₹{hit_wall:,.1f} (Proximity < {boundary_proximity_pct * 100:.2f}%)"
             elif dir_upper in ("BEARISH", "SHORT", "PE", "SELL"):
-                if (
+                hit_top = (
+                    spot >= cpr_top and (spot - cpr_top) / max(1.0, spot) <= boundary_proximity_pct
+                )
+                hit_bottom = (
                     spot > cpr_bottom
                     and (spot - cpr_bottom) / max(1.0, spot) <= boundary_proximity_pct
-                ):
+                )
+                if hit_top or hit_bottom:
+                    hit_wall = cpr_top if hit_top else cpr_bottom
                     is_vetoed = True
-                    veto_reason = f"Spot ₹{spot:,.1f} testing Wide CPR Bottom support ₹{cpr_bottom:,.1f} (Proximity < {boundary_proximity_pct * 100:.2f}%)"
+                    veto_reason = f"Spot ₹{spot:,.1f} testing Wide CPR support ₹{hit_wall:,.1f} (Proximity < {boundary_proximity_pct * 100:.2f}%)"
 
     return CPRGateResult(
         is_vetoed=is_vetoed,

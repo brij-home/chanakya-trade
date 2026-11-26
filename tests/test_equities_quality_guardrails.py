@@ -731,14 +731,17 @@ def test_turtle_soup_sweep_inverts_chop_trap():
         index=dates,
     )
 
-    alert = detect_turtle_soup_sweep(
-        symbol="NSE:TCS",
-        df=df,
-        ltp=497.0,
-        vwap=500.0,
-        exchange="NSE",
-        rvol=1.5,
-    )
+    from unittest.mock import patch
+
+    with patch("engine.position_sizer.get_lot_size", return_value=1):
+        alert = detect_turtle_soup_sweep(
+            symbol="NSE:TCS",
+            df=df,
+            ltp=497.0,
+            vwap=500.0,
+            exchange="NSE",
+            rvol=1.5,
+        )
 
     assert alert is not None
     assert alert.alert_type == "TURTLE_SOUP_SWEEP"
@@ -748,6 +751,26 @@ def test_turtle_soup_sweep_inverts_chop_trap():
     assert (alert.target_level - alert.trigger_level) / (
         alert.trigger_level - alert.stop_loss
     ) >= 2.0
+
+    # Also verify F&O option contract mode preserves valid underlying blueprint bounds
+    fno_alert = detect_turtle_soup_sweep(
+        symbol="NSE:TCS",
+        df=df,
+        ltp=497.0,
+        vwap=500.0,
+        exchange="NSE",
+        rvol=1.5,
+    )
+    assert fno_alert is not None
+    assert fno_alert.segment == "FNO_STOCK"
+    assert fno_alert.contract_symbol is not None
+    assert (
+        float(fno_alert.actionable_plan["underlying_sl"].replace("₹", "").replace(",", "")) <= 493.5
+    )
+    assert (
+        float(fno_alert.actionable_plan["underlying_target"].replace("₹", "").replace(",", ""))
+        >= 505.0
+    )
 
 
 def test_predatory_pipeline_6_seat_dossier_compilation(auditor: AlertScrutinyAuditor):

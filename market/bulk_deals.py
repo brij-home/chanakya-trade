@@ -176,9 +176,13 @@ def _nse_session() -> httpx.Client:
       3. Cookies forwarded on subsequent API calls
     """
     session = httpx.Client(follow_redirects=True, headers=_NSE_HEADERS)
-    # Warm up cookies — NSE sets bm_sz, ak_bmsc, nsit, nseappid
-    session.get("https://www.nseindia.com", timeout=8)
-    return session
+    try:
+        # Warm up cookies — NSE sets bm_sz, ak_bmsc, nsit, nseappid
+        session.get("https://www.nseindia.com", timeout=8)
+        return session
+    except Exception:
+        session.close()
+        raise
 
 
 # ── Parse helpers ────────────────────────────────────────────

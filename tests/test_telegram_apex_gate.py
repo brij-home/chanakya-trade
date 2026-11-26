@@ -874,3 +874,34 @@ def test_telegram_catalyst_runner_delta_override_bidirectional(monkeypatch):
     }
     passed_bc, reason_bc = engine._eval_telegram_apex_gate(alert_bear_cat, in_market=True)
     assert passed_bc, f"Expected Bearish catalyst to pass, but got: {reason_bc}"
+
+
+def test_telegram_apex_gate_allows_index_and_fno_stock_at_configured_confidence():
+    """Verify that Index setups and Stock F&O setups at configured confidence (>=80%) pass Apex Gate."""
+    engine = AutoAlertEngine()
+
+    # 1. Index setup with 85% confidence in IGNITED stage (previously blocked by 90% floor)
+    alert_idx = _make_dummy_alert(
+        "idx-banknifty-85",
+        "BANKNIFTY",
+        alert_type="INDEX_CALL_SETUP",
+        segment="FNO_INDEX",
+        stage="IGNITED",
+        confidence=85,
+    )
+    with patch.dict(os.environ, {"TELEGRAM_APEX_ONLY": "1"}):
+        passed, reason = engine._eval_telegram_apex_gate(alert_idx, in_market=True)
+    assert passed is True, f"Expected BANKNIFTY 85% setup to pass Apex gate, got: {reason}"
+
+    # 2. Stock F&O setup with 88% confidence in IGNITED stage (e.g. PERSISTENT/M&M)
+    alert_stk = _make_dummy_alert(
+        "stk-persistent-88",
+        "PERSISTENT",
+        alert_type="OPTIONS_MOMENTUM",
+        segment="FNO_STOCK",
+        stage="IGNITED",
+        confidence=88,
+    )
+    with patch.dict(os.environ, {"TELEGRAM_APEX_ONLY": "1"}):
+        passed, reason = engine._eval_telegram_apex_gate(alert_stk, in_market=True)
+    assert passed is True, f"Expected Stock F&O 88% setup to pass Apex gate, got: {reason}"

@@ -305,9 +305,17 @@ def test_orb_detector_noise_floor():
         orb_levels=(1008.0, 995.0, 13.0, 1001.5),
     )
     assert alert is not None
-    # Risk points must be >= 1.0x ATR / price tier, not tiny sub-ATR 0.20x
-    risk_pts = abs(alert.trigger_level - alert.stop_loss)
-    assert risk_pts >= 8.0, f"ORB risk points {risk_pts} must be properly cushioned against noise!"
+    # Underlying spot risk floor must be >= 1.0x ATR / price tier (min_noise_sl_pts >= 8.0),
+    # while option alerts map stop_loss cleanly into option premium space (< trigger_level).
+    spot_noise_floor = float(alert.metrics.get("min_noise_sl_pts", 0.0) or 0.0)
+    if alert.contract_symbol:
+        assert spot_noise_floor >= 8.0, f"Underlying ORB risk floor {spot_noise_floor} < 8.0!"
+        assert 0 < alert.stop_loss < alert.trigger_level < alert.target_level
+    else:
+        risk_pts = abs(alert.trigger_level - alert.stop_loss)
+        assert risk_pts >= 8.0, (
+            f"ORB risk points {risk_pts} must be properly cushioned against noise!"
+        )
 
 
 def test_0dte_late_session_spread_mandate():

@@ -56,6 +56,12 @@ class FyersOrderStreamManager:
 
         self._running = True
         self._access_token = target_token
+        try:
+            from engine.order_lifecycle import bind_fyers_order_stream
+
+            bind_fyers_order_stream()
+        except Exception as e_bind:
+            logger.debug(f"[OrderStream] order_lifecycle stream bind note: {e_bind}")
         self._thread = threading.Thread(target=self._connect, daemon=True)
         self._thread.start()
 

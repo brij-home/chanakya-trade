@@ -1407,22 +1407,12 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     const t1Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:T1(?:\s*\([^)]+\))?|Target 1)\s*₹?([0-9,.]+)/i)
     if (t1Match) {
       const v = parseCleanNumber(t1Match[1])
-      if (v && v > 0) t1 = v
+      if (v && v > 0 && (!resolvedIsDerivative || (!isSpotScale(v) && (!entry || v <= entry * 4.0)))) {
+        t1 = v
+      }
     }
   }
 
-  if (!t1 || isNaN(t1) || t1 <= 0) {
-    if (tradePlan.target_1) t1 = parseCleanNumber(tradePlan.target_1)
-    else if (plan.target_1) t1 = parseCleanNumber(plan.target_1)
-    else if (alert.t1) t1 = parseCleanNumber(alert.t1)
-    else if (alert.target_1) t1 = parseCleanNumber(alert.target_1)
-    else if (alert.target_level) t1 = parseCleanNumber(alert.target_level)
-    else if (entry) {
-      t1 = isDerivative ? entry * 1.35 : isBull ? entry * 1.03 : entry * 0.97
-    }
-  }
-
-  let t2 = null
   const act = String(tradePlan.action || alert?.actionable_plan?.action || '').toUpperCase()
   let isOptionSell = isNeutralSpread || (resolvedIsDerivative && (
     act === 'WRITE' ||
@@ -1433,6 +1423,27 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   if (resolvedIsDerivative && !isNeutralSpread && sl && entry && t1 && sl < entry && t1 > entry) {
     isOptionSell = false
   }
+
+  if (!t1 || isNaN(t1) || t1 <= 0) {
+    if (!resolvedIsDerivative) {
+      if (tradePlan.target_1) t1 = parseCleanNumber(tradePlan.target_1)
+      else if (plan.target_1) t1 = parseCleanNumber(plan.target_1)
+      else if (alert.t1) t1 = parseCleanNumber(alert.t1)
+      else if (alert.target_1) t1 = parseCleanNumber(alert.target_1)
+      else if (alert.target_level) t1 = parseCleanNumber(alert.target_level)
+      else if (entry) {
+        t1 = isBull ? entry * 1.03 : entry * 0.97
+      }
+    } else if (entry) {
+      // Universal Options Symmetry: Synthesize pure option target from option risk
+      const optRisk = (sl && Math.abs(entry - sl) > 0) ? Math.abs(entry - sl) : (entry * 0.25)
+      t1 = isOptionSell
+        ? Math.max(0.05, Math.round((entry - optRisk * 1.5) * 100) / 100)
+        : Math.round((entry + optRisk * 2.0) * 100) / 100
+    }
+  }
+
+  let t2 = null
   let isUpwardPayoff = isNeutralSpread ? false : (optType ? !isOptionSell : isBull)
   if (sl && entry && t1) {
     if (sl < entry && t1 > entry) {
@@ -1482,13 +1493,22 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     const t2Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:T2(?:\s*\([^)]+\))?|Target 2)\s*₹?([0-9,.]+)/i)
     if (t2Match) {
       const v = parseCleanNumber(t2Match[1])
-      if (v && v > 0) t2 = v
+      if (v && v > 0 && (!resolvedIsDerivative || (!isSpotScale(v) && (!entry || v <= entry * 6.0)))) {
+        t2 = v
+      }
     }
   }
 
-  if ((!t2 || isNaN(t2) || t2 <= 0) && t1 && entry) {
-    const spread1 = Math.abs(t1 - entry)
-    t2 = isUpwardPayoff ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
+  if ((!t2 || isNaN(t2) || t2 <= 0) && entry) {
+    if (resolvedIsDerivative) {
+      const optRisk = (sl && Math.abs(entry - sl) > 0) ? Math.abs(entry - sl) : (entry * 0.25)
+      t2 = isOptionSell
+        ? Math.max(0.05, Math.round((entry - optRisk * 2.5) * 100) / 100)
+        : Math.round((entry + optRisk * 3.5) * 100) / 100
+    } else if (t1) {
+      const spread1 = Math.abs(t1 - entry)
+      t2 = isUpwardPayoff ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
+    }
   }
 
   let t3 = null
@@ -1524,17 +1544,22 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     const t3Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:Runner|T3(?:\s*\([^)]+\))?|Target 3)\s*₹?([0-9,.]+)/i)
     if (t3Match) {
       const v = parseCleanNumber(t3Match[1])
-      if (v && v > 0) t3 = v
+      if (v && v > 0 && (!resolvedIsDerivative || (!isSpotScale(v) && (!entry || v <= entry * 10.0)))) {
+        t3 = v
+      }
     }
   }
 
-  if (!isNeutralSpread && (!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
-    const spread2 = Math.abs(t2 - entry)
-    t3 = isDerivative
-      ? (isOptionSell ? entry * 0.2 : entry * 2.0)
-      : isBull
-      ? t2 + spread2 * 0.8
-      : t2 - spread2 * 0.8
+  if (!isNeutralSpread && (!t3 || isNaN(t3) || t3 <= 0) && entry) {
+    if (resolvedIsDerivative) {
+      const optRisk = (sl && Math.abs(entry - sl) > 0) ? Math.abs(entry - sl) : (entry * 0.25)
+      t3 = isOptionSell
+        ? Math.max(0.05, Math.round((entry - optRisk * 3.5) * 100) / 100)
+        : Math.round((entry + optRisk * 5.0) * 100) / 100
+    } else if (t2) {
+      const spread2 = Math.abs(t2 - entry)
+      t3 = isBull ? t2 + spread2 * 0.8 : t2 - spread2 * 0.8
+    }
   }
 
   // Institutional Directional Integrity Enforcement:
@@ -1574,6 +1599,21 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     } else {
       if (t2 >= t1) t2 = t1 - Math.abs(entry - t1) * 0.5
       if (t3 !== null && t3 >= t2) t3 = t2 - Math.abs(t1 - t2) * 0.8
+    }
+  }
+
+  // Invariant 14.1 Universal Scale Separation Guarantee:
+  // Option targets must never be contaminated with spot equity prices or exceed 4.0x entry
+  if (resolvedIsDerivative && entry && entry > 0 && !isNeutralSpread) {
+    const optRisk = (sl && Math.abs(entry - sl) > 0) ? Math.abs(entry - sl) : (entry * 0.25)
+    if (t1 && (isSpotScale(t1) || t1 > entry * 4.0 || (entry < 200 && t1 > 800))) {
+      t1 = isOptionSell ? Math.max(0.05, Math.round((entry - optRisk * 1.5) * 100) / 100) : Math.round((entry + optRisk * 2.0) * 100) / 100
+    }
+    if (t2 && (isSpotScale(t2) || t2 > entry * 6.0 || (entry < 200 && t2 > 1200))) {
+      t2 = isOptionSell ? Math.max(0.05, Math.round((entry - optRisk * 2.5) * 100) / 100) : Math.round((entry + optRisk * 3.5) * 100) / 100
+    }
+    if (t3 && (isSpotScale(t3) || t3 > entry * 8.0 || (entry < 200 && t3 > 1600))) {
+      t3 = isOptionSell ? Math.max(0.05, Math.round((entry - optRisk * 3.5) * 100) / 100) : Math.round((entry + optRisk * 5.0) * 100) / 100
     }
   }
 
@@ -1829,19 +1869,37 @@ export function isAlertActive(a) {
  *   - LONG_TERM / POSITIONAL: 🏛️ Long-Term Positional (1–6 Months)
  *   - MULTIBAGGER: 🚀 Multibagger Alpha (6–24 Months Compounding Runway)
  */
+/**
+ * Resolve effective-dated intraday square-off label (e.g. '23:15' MCX, '15:30' post-Dec-7 derivatives, '15:15' pre-Dec-7/cash).
+ * Honors backend-supplied `session_close_ist` / `market_close_ist` metadata when present.
+ */
+function _resolveIntradayCutoffStr(alert, exch = 'NSE') {
+  if (exch === 'MCX') return '23:15'
+  const explicit = alert?.session_close_ist || alert?.market_close_ist
+  if (explicit && typeof explicit === 'string') {
+    const m = explicit.match(/(\d{2}:\d{2})/)
+    if (m) return m[1]
+  }
+  const istDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+  const isDeriv = exch === 'NFO' || exch === 'BFO' || Boolean(alert?.contract_symbol || alert?.option_type || alert?.strike)
+  if (isDeriv && istDate >= '2026-12-07') return '15:30'
+  return '15:15'
+}
+
 export function resolveHorizonAndETA(alert) {
   if (!alert) {
+    const defCutoff = _resolveIntradayCutoffStr(null, 'NSE')
     return {
       key: 'INTRADAY',
       label: 'INTRADAY',
       shortLabel: 'INTRADAY',
       icon: '⏱️',
-      etaLabel: '15:15',
-      etaFull: 'Today by 15:15 IST',
-      compactBadge: '⏱️ INTRADAY • 15:15',
+      etaLabel: defCutoff,
+      etaFull: `Today by ${defCutoff} IST`,
+      compactBadge: `⏱️ INTRADAY • ${defCutoff}`,
       badgeClasses: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
       etaClasses: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
-      tooltip: 'Intraday Setup: Square-off by 15:15 IST.',
+      tooltip: `Intraday Setup: Square-off by ${defCutoff} IST.`,
     }
   }
 
@@ -1925,16 +1983,18 @@ export function resolveHorizonAndETA(alert) {
       etaFull = '24h Rolling Window'
     } else {
       // INTRADAY
-      etaLabel = isCrypto ? '24h' : (exch === 'MCX' ? '23:15' : '15:15')
-      etaFull = isCrypto ? '24h Rolling Window' : (exch === 'MCX' ? 'Today by 23:15 IST' : 'Today by 15:15 IST')
+      const cutoffStr = _resolveIntradayCutoffStr(alert, exch)
+      etaLabel = isCrypto ? '24h' : cutoffStr
+      etaFull = isCrypto ? '24h Rolling Window' : `Today by ${cutoffStr} IST`
     }
   } else {
     etaFull = etaLabel
-    if (isCrypto && (etaLabel.includes('15:15') || etaLabel.includes('Today'))) {
+    if (isCrypto && (etaLabel.includes('15:15') || etaLabel.includes('15:30') || etaLabel.includes('Today'))) {
       etaLabel = '24h'
       etaFull = '24h Rolling Window'
     } else if (etaLabel.includes('Today')) {
-      etaLabel = exch === 'MCX' ? '23:15' : '15:15'
+      const mTime = etaLabel.match(/(\d{2}:\d{2})/)
+      etaLabel = mTime ? mTime[1] : _resolveIntradayCutoffStr(alert, exch)
     } else if (etaLabel.includes('2–5 Sessions') || etaLabel.includes('2-5')) {
       etaLabel = '2–5d'
     } else if (etaLabel.includes('1–4 Weeks') || etaLabel.includes('1-4')) {
@@ -2030,19 +2090,21 @@ export function resolveHorizonAndETA(alert) {
         etaClasses: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
         tooltip: 'Short-Term Swing: Volatility compression & momentum breakout. Target ETA: 2–5 Sessions.',
       }
-    default:
+    default: {
+      const cutoffStr = _resolveIntradayCutoffStr(alert, exch)
       return {
         key: 'INTRADAY',
         label: 'INTRADAY',
         shortLabel: 'INTRADAY',
         icon: '⏱️',
         etaLabel,
-        etaFull: etaFull || (exch === 'MCX' ? 'Today by 23:15 IST' : 'Today by 15:15 IST'),
+        etaFull: etaFull || `Today by ${cutoffStr} IST`,
         compactBadge: `⏱️ INTRADAY • ${etaLabel}`,
         badgeClasses: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
         etaClasses: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
-        tooltip: `Intraday Setup: Active for current session only. Hard square-off by ${exch === 'MCX' ? '23:15' : '15:15'} IST.`,
+        tooltip: `Intraday Setup: Active for current session only. Hard square-off by ${cutoffStr} IST.`,
       }
+    }
   }
 }
 
@@ -2536,9 +2598,21 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   let stagePill = { label: '🟢 ACTIVE', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20', icon: '🟢' }
   let trajectoryStatus = { badge: '🟢 ACTIVE', text: 'Trade in flight — active execution', theme: 'emerald' }
 
+  const isScratchDirective = Boolean(
+    rawStage === 'IN_FLIGHT_WARNING' ||
+    rawStage === 'TIME_STOP_SCRATCH' ||
+    (alert.headline && (alert.headline.includes('SCRATCH') || alert.headline.includes('STAGNATION'))) ||
+    (alert.summary && (alert.summary.includes('DECISION: VELOCITY_STAGNATION_SCRATCH') || alert.summary.includes('DECISION: THETA_STAGNATION_SCRATCH'))) ||
+    alert.trailing_decision === 'VELOCITY_STAGNATION_SCRATCH' ||
+    alert.trailing_decision === 'THETA_STAGNATION_SCRATCH'
+  )
+
   if (isDisqualified) {
     stagePill = { label: '🚫 CANCELLED', cls: 'bg-zinc-100 text-zinc-800 border-zinc-300 dark:bg-zinc-700/40 dark:text-zinc-300 dark:border-zinc-600/40', icon: '🚫' }
     trajectoryStatus = { badge: '🚫 CANCELLED (NO FILL)', text: alert.invalidation_reason || 'Setup invalidated prior to trigger — trade was never entered', theme: 'slate' }
+  } else if (isScratchDirective) {
+    stagePill = { label: '⏱️ SCRATCH DIRECTIVE', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/25 dark:text-amber-200 dark:border-amber-400/60 ring-1 ring-amber-500/40 animate-pulse', icon: '⏱️' }
+    trajectoryStatus = { badge: '⏱️ SCRATCH DIRECTIVE ACTIVE', text: alert.summary || alert.invalidation_reason || 'Velocity stagnation reached — scratch position near breakeven', theme: 'amber' }
   } else if (isTimeStop) {
     stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40', icon: '⏱️' }
     trajectoryStatus = { badge: '⏱️ TIME STOP', text: alert.invalidation_reason || 'Velocity time stop reached — closed at CMP', theme: 'amber' }
@@ -2672,6 +2746,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     stagePill,
     trajectoryStatus,
     isTimeStop,
+    isScratchDirective,
     isSLHit,
     isExpired,
     isInvalidated,

@@ -102,6 +102,28 @@ def bs_premium(
         return intrinsic + time_value
 
 
+def vectorized_bs_premium_grid(
+    spots: Any,
+    strikes: Any,
+    dte: Any,
+    ivs: Any,
+    option_type: str = "CE",
+    rate: float = RISK_FREE_RATE,
+) -> np.ndarray:
+    """Batch Black-Scholes pricing delegating to market.vectorized_greeks."""
+    from market.vectorized_greeks import vectorized_black_scholes_prices
+
+    is_call = str(option_type).upper().strip() == "CE"
+    return vectorized_black_scholes_prices(
+        spots=spots,
+        strikes=strikes,
+        dte=dte,
+        sigmas=ivs,
+        r=rate,
+        is_call=is_call,
+    )
+
+
 def bs_iv(
     price: float,
     spot: float,

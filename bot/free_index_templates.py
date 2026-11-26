@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any
 
+from config.constants import IST
 from market.instruments import format_strike
 
 from bot.alert_templates import (
@@ -40,8 +41,6 @@ from bot.alert_templates import (
 )
 
 logger = logging.getLogger("bot.free_index_templates")
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 # ── Channel Metadata ────────────────────────────────────────────────────────
 FREE_INDEX_CHANNEL_NAME = "Nifty BankNifty Free Signals"

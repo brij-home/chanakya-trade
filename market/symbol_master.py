@@ -116,7 +116,15 @@ def _load_master_snapshot(
     is_test_runner = bool(
         os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
     )
-    if is_test_runner and path.exists():
+    _urlopen_unpatched = getattr(urllib.request.urlopen, "__module__", "") == "urllib.request"
+    if (
+        is_test_runner
+        and _urlopen_unpatched
+        and path.exists()
+        and offline_fallback
+        and not force
+        and master_upper not in _DEGRADED_MASTERS
+    ):
         must_refresh = False
     else:
         must_refresh = (
@@ -148,17 +156,12 @@ def _load_master_snapshot(
                     _IN_MEMORY_CACHE[master_upper] = data
                     _MASTER_CACHE_PATHS[master_upper] = _cache_path(master_upper)
                     _MASTER_CHECKED_ON[master_upper] = dt.datetime.now(IST).date()
-                    is_test_runner = bool(
-                        os.environ.get("CHANAKYA_TESTING") == "1"
-                        or "PYTEST_CURRENT_TEST" in os.environ
+                    _DEGRADED_MASTERS.add(master_upper)
+                    logger.warning(
+                        "[SymbolMaster] Using DEGRADED offline snapshot for %s: %s",
+                        master_upper,
+                        e,
                     )
-                    if not is_test_runner:
-                        _DEGRADED_MASTERS.add(master_upper)
-                        logger.warning(
-                            "[SymbolMaster] Using DEGRADED offline snapshot for %s: %s",
-                            master_upper,
-                            e,
-                        )
                     return data
                 except Exception as e_suppressed:
                     logger.debug(
@@ -582,24 +585,46 @@ def get_strike_step(symbol: str, spot: float = 0.0, expiry: Optional[str] = None
                 continue
 
             stks = sorted(strikes_set)
+            # SEBI & Exchange Invariant: Equity & Index options (NSE_FO, BSE_FO) strike steps
+            # are never fractional (< 1.0). Fractional intervals (0.05, 0.1, 0.25, 0.5)
+            # are strictly reserved for currency derivatives (NSE_CD).
+            min_allowed_step = (
+                0.05
+                if master == "NSE_CD" or clean in ("USDINR", "EURINR", "GBPINR", "JPYINR")
+                else 1.0
+            )
+
             # If spot is provided, restrict to ATM neighborhood (±35%)
+            target_stks = stks
             if spot > 0:
                 near = [s for s in stks if spot * 0.65 <= s <= spot * 1.35]
                 if len(near) >= 2:
-                    diffs = [round(near[i + 1] - near[i], 4) for i in range(len(near) - 1)]
-                    diffs = [d for d in diffs if d in _STANDARD_EXCHANGE_STRIKE_STEPS]
-                    if diffs:
-                        from collections import Counter
+                    target_stks = near
 
-                        res = float(Counter(diffs).most_common(1)[0][0])
-                        _STRIKE_STEP_CACHE[cache_key] = res
-                        return res
+            # Group strikes by fractional remainder to isolate corporate action adjustments
+            # (e.g., COALINDIA adjusted 394.75, 399.75 vs standard 395.0, 400.0)
+            from collections import Counter, defaultdict
 
-            diffs = [round(stks[i + 1] - stks[i], 4) for i in range(len(stks) - 1)]
-            diffs = [d for d in diffs if d in _STANDARD_EXCHANGE_STRIKE_STEPS]
+            clusters: dict[float, list[float]] = defaultdict(list)
+            for s in target_stks:
+                clusters[round(s % 1.0, 2)].append(s)
+
+            diffs: list[float] = []
+            for _rem, s_list in clusters.items():
+                s_list.sort()
+                for i in range(len(s_list) - 1):
+                    d = round(s_list[i + 1] - s_list[i], 4)
+                    if d in _STANDARD_EXCHANGE_STRIKE_STEPS and d >= min_allowed_step:
+                        diffs.append(d)
+
+            # Fallback to unclustered diffs if clustering produced no diffs (e.g. fractional currency steps)
+            if not diffs:
+                for i in range(len(target_stks) - 1):
+                    d = round(target_stks[i + 1] - target_stks[i], 4)
+                    if d in _STANDARD_EXCHANGE_STRIKE_STEPS and d >= min_allowed_step:
+                        diffs.append(d)
+
             if diffs:
-                from collections import Counter
-
                 res = float(Counter(diffs).most_common(1)[0][0])
                 _STRIKE_STEP_CACHE[cache_key] = res
                 return res
@@ -910,6 +935,49 @@ class SymbolMaster:
 
 
 _symbol_master_instance: Optional[SymbolMaster] = None
+
+
+def trim_symbol_master_cache() -> int:
+    """Evict symbol master dicts from RAM while preserving disk freshness markers.
+
+    Tier 1: evict cold secondary masters first.
+    Tier 2: if cold masters are already cleared and memory pressure persists, evict
+    large primary masters (NSE_FO / NSE_CM) so ~400-600 MB of Python dicts can be freed.
+    """
+    evicted = 0
+    cold_masters = ("NSE_COM", "NSE_CD", "BSE_CM", "BSE_FO", "MCX_COM")
+    for name in cold_masters:
+        lock = _MASTER_LOCKS.get(name)
+        if lock is None:
+            continue
+        with lock:
+            if name in _IN_MEMORY_CACHE:
+                _IN_MEMORY_CACHE.pop(name, None)
+                evicted += 1
+            strike_idx = globals().get("_UNDERLYING_STRIKES_INDEX")
+            if isinstance(strike_idx, dict):
+                strike_idx.pop(name, None)
+    if evicted == 0:
+        for name in ("NSE_FO", "NSE_CM"):
+            lock = _MASTER_LOCKS.get(name)
+            if lock is None:
+                continue
+            with lock:
+                if name in _IN_MEMORY_CACHE:
+                    _IN_MEMORY_CACHE.pop(name, None)
+                    evicted += 1
+                strike_idx = globals().get("_UNDERLYING_STRIKES_INDEX")
+                if isinstance(strike_idx, dict):
+                    strike_idx.pop(name, None)
+    return evicted
+
+
+try:
+    from engine.memory_guard import register_trim_callback as _register_mem_trim
+
+    _register_mem_trim(trim_symbol_master_cache)
+except Exception as e_mem:
+    logger.debug(f"[market.symbol_master] Memory trim registration skipped: {e_mem}")
 
 
 def get_symbol_master() -> SymbolMaster:

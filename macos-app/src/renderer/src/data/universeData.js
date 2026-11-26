@@ -4,6 +4,8 @@
  * Benchmark & Sectoral Indices, Leading ETFs, MCX Commodities, and Currency Derivatives.
  */
 
+import { resolveSidecarBaseUrl } from '../hooks/useAPI'
+
 export const INDIAN_UNIVERSE = [
   // ─────────────────────────────────────────────────────────────
   // 1. BENCHMARK & SECTORAL INDICES
@@ -523,7 +525,8 @@ export function getSymbolExchange(symbol) {
   return 'NSE'
 }
 
-// Runtime cache for dynamically fetched stock profiles from backend sidecar
+// Runtime cache for dynamically fetched stock profiles from backend sidecar (bounded LRU)
+const _MAX_DYNAMIC_PROFILES = 500
 const _DYNAMIC_PROFILE_CACHE = new Map()
 
 /**
@@ -540,7 +543,8 @@ export async function fetchStockProfile(rawSymbol) {
     return _DYNAMIC_PROFILE_CACHE.get(clean)
   }
   try {
-    const res = await fetch(`http://127.0.0.1:8765/api/v1/market/stock-profile/${encodeURIComponent(clean)}`)
+    const base = resolveSidecarBaseUrl()
+    const res = await fetch(`${base}/api/v1/market/stock-profile/${encodeURIComponent(clean)}`)
     if (!res.ok) return null
     const json = await res.json()
     if (json?.status === 'success' && json?.data) {
@@ -557,8 +561,15 @@ export async function fetchStockProfile(rawSymbol) {
         exchange: data.exchange || 'NSE',
         aliases: [data.symbol.toLowerCase(), (data.company_name || '').toLowerCase()],
       }
+      if (_DYNAMIC_PROFILE_CACHE.has(clean)) {
+        _DYNAMIC_PROFILE_CACHE.delete(clean)
+      }
       _DYNAMIC_PROFILE_CACHE.set(clean, profile)
-      if (!INDIAN_UNIVERSE.some((i) => i.symbol === clean)) {
+      while (_DYNAMIC_PROFILE_CACHE.size > _MAX_DYNAMIC_PROFILES) {
+        const oldestKey = _DYNAMIC_PROFILE_CACHE.keys().next().value
+        _DYNAMIC_PROFILE_CACHE.delete(oldestKey)
+      }
+      if (!INDIAN_UNIVERSE.some((i) => i.symbol === clean) && INDIAN_UNIVERSE.length < 1500) {
         INDIAN_UNIVERSE.push(profile)
       }
       return profile

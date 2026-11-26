@@ -36,6 +36,7 @@ import math
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
@@ -160,7 +161,8 @@ class AdaptiveIndexDecision:
 # ── Thread-safe TTL Cache for Regime Decisions ────────────────────────────────
 
 _REGIME_CACHE_LOCK = threading.Lock()
-_REGIME_CACHE: dict[str, tuple[float, AdaptiveIndexDecision]] = {}
+_MAX_INDEX_REGIME_CACHE = 64
+_REGIME_CACHE: OrderedDict[str, tuple[float, AdaptiveIndexDecision]] = OrderedDict()
 _REGIME_CACHE_TTL = 15.0  # 15s refresh interval
 
 
@@ -290,8 +292,14 @@ def get_time_of_day_phase(dt: Optional[datetime] = None) -> tuple[str, bool]:
     else:
         now_dt = now_dt.astimezone(IST)
 
+    from market.rule_schedule import derivative_close, intraday_entry_cutoff
+
     t = now_dt.time()
-    if t < dtime(9, 15) or t > dtime(15, 30):
+    d_today = now_dt.date()
+    deriv_close = derivative_close(d_today)
+    entry_cutoff = intraday_entry_cutoff(d_today, is_derivative=True)
+
+    if t < dtime(9, 15) or t > deriv_close:
         return "MARKET_CLOSED", False
     if t < dtime(9, 25):
         return "OPENING_AUCTION", False
@@ -302,7 +310,7 @@ def get_time_of_day_phase(dt: Optional[datetime] = None) -> tuple[str, bool]:
         return "MIDDAY_THETA_CHOP", True
     if t <= dtime(14, 30):
         return "AFTERNOON_EXPANSION", False
-    if t <= dtime(15, 15):
+    if t <= entry_cutoff:
         return "POWER_HOUR_EXPIRY", False
     return "POST_MARKET_CLOSING", False
 
@@ -833,5 +841,8 @@ def evaluate_index_adaptive_regime(
 
     with _REGIME_CACHE_LOCK:
         _REGIME_CACHE[clean_sym] = (now_ts, decision)
+        _REGIME_CACHE.move_to_end(clean_sym)
+        while len(_REGIME_CACHE) > _MAX_INDEX_REGIME_CACHE:
+            _REGIME_CACHE.popitem(last=False)
 
     return decision

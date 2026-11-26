@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import timezone, timedelta
 from typing import Any, Optional, Tuple
 
 from engine.alert_expiry import is_alert_option_premium_level, is_option_seller
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.lifecycle.trade_lifecycle_manager")
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class TradeLifecycleManager:

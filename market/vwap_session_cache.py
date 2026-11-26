@@ -100,10 +100,14 @@ class VwapSessionCache:
         - Negative cache (val <= 0) during active market: 30.0s
         - Market closed (after 15:30 IST / weekend): infinite (final session value)
         """
+        from market.rule_schedule import derivative_close
+
         now_ist = datetime.now(IST)
         is_weekday = now_ist.weekday() < 5
-        curr_min = now_ist.hour * 60 + now_ist.minute
-        is_market_hours = is_weekday and (9 * 60 + 15 <= curr_min <= 15 * 60 + 30)
+        close_t = derivative_close(now_ist.date())
+        is_market_hours = is_weekday and (
+            datetime.strptime("09:15", "%H:%M").time() <= now_ist.time() <= close_t
+        )
 
         if not is_market_hours:
             return float("inf") if val > 0 else 120.0

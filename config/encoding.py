@@ -36,8 +36,8 @@ def silence_3rd_party_deprecation_noise() -> None:
 
     try:
         import yfinance  # noqa: F401
-    except ImportError:
-        pass
+    except ImportError as e_yf:
+        logger.debug(f"[config.encoding] yfinance optional import unavailable: {e_yf}")
 
     try:
         import pandas as pd
@@ -45,8 +45,8 @@ def silence_3rd_party_deprecation_noise() -> None:
         if hasattr(pd, "errors") and hasattr(pd.errors, "Pandas4Warning"):
             warnings.filterwarnings("ignore", category=pd.errors.Pandas4Warning)
             warnings.filterwarnings("ignore", category=pd.errors.PandasDeprecationWarning)
-    except Exception:
-        pass
+    except Exception as e_pd:
+        logger.debug(f"[config.encoding] Pandas warning filter setup skipped: {e_pd}")
 
 
 def fix_windows_console() -> None:

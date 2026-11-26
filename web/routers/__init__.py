@@ -10,10 +10,16 @@ from web.routers.alerts_api import router as alerts_router
 from web.routers.market_data import router as market_router
 from web.routers.orders_api import router as orders_router
 from web.routers.crypto_api import router as crypto_router
+from web.routers.intelligence_api import router as intelligence_router
+from web.routers.options_desk_api import router as options_desk_router
+from web.routers.macro_telemetry_api import router as macro_telemetry_router
 
 __all__ = [
     "alerts_router",
     "market_router",
     "orders_router",
     "crypto_router",
+    "intelligence_router",
+    "options_desk_router",
+    "macro_telemetry_router",
 ]

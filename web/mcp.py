@@ -270,6 +270,21 @@ class MCPServer:
                     },
                 }
 
+            tool_meta = getattr(self.registry, "_tools", {}).get(tool_name)
+            if tool_meta is not None and (
+                not tool_meta.get("is_read_only", False)
+                or tool_meta.get("is_destructive", False)
+                or tool_meta.get("permission", "auto") != "auto"
+            ):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32003,
+                        "message": f"Permission denied: MCP endpoint strictly blocks non-read-only tool '{tool_name}'.",
+                    },
+                }
+
             try:
                 res = self.registry.execute(tool_name, tool_args)
                 is_err = False

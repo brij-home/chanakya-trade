@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
+
+from market.rule_schedule import expiry_weekday, intraday_squareoff_cutoff
 
 import pandas as pd
 
@@ -83,8 +85,16 @@ def detect_smt_sweep(
         or ignore_time_gate
     )
 
-    # Operating window: 09:20 - 15:05 IST
-    if not is_test_env and (curr_t < dtime(9, 20) or curr_t > dtime(15, 5)):
+    # Effective-dated operating window: 09:20 IST -> 10m before canonical square-off
+    _exch_smt = "BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE"
+    _is_exp_idx_smt = clean_sym in ("NIFTY", "SENSEX") and (
+        now_dt.weekday() == expiry_weekday(_exch_smt, now_dt.date())
+    )
+    _sqoff_smt = intraday_squareoff_cutoff(
+        now_dt.date(), is_derivative=True, expiring_index=_is_exp_idx_smt
+    )
+    _cutoff_smt = (datetime.combine(now_dt.date(), _sqoff_smt) - timedelta(minutes=10)).time()
+    if not is_test_env and (curr_t < dtime(9, 20) or curr_t > _cutoff_smt):
         return []
 
     eff_vwap = vwap if (vwap and vwap > 0) else spot
@@ -177,10 +187,29 @@ def detect_smt_sweep(
                 # Price action rejection confirmation:
                 # 1) Upper rejection wick >= 28%, OR
                 # 2) Red candle close (last_c < last_o), OR
-                # 3) Spot has retreated >= 0.08% from Day High
-                has_rejection = (
-                    u_wick_pct >= 28.0 or last_c < last_o or dist_to_dh_pct >= 0.08 or is_test_env
+                # 3) Spot has retreated >= 0.08% from Day High with a non-bullish candle (last_c <= last_o or u_wick_pct >= 20.0)
+                # INVARIANT: A strong green expansion candle closing in top 45% (last_c > last_o and (last_c - last_l)/b_rng >= 0.55)
+                # is an active momentum breakout, NOT a supply rejection! Never fire PE into an accelerating green candle!
+                has_ohlcv_b = (
+                    ohlcv_5m is not None and hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1
                 )
+                b_rng_sweep = max(0.1, last_h - last_l)
+                is_green_expansion = (
+                    has_ohlcv_b
+                    and (last_c > last_o)
+                    and ((last_c - last_o) / b_rng_sweep >= 0.20)
+                    and ((last_c - last_l) / b_rng_sweep >= 0.50)
+                )
+                if is_green_expansion:
+                    has_rejection = False
+                elif is_test_env:
+                    has_rejection = True
+                else:
+                    has_rejection = (
+                        u_wick_pct >= 28.0
+                        or last_c < last_o
+                        or (dist_to_dh_pct >= 0.08 and last_c <= last_o)
+                    )
 
                 if has_rejection:
                     # Select optimal ATM / 1-strike ITM Put Option
@@ -361,10 +390,32 @@ def detect_smt_sweep(
                 # Price action absorption confirmation:
                 # 1) Lower absorption wick >= 28%, OR
                 # 2) Green candle close (last_c > last_o), OR
-                # 3) Spot has bounced >= 0.08% from Day Low
-                has_absorption = (
-                    l_wick_pct >= 28.0 or last_c > last_o or dist_to_dl_pct >= 0.08 or is_test_env
+                # 3) Spot has bounced >= 0.08% from Day Low with a non-bearish candle (last_c >= last_o or l_wick_pct >= 20.0)
+                # INVARIANT: A strong red liquidation candle closing in bottom 45% (last_c < last_o and (last_h - last_c)/b_rng >= 0.55)
+                # is active downside liquidation, NOT demand absorption! Never fire CE into an accelerating red dump candle!
+                has_ohlcv_bull = (
+                    ohlcv_5m is not None and hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1
                 )
+                b_rng_bull = max(0.1, last_h - last_l)
+                is_red_liquidation = (
+                    has_ohlcv_bull
+                    and (last_c < last_o)
+                    and (
+                        ((last_o - last_c) / b_rng_bull >= 0.25)
+                        or ((last_h - last_c) / b_rng_bull >= 0.50)
+                    )
+                )
+                if is_red_liquidation:
+                    has_absorption = False
+                elif has_ohlcv_bull:
+                    has_absorption = (
+                        l_wick_pct >= 28.0
+                        or last_c > last_o
+                        or (dist_to_dl_pct >= 0.08 and (last_c >= last_o or l_wick_pct >= 20.0))
+                        or is_test_env
+                    )
+                else:
+                    has_absorption = is_test_env
 
                 if has_absorption:
                     ce_cand = _select_optimal_option(chain, spot, "CE", clean_sym)

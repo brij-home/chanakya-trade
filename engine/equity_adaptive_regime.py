@@ -26,6 +26,7 @@ import logging
 import math
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
@@ -103,7 +104,8 @@ class AdaptiveEquityDecision:
 # ── Thread-safe TTL Cache ─────────────────────────────────────────────────────
 
 _EQUITY_REGIME_CACHE_LOCK = threading.Lock()
-_EQUITY_REGIME_CACHE: dict[str, tuple[float, AdaptiveEquityDecision]] = {}
+_MAX_EQUITY_REGIME_CACHE = 512
+_EQUITY_REGIME_CACHE: OrderedDict[str, tuple[float, AdaptiveEquityDecision]] = OrderedDict()
 _EQUITY_REGIME_CACHE_TTL = 15.0  # 15s refresh interval
 
 
@@ -262,7 +264,10 @@ def get_equity_time_of_day_phase(dt: Optional[datetime] = None) -> tuple[str, bo
     now_dt = dt or datetime.now(IST)
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=IST)
+    from market.rule_schedule import cash_continuous_close
+
     t = now_dt.time()
+    cas_start = cash_continuous_close(now_dt.date(), cas_eligible=True)
 
     if t < dtime(9, 25):
         return "OPENING_AUCTION", False
@@ -272,7 +277,7 @@ def get_equity_time_of_day_phase(dt: Optional[datetime] = None) -> tuple[str, bo
         return "MIDDAY_CHOP", True
     elif dtime(13, 15) <= t < dtime(15, 0):
         return "AFTERNOON_EXPANSION", False
-    elif dtime(15, 0) <= t <= dtime(15, 30):
+    elif dtime(15, 0) <= t <= max(dtime(15, 30), cas_start):
         return "CLOSING_AUCTION", False
     return "OFF_MARKET", False
 
@@ -464,5 +469,8 @@ def evaluate_equity_adaptive_regime(
     # 6. Store in cache
     with _EQUITY_REGIME_CACHE_LOCK:
         _EQUITY_REGIME_CACHE[clean_sym] = (now_ts, decision)
+        _EQUITY_REGIME_CACHE.move_to_end(clean_sym)
+        while len(_EQUITY_REGIME_CACHE) > _MAX_EQUITY_REGIME_CACHE:
+            _EQUITY_REGIME_CACHE.popitem(last=False)
 
     return decision

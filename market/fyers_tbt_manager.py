@@ -311,25 +311,34 @@ def is_tbt_eligible_symbol(symbol: str) -> bool:
 
 def get_market_session() -> str:
     """
-    Determine the current active market session in IST:
-      - 'EQUITY_NFO'   : 09:15 - 15:30 IST (Mon-Fri)
-      - 'COMMODITY_CDS': 15:30 - 23:30 IST (Mon-Fri)
-      - 'OFF_MARKET'   : Nights / Weekends
+    Determine the current active market session in IST using canonical holiday/CAS calendar:
+      - 'EQUITY_NFO'   : 09:15 - derivative_close(today) IST (non-holiday weekdays)
+      - 'COMMODITY_CDS': post-derivative-close - 23:30 IST (non-holiday MCX weekdays)
+      - 'OFF_MARKET'   : Nights / Weekends / Holidays
     """
     try:
         from config.constants import IST_ZONE as IST
+        from market.calendar import is_trading_holiday
+        from market.rule_schedule import derivative_close
 
         now = datetime.now(IST)
     except Exception:
         now = datetime.now()
+        is_trading_holiday = None
+        derivative_close = None
 
-    if now.weekday() >= 5:  # Saturday or Sunday
+    if now.weekday() >= 5:
         return "OFF_MARKET"
 
     t = now.time()
-    if dtime(9, 15) <= t < dtime(15, 30):
+    d = now.date()
+    deriv_close_t = derivative_close(d) if derivative_close is not None else dtime(15, 30)
+    nse_holiday = bool(is_trading_holiday and is_trading_holiday(d, "NSE", ref_time=t))
+    mcx_holiday = bool(is_trading_holiday and is_trading_holiday(d, "MCX", ref_time=t))
+
+    if not nse_holiday and dtime(9, 15) <= t < deriv_close_t:
         return "EQUITY_NFO"
-    elif dtime(15, 30) <= t <= dtime(23, 30):
+    if not mcx_holiday and dtime(9, 0) <= t <= dtime(23, 30) and t >= deriv_close_t:
         return "COMMODITY_CDS"
     return "OFF_MARKET"
 
@@ -1261,9 +1270,9 @@ class FyersTbtManager:
                         from market.calendar import is_market_open
 
                         # Fyers TBT strictly streams NSE Equity (CM) and NFO (Futures & Options).
-                        # MCX is not on TBT. Silence watchdog must check NSE trading hours (09:15-15:30 IST)
+                        # MCX is not on TBT. Silence watchdog must check active NSE/NFO trading hours
                         # so pre-market (09:00-09:15 IST) does not trigger false packet freeze alarms.
-                        is_active_market = is_market_open("NSE")
+                        is_active_market = is_market_open("NFO") or is_market_open("NSE")
                     except Exception:
                         is_active_market = False
 
@@ -2896,7 +2905,7 @@ class FyersTbtManager:
     def get_active_slots_status(self) -> dict[str, Any]:
         """Audit status of all 15 TBT slots and current allocation breakdown with per-slot metrics."""
         now = time.time()
-        acquired = self._slots_lock.acquire(timeout=2.0)
+        acquired = self._slots_lock.acquire(timeout=0.05)
         if not acquired:
             if getattr(self, "_last_slots_status_cache", None):
                 return dict(self._last_slots_status_cache)

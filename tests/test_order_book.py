@@ -292,12 +292,18 @@ def test_order_book_stream_route_registered():
     """Verify /api/market/order-book/{symbol}/stream is registered in FastAPI."""
     from web.api import app
 
-    paths = []
-    for r in app.routes:
-        if hasattr(r, "path"):
-            paths.append(r.path)
-        if hasattr(r, "original_router") and hasattr(r.original_router, "routes"):
-            paths.extend([sub_r.path for sub_r in r.original_router.routes])
+    def _collect_paths(routes):
+        out = []
+        for r in routes or ():
+            if hasattr(r, "path"):
+                out.append(r.path)
+            if hasattr(r, "routes"):
+                out.extend(_collect_paths(r.routes))
+            if hasattr(r, "original_router") and hasattr(r.original_router, "routes"):
+                out.extend(_collect_paths(r.original_router.routes))
+        return out
+
+    paths = _collect_paths(app.routes)
     assert "/api/market/order-book/{symbol}/stream" in paths
 
 

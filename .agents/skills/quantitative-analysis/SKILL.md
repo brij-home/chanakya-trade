@@ -87,8 +87,9 @@ report = audit_company_forensics("RELIANCE")
 | `fixed_fractional` | Direct structural stop distance sizing with circuit headroom haircut |
 | `half_kelly` | Half-Kelly criterion ($f^* \times 0.5$) for capital preservation |
 
-**F&O Lot Quantization (Official October 2026 Canonical Master)**: Auto-resolves from `market.instruments.STANDARD_LOT_SIZES`:
-- Benchmark Indices: `NIFTY: 65`, `BANKNIFTY: 30`, `FINNIFTY: 60`, `MIDCPNIFTY: 120`, `SENSEX: 20`, `BANKEX: 30`.
+**F&O Lot Quantization (Official Nov 2026 / Jan 2027 Canonical Master)**: Auto-resolves via `market.instruments.get_fno_lot_size(symbol, expiry_date=...)` & `STANDARD_LOT_SIZES`:
+- Benchmark Indices: `NIFTY: 65`, `BANKNIFTY: 30`, `FINNIFTY: 60`, `MIDCPNIFTY: 120`, `SENSEX: 20` (pre-Jan 25, 2027) / `25` (for `2027-01-25+` expiries per BSE Notice `20260930-58`), `BANKEX: 30`.
+- Also use signed Dealer Exposure (`market/options.py`, `market/vectorized_greeks.py` with `vanna` and 1-day `charm`), strictly causal VPIN + 50-depth `multi_layer_obi` (`analysis/order_flow.py`), intraday FutEq MWPL utilization (`market/fno_ban.py`), and shared feature caching (`engine/feature_bus.py`).
 - All 219 NSE Single-Stock Derivatives: (including newly listed post-Nov 2024 additions: `SWIGGY: 1825`, `WAAREEENER: 175`, `HYUNDAI: 275`, `SUZLON: 12700`, etc.).
 
 ```python
@@ -341,7 +342,7 @@ Institutional market makers hunt liquidity at obvious psychological round number
 .venv\Scripts\pytest.exe tests/test_global_macro.py tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
 
 # Interception, Turtle Soup & Dynamic Regime Governor suites
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_interception_engine.py tests/test_turtle_soup.py tests/test_regime_governor.py -q
+python -m pytest tests/test_interception_engine.py tests/test_turtle_soup.py tests/test_regime_governor.py -q
 ```
 
 ---

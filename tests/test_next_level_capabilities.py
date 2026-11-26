@@ -200,3 +200,31 @@ def test_fyers_margin_check_offline():
         assert "brokerage" in res["charges_breakdown"]
         assert "gst" in res["charges_breakdown"]
         assert "stamp_duty" in res["charges_breakdown"]
+
+
+def test_fyers_margin_check_respects_circuit_breaker():
+    """Verify check_order_margin fails safe without external REST call when Fyers breaker is OPEN."""
+    fyers = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+    fyers._access_token = "mock_token"
+
+    fake_cb = MagicMock()
+    fake_cb.is_tripped.return_value = True
+
+    with (
+        patch("brokers.fyers.get_fyers_circuit_breaker", return_value=fake_cb),
+        patch("requests.post") as mock_post,
+    ):
+        res = fyers.check_order_margin(
+            [
+                {
+                    "symbol": "NSE:SBIN-EQ",
+                    "qty": 50,
+                    "side": "BUY",
+                    "product_type": "INTRADAY",
+                    "price": 800.0,
+                }
+            ]
+        )
+        mock_post.assert_not_called()
+        assert res["status"] == "DEGRADED"
+        assert "circuit breaker" in (res["fyers_error"] or "").lower()

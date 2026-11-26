@@ -201,6 +201,7 @@ def test_post_market_digest_and_stagnation_sweep(monkeypatch):
     # depend on scanner output and data availability. Isolate the sweep.
     for _scanner in (
         "scan_swing_inflections",
+        "scan_fno_stock_swing_setups",
         "scan_precursor_radars",
         "scan_asymmetric_opportunities",
         "scan_squeeze_breakouts",

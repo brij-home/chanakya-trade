@@ -36,6 +36,7 @@ import pandas as pd
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import ActionableBlueprint, AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
+from market.rule_schedule import intraday_squareoff_cutoff
 
 logger = logging.getLogger("chanakya.detectors.turtle_soup")
 IST = ZoneInfo("Asia/Kolkata")
@@ -378,7 +379,10 @@ def detect_turtle_soup_sweep(
     resolved_opt = None
 
     try:
-        if is_index_symbol(clean_sym):
+        from engine.position_sizer import get_lot_size
+
+        stock_lot = get_lot_size(clean_sym)
+        if is_index_symbol(clean_sym) or stock_lot > 1:
             resolved_opt = resolve_option_contract(
                 symbol=clean_sym,
                 spot=curr_ltp,
@@ -410,20 +414,32 @@ def detect_turtle_soup_sweep(
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
-        entry_range=f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
-        trigger_level=entry_price,
-        invalidation_stop=stop_loss,
-        target_1=target_1,
-        target_2=target_2,
-        runner_target=runner_target,
-        risk_reward=f"1:{rr_ratio:.1f}",
-        no_chase_boundary=no_chase,
+        entry_range=f"₹{opt_entry * 0.98:,.2f} – ₹{opt_entry * 1.02:,.2f}"
+        if has_opt
+        else f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+        trigger_level=opt_entry if has_opt else entry_price,
+        invalidation_stop=opt_sl if has_opt else stop_loss,
+        target_1=opt_t1 if has_opt else target_1,
+        target_2=opt_t2 if has_opt else target_2,
+        runner_target=opt_t3 if has_opt else runner_target,
+        risk_reward=f"1:{round((opt_t1 - opt_entry) / max(0.5, opt_entry - opt_sl), 1)}"
+        if has_opt
+        else f"1:{rr_ratio:.1f}",
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
-        when_to_buy=f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection."
-        + (f" (Option {contract_symbol} near ₹{opt_entry:,.2f})" if has_opt else ""),
-        when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
-        + (f" (or premium beyond ₹{opt_nc:,.2f})" if has_opt else ""),
-        segment="FNO_INDEX" if is_index_symbol(clean_sym) else "EQUITY",
+        when_to_buy=(
+            f"Limit order at OTE pullback near ₹{opt_entry:,.2f} ({contract_symbol})."
+            if has_opt
+            else f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection."
+        ),
+        when_to_wait=(
+            f"Do not chase if premium exceeds ₹{opt_nc:,.2f}."
+            if has_opt
+            else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
+        ),
+        segment="FNO_INDEX"
+        if is_index_symbol(clean_sym)
+        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
         contract=contract_symbol,
         strike=strike,
         option_type=option_type,
@@ -459,7 +475,13 @@ def detect_turtle_soup_sweep(
         style_val = "SWING_REVERSAL"
     else:
         horizon_val = "INTRADAY"
-        eta_desc = "Today 15:15 IST" if exchange != "MCX" else "Today 23:15 IST"
+        if exchange == "MCX":
+            eta_desc = "Today 23:15 IST"
+        else:
+            _sqoff_ts = intraday_squareoff_cutoff(
+                date.today(), is_derivative=(exchange in ("NFO", "BFO"))
+            )
+            eta_desc = f"Today {_sqoff_ts.strftime('%H:%M')} IST"
         style_val = "INTRADAY_REVERSAL"
 
     confidence_val = 89 if smt_confirmed else 82
@@ -501,19 +523,21 @@ def detect_turtle_soup_sweep(
         direction=direction,
         headline=headline,
         summary=summary,
-        ltp=curr_ltp,
-        trigger_level=entry_price,
-        target_level=target_1,
-        stop_loss=stop_loss,
+        ltp=opt_entry if has_opt else curr_ltp,
+        trigger_level=opt_entry if has_opt else entry_price,
+        target_level=opt_t1 if has_opt else target_1,
+        stop_loss=opt_sl if has_opt else stop_loss,
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
+        option_premium=opt_entry if has_opt else None,
+        underlying_spot=curr_ltp,
         confidence=confidence_val,
         time_horizon=horizon_val,
         eta_label=eta_desc,
         setup_style=style_val,
         entry_type="LIMIT_ON_PULLBACK",
-        no_chase_boundary=no_chase,
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         actionable_plan=act_plan,
         metrics={
             "sweep_type": sweep_type,

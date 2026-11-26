@@ -53,7 +53,7 @@ _store_lock = threading.Lock()
 _local_connections: dict[int, sqlite3.Connection] = {}
 
 # ── L1 In-Memory Process Caches ──────────────────────────────────────
-_L1_MAX_ITEMS = 4000
+_L1_MAX_ITEMS = max(128, int(os.environ.get("CHANAKYA_EOD_L1_MAX_ITEMS", "600")))
 _L1_TTL_SECONDS = 3600.0  # 1 hour
 _l1_ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _l1_fundamentals_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -369,16 +369,19 @@ def get_cached_ohlcv(symbol: str, days: int = 504) -> Optional[pd.DataFrame]:
                     return df.iloc[-days:].copy()
                 return df.copy()
 
-    # Tier 2: Check SQLite Store
+    # Tier 2: Check SQLite Store (never serve future-dated corrupted bars)
+    from config.constants import IST_ZONE as _IST_Z
+
+    today_ist_str = datetime.now(_IST_Z).strftime("%Y-%m-%d")
     conn = _get_connection()
     rows = conn.execute(
         """
         SELECT date, open, high, low, close, volume, turnover 
         FROM ohlcv_daily 
-        WHERE symbol = ? 
+        WHERE symbol = ? AND date <= ?
         ORDER BY date ASC
         """,
-        (clean_sym,),
+        (clean_sym, today_ist_str),
     ).fetchall()
 
     if not rows or len(rows) < 15:
@@ -446,7 +449,10 @@ def get_cached_ohlcv_batch(
     if not missing_syms:
         return results
 
-    # Query Tier 2 (SQLite) for missing symbols
+    # Query Tier 2 (SQLite) for missing symbols (never serve future-dated corrupted bars)
+    from config.constants import IST_ZONE as _IST_Z
+
+    today_ist_str = datetime.now(_IST_Z).strftime("%Y-%m-%d")
     conn = _get_connection()
     chunk_size = 400
     newly_loaded: dict[str, pd.DataFrame] = {}
@@ -458,10 +464,10 @@ def get_cached_ohlcv_batch(
             f"""
             SELECT symbol, date, open, high, low, close, volume, turnover 
             FROM ohlcv_daily 
-            WHERE symbol IN ({placeholders}) 
+            WHERE symbol IN ({placeholders}) AND date <= ?
             ORDER BY symbol, date ASC
             """,
-            chunk,
+            [*chunk, today_ist_str],
         ).fetchall()
 
         if not rows:
@@ -629,6 +635,20 @@ def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") ->
 
     clean_df = clean_df[~clean_df.index.duplicated(keep="last")]
     clean_df = clean_df.sort_index()
+
+    try:
+        from config.constants import IST_ZONE as _IST_Z
+
+        today_ist_ts = pd.Timestamp(datetime.now(_IST_Z).date())
+        future_mask = clean_df.index.normalize() > today_ist_ts
+        if future_mask.any():
+            logger.warning(
+                f"[eod_store] Dropping {int(future_mask.sum())} future-dated bar(s) "
+                f"(> {today_ist_ts.date()}) for {symbol or 'UNKNOWN'}"
+            )
+            clean_df = clean_df[~future_mask]
+    except Exception as e_fut:
+        logger.debug(f"[eod_store] Future-date check skipped: {e_fut}")
 
     return clean_df
 

@@ -464,14 +464,30 @@ async def cmd_quote(update, context) -> None:
         quotes = get_quote([f"NSE:{symbol}"])
         q = quotes.get(f"NSE:{symbol}")
         if q and q.last_price:
-            chg_emoji = "📈" if (q.change or 0) >= 0 else "📉"
-            await update.message.reply_text(
-                f"{chg_emoji} {symbol}\n"
-                f"LTP: ₹{q.last_price:,.2f}\n"
-                f"Change: {q.change:+.2f} ({q.change_pct:+.2f}%)\n"
-                f"Open: ₹{q.open:,.2f} | High: ₹{q.high:,.2f} | Low: ₹{q.low:,.2f}\n"
-                f"Volume: {q.volume:,}"
-            )
+            chg = q.change or 0.0
+            chg_pct = q.change_pct or 0.0
+            chg_icon = "🟢" if chg >= 0 else "🔴"
+            sign = "+" if chg >= 0 else ""
+
+            low = q.low or q.last_price
+            high = q.high or q.last_price
+            ltp = q.last_price
+            range_span = high - low
+            pos_ratio = (ltp - low) / range_span if range_span > 0 else 0.5
+            bar_len = 8
+            dot_pos = min(max(int(round(pos_ratio * bar_len)), 0), bar_len)
+            range_bar = "─" * dot_pos + "●" + "─" * (bar_len - dot_pos)
+
+            card_lines = [
+                f"📊 <b>{symbol}</b> · <code>NSE</code>",
+                f"<b>LTP:</b> <code>₹{ltp:,.2f}</code> ({chg_icon} <b>{sign}{chg_pct:.2f}%</b> · <code>{sign}{chg:,.2f}</code>)\n",
+                f"<b>Day Range:</b> <code>₹{low:,.1f}</code> [{range_bar}] <code>₹{high:,.1f}</code>",
+                f"<b>Open:</b> <code>₹{q.open:,.2f}</code> | <b>Vol:</b> <code>{q.volume:,.0f}</code>",
+            ]
+            if hasattr(q, "vwap") and q.vwap:
+                card_lines.append(f"<b>VWAP:</b> <code>₹{q.vwap:,.2f}</code>")
+
+            await update.message.reply_text("\n".join(card_lines), parse_mode="HTML")
         else:
             await update.message.reply_text(f"Could not get quote for {symbol}")
     except Exception as e:
@@ -817,17 +833,28 @@ async def cmd_flows(update, context) -> None:
         from market.flow_intel import get_flow_analysis
 
         a = get_flow_analysis()
-        flow_msg = (
-            f"💰 FII/DII Flows\n\n"
-            f"FII today: {a.fii_net_today:+,.0f} Cr\n"
-            f"DII today: {a.dii_net_today:+,.0f} Cr\n"
-            f"FII 5-day: {a.fii_5d_net:+,.0f} Cr\n"
-            f"FII streak: {a.fii_streak} days\n"
-            f"{'⚠️ Divergence: ' + a.divergence_type if a.divergence else ''}\n"
-            f"\nSignal: {a.signal} ({a.confidence}%)\n"
-            f"{a.signal_reason}"
+        fii_icon = "🟢" if a.fii_net_today >= 0 else "🔴"
+        dii_icon = "🟢" if a.dii_net_today >= 0 else "🔴"
+        sig_icon = (
+            "🟢" if "BULL" in a.signal.upper() else ("🔴" if "BEAR" in a.signal.upper() else "🟡")
         )
-        await update.message.reply_text(_md_to_html(flow_msg), parse_mode="HTML")
+
+        lines = [
+            "💰 <b>Institutional Flows (FII/DII)</b>\n",
+            f"• <b>FII Today:</b> {fii_icon} <code>{a.fii_net_today:+,.0f} Cr</code> (Streak: <code>{a.fii_streak}d</code>)",
+            f"• <b>DII Today:</b> {dii_icon} <code>{a.dii_net_today:+,.0f} Cr</code>",
+            f"• <b>FII 5-Day:</b> <code>{a.fii_5d_net:+,.0f} Cr</code>",
+        ]
+        if a.divergence:
+            lines.append(f"• ⚠️ <b>Divergence:</b> <code>{a.divergence_type}</code>")
+
+        lines.append(
+            f"\n<b>Bias:</b> {sig_icon} <b>{a.signal}</b> · Conviction: <code>{a.confidence}%</code>"
+        )
+        if a.signal_reason:
+            lines.append(f"<blockquote expandable><b>Intel:</b> {a.signal_reason}</blockquote>")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"Flow data failed: {e}")
 
@@ -882,28 +909,33 @@ async def cmd_macro(update, context) -> None:
         from market.macro import get_macro_snapshot
 
         snap = get_macro_snapshot()
-        lines = ["🌍 Macro Snapshot\n"]
+        lines = ["🌍 <b>Global Macro Dashboard</b>\n"]
         if snap.usdinr:
+            chg_str = f" ({snap.usdinr_change:+.2f}%)" if snap.usdinr_change else ""
+            icon = (
+                "🔴"
+                if (snap.usdinr_change or 0) > 0.1
+                else ("🟢" if (snap.usdinr_change or 0) < -0.1 else "⚪")
+            )
             lines.append(
-                f"USD/INR: {snap.usdinr:.2f} ({snap.usdinr_change:+.2f}%)"
-                if snap.usdinr_change
-                else f"USD/INR: {snap.usdinr:.2f}"
+                f"• <b>USD/INR:</b> <code>₹{snap.usdinr:.2f}</code> {icon}<code>{chg_str}</code>"
             )
         if snap.crude_oil:
+            chg_str = f" ({snap.crude_change:+.1f}%)" if snap.crude_change else ""
+            icon = (
+                "🔴"
+                if (snap.crude_change or 0) > 1.0
+                else ("🟢" if (snap.crude_change or 0) < -1.0 else "⚪")
+            )
             lines.append(
-                f"Crude: ${snap.crude_oil:.1f}/bbl ({snap.crude_change:+.1f}%)"
-                if snap.crude_change
-                else f"Crude: ${snap.crude_oil:.1f}"
+                f"• <b>Brent Crude:</b> <code>${snap.crude_oil:.1f}/bbl</code> {icon}<code>{chg_str}</code>"
             )
         if snap.gold:
-            lines.append(
-                f"Gold: ${snap.gold:.0f}/oz ({snap.gold_change:+.1f}%)"
-                if snap.gold_change
-                else f"Gold: ${snap.gold:.0f}"
-            )
+            chg_str = f" ({snap.gold_change:+.1f}%)" if snap.gold_change else ""
+            lines.append(f"• <b>Gold:</b> <code>${snap.gold:.0f}/oz</code> <code>{chg_str}</code>")
         if snap.us_10y:
-            lines.append(f"US 10Y: {snap.us_10y:.2f}%")
-        await update.message.reply_text("\n".join(lines))
+            lines.append(f"• <b>US 10Y Yield:</b> <code>{snap.us_10y:.2f}%</code>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"Macro failed: {e}")
 
@@ -1183,10 +1215,10 @@ async def cmd_ping_all(update, context) -> None:
     institutional Telegram channels and reports back live delivery status.
     """
     try:
+        from datetime import datetime
         from engine.alert_preferences import alert_preferences
-        from datetime import datetime, timezone, timedelta
+        from config.constants import IST
 
-        IST = timezone(timedelta(hours=5, minutes=30))
         now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
         targets = [
@@ -1256,14 +1288,24 @@ async def cmd_pnl(update, context) -> None:
         from engine.portfolio import get_portfolio_summary
 
         summary = get_portfolio_summary()
-        pnl_emoji = "📈" if summary.total_pnl >= 0 else "📉"
-        await update.message.reply_text(
-            f"💼 Portfolio\n\n"
-            f"Value: ₹{summary.total_value:,.0f}\n"
-            f"{pnl_emoji} P&L: ₹{summary.total_pnl:+,.0f}\n"
-            f"Day P&L: ₹{summary.day_pnl:+,.0f}\n"
-            f"Risk: {summary.risk.risk_rating} ({summary.risk.deployment_pct:.0f}% deployed)"
+        pnl = summary.total_pnl
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+        pnl_sign = "+" if pnl > 0 else ("-" if pnl < 0 else "")
+        pnl_str = f"{pnl_sign}₹{abs(pnl):,.0f}"
+
+        day_pnl = summary.day_pnl
+        day_icon = "🟢" if day_pnl >= 0 else "🔴"
+        day_sign = "+" if day_pnl > 0 else ("-" if day_pnl < 0 else "")
+        day_str = f"{day_sign}₹{abs(day_pnl):,.0f}"
+
+        card = (
+            "💼 <b>Portfolio Snapshot</b>\n\n"
+            f"• <b>Total Value:</b> <code>₹{summary.total_value:,.0f}</code>\n"
+            f"• <b>Overall P&L:</b> {pnl_icon} <code>{pnl_str}</code>\n"
+            f"• <b>Day P&L:</b> {day_icon} <code>{day_str}</code>\n"
+            f"• <b>Risk Rating:</b> <code>{summary.risk.risk_rating}</code> (<code>{summary.risk.deployment_pct:.0f}%</code> deployed)"
         )
+        await update.message.reply_text(card, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"Portfolio failed: {e}")
 
@@ -1308,11 +1350,11 @@ async def cmd_conviction(update, context) -> None:
             if f_list:
                 avg_score = sum(f.score for f in f_list) / len(f_list)
                 icon = axis_icons.get(ax, "🔹")
-                axis_summary.append(f"  {icon} {ax.title()}: {avg_score:.1f}/10")
+                axis_summary.append(f"  {icon} {ax.title()}: <code>{avg_score:.1f}/10</code>")
 
         lines = [
             f"🎯 <b>{symbol} — 12-Factor Conviction Score</b>\n",
-            f"Score: <b>{conviction.total_score}/100</b> ({verdict_icon} {conviction.verdict})",
+            f"Score: <b>{conviction.total_score}/100</b> ({verdict_icon} <b>{conviction.verdict}</b>)",
             f"Sizing: <b>{conviction.recommended_position_size}</b>",
             f"Factors: 🟢 {conviction.bullish_count}▲ | 🔴 {conviction.bearish_count}▼ | ⚪ {conviction.unavailable_count}—\n",
         ]
@@ -1320,35 +1362,38 @@ async def cmd_conviction(update, context) -> None:
         if conviction.veto and conviction.veto.vetoed:
             lines.append(f"⛔ <b>VETO ACTIVE:</b> {conviction.veto.reason}\n")
 
-        lines.append("<b>5-Axis Orthogonal Breakdown:</b>")
+        lines.append("<blockquote expandable><b>5-Axis Orthogonal Breakdown:</b>")
         lines.extend(axis_summary)
 
         # Highlight decisive factors
         sorted_factors = sorted(conviction.factors, key=lambda x: abs(x.score - 5), reverse=True)
         top_factors = sorted_factors[:4]
-        lines.append("\n<b>Top Decisive Factor Drivers:</b>")
+        lines.append("\n<b>Top Decisive Drivers:</b>")
         for f in top_factors:
             s_icon = "🟢" if f.signal == "BULLISH" else "🔴" if f.signal == "BEARISH" else "⚪"
             detail_clip = (f.detail[:75] + "...") if len(f.detail) > 75 else f.detail
-            lines.append(f"  {s_icon} <b>{f.label}</b> ({f.score}/10): {detail_clip}")
+            lines.append(f"  {s_icon} <b>{f.label}</b> (<code>{f.score}/10</code>): {detail_clip}")
+        lines.append("</blockquote>")
 
         # Real Data-Driven Trade Plan (R:R & ETA)
         if conviction.trade_plan:
             tp = conviction.trade_plan
             asym_icon = "✅" if tp.is_asymmetry_viable else "⚠️"
-            lines.append("\n<b>📐 Data-Driven Trade Plan (Zero Guesswork):</b>")
-            lines.append(f"  • Direction: <b>{tp.direction}</b> @ ₹{tp.entry_price:,.1f}")
+            lines.append("\n<b>📐 Trade Plan (Zero Guesswork):</b>")
             lines.append(
-                f"  • Invalidation (SL): <b>₹{tp.invalidation_stop:,.1f}</b> (-{tp.stop_distance_pts:,.1f} pts)"
+                f"  • Direction: <b>{tp.direction}</b> @ <code>₹{tp.entry_price:,.1f}</code>"
+            )
+            lines.append(
+                f"  • Invalidation (SL): <code>₹{tp.invalidation_stop:,.1f}</code> (-{tp.stop_distance_pts:,.1f} pts)"
             )
             lines.append(f"    <i>{tp.sl_rationale}</i>")
             lines.append(
-                f"  • Target 1: <b>₹{tp.target_1:,.1f}</b> (+{tp.t1_distance_pts:,.1f} pts | <b>{tp.rr_t1}:1 R:R</b>)"
+                f"  • Target 1: <code>₹{tp.target_1:,.1f}</code> (+{tp.t1_distance_pts:,.1f} pts | <b>{tp.rr_t1}:1 R:R</b>)"
             )
             lines.append(f"    <i>{tp.t1_rationale}</i>")
             lines.append(f"    ⏱️ <b>ETA T1:</b> {tp.eta_t1_str}")
             lines.append(
-                f"  • Target 2: <b>₹{tp.target_2:,.1f}</b> (+{tp.t2_distance_pts:,.1f} pts | <b>{tp.rr_t2}:1 R:R</b>)"
+                f"  • Target 2: <code>₹{tp.target_2:,.1f}</code> (+{tp.t2_distance_pts:,.1f} pts | <b>{tp.rr_t2}:1 R:R</b>)"
             )
             lines.append(f"    <i>{tp.t2_rationale}</i>")
             lines.append(f"    ⏱️ <b>ETA T2:</b> {tp.eta_t2_str}")
@@ -1758,9 +1803,9 @@ async def cmd_squeeze(update, context) -> None:
 
     def _get_squeeze_summary() -> str:
         import json
-        from pathlib import Path
+        from config.paths import app_data_path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             return "⚠️ <b>Calibration data not found.</b> Run <code>scripts/calibrate_fyers_historical_models.py</code> first."
         try:
@@ -2255,7 +2300,9 @@ def get_telegram_destinations() -> dict[str, Any]:
 
 
 _THREADS_FILE = Path(__file__).parent.parent / "data" / "telegram_threads.json"
+_ROOT_TEXTS_FILE = Path(__file__).parent.parent / "data" / "telegram_root_texts.json"
 _signal_message_map: dict[str, int] = {}
+_signal_text_map: dict[str, str] = {}
 _signal_map_lock = threading.Lock()
 _MAX_SIGNAL_MAP_SIZE = 5000
 _threads_loaded = False
@@ -2278,6 +2325,18 @@ def _load_threads_if_needed() -> None:
                         )
             except Exception as e_suppressed:
                 logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
+        if _ROOT_TEXTS_FILE.exists():
+            try:
+                with open(_ROOT_TEXTS_FILE, "r", encoding="utf-8") as f:
+                    t_data = json.load(f)
+                    if isinstance(t_data, dict):
+                        _signal_text_map.update(
+                            {str(k): str(v) for k, v in t_data.items() if isinstance(v, str)}
+                        )
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.telegram_bot] Non-fatal exception suppressed loading root texts: {e_suppressed}"
+                )
         _threads_loaded = True
 
 
@@ -2286,8 +2345,12 @@ def _save_threads() -> None:
         _THREADS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with _signal_map_lock:
             data = dict(_signal_message_map)
+            text_data = dict(_signal_text_map)
         with open(_THREADS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
+        if text_data:
+            with open(_ROOT_TEXTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(text_data, f)
     except Exception as e_suppressed:
         logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -2344,14 +2407,64 @@ def get_signal_message_id(
     return None
 
 
+def get_signal_root_text(
+    signal_id: str,
+    chat_id: Optional[str] = None,
+    alert_id: Optional[str] = None,
+) -> Optional[str]:
+    """Retrieve original Telegram root message text for a given signal_id/alert_id."""
+    if not signal_id and not alert_id:
+        return None
+    _load_threads_if_needed()
+    sig = signal_id.lstrip("#").strip() if signal_id else ""
+    candidates: list[str] = []
+    if sig:
+        candidates.append(sig)
+    if alert_id:
+        aid = alert_id.strip()
+        if aid and aid not in candidates:
+            candidates.append(aid)
+    if sig:
+        base_sig = re.sub(r"_\d{4}$", "", sig)
+        if base_sig not in candidates:
+            candidates.append(base_sig)
+
+    with _signal_map_lock:
+        if chat_id:
+            clean_chat = str(chat_id).strip()
+            if ":" in clean_chat:
+                clean_chat = clean_chat.split(":", 1)[0].strip()
+            if clean_chat:
+                for c in candidates:
+                    val = _signal_text_map.get(f"{clean_chat}:{c}")
+                    if val is not None:
+                        return val
+                for c in candidates:
+                    val = _signal_text_map.get(c)
+                    if val is not None:
+                        has_other_chat = any(
+                            k.endswith(f":{c}") and not k.startswith(f"{clean_chat}:")
+                            for k in _signal_text_map.keys()
+                        )
+                        if not has_other_chat:
+                            return val
+                return None
+        for c in candidates:
+            val = _signal_text_map.get(c)
+            if val is not None:
+                return val
+    return None
+
+
 def record_signal_message_id(
     signal_id: str,
     message_id: int,
     chat_id: Optional[str] = None,
     alert_id: Optional[str] = None,
     overwrite: bool = True,
+    text: Optional[str] = None,
 ) -> None:
-    """Record Telegram message_id for a signal to thread future milestone/trailing updates."""
+    """Record Telegram message_id and optional root message text for a signal to thread future updates."""
     if not (signal_id or alert_id) or not message_id:
         return
     _load_threads_if_needed()
@@ -2377,13 +2490,22 @@ def record_signal_message_id(
         if len(_signal_message_map) >= _MAX_SIGNAL_MAP_SIZE:
             for k in list(_signal_message_map.keys())[:200]:
                 _signal_message_map.pop(k, None)
+        if len(_signal_text_map) >= _MAX_SIGNAL_MAP_SIZE:
+            for k in list(_signal_text_map.keys())[:200]:
+                _signal_text_map.pop(k, None)
         for k in keys_to_index:
             if overwrite or k not in _signal_message_map:
                 _signal_message_map[k] = int(message_id)
+            if text:
+                if overwrite or k not in _signal_text_map:
+                    _signal_text_map[k] = text
             if clean_chat:
                 ck = f"{clean_chat}:{k}"
                 if overwrite or ck not in _signal_message_map:
                     _signal_message_map[ck] = int(message_id)
+                if text:
+                    if overwrite or ck not in _signal_text_map:
+                        _signal_text_map[ck] = text
     try:
         _save_threads()
     except Exception as e_suppressed:
@@ -2394,9 +2516,12 @@ def clear_signal_message_ids() -> None:
     """Clear in-memory and persisted signal-to-message mapping (useful for testing/cleanup)."""
     with _signal_map_lock:
         _signal_message_map.clear()
+        _signal_text_map.clear()
     try:
         if _THREADS_FILE.exists():
             _THREADS_FILE.unlink(missing_ok=True)
+        if _ROOT_TEXTS_FILE.exists():
+            _ROOT_TEXTS_FILE.unlink(missing_ok=True)
     except Exception as e_suppressed:
         logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -3256,7 +3381,8 @@ def send_push(
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
     reply_markup: Optional[dict[str, Any]] = None,
-) -> None:
+    wait: bool = False,
+) -> Optional[bool]:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
     Called from alerts, morning brief scheduler, execution gate, etc.
@@ -3271,23 +3397,76 @@ def send_push(
 
     target_chat_id = (chat_id or "").strip() or _load_chat_id()
     if not target_chat_id:
-        return
+        return False if wait else None
 
     try:
         token = _get_bot_token()
     except Exception:
-        return
+        return False if wait else None
+
+    resolved_sig = (signal_id or "").lstrip("#").strip()
+    tags = [t.lstrip("#").strip() for t in re.findall(r"#(SIG_[a-zA-Z0-9_]+)", message)]
+    if not resolved_sig and tags:
+        resolved_sig = tags[0]
+
+    is_update_flag = is_update
+    if is_update_flag is None:
+        head_sample = "\n".join((message or "").splitlines()[:4])
+        is_new_call = bool(
+            re.search(
+                r"\b(?:NEW\s+CALL|NEW\s+TRADE\s+SETUP|NEW\s+RADAR|PRECURSOR\s+RADAR|EOD\s+WATCHLIST|WATCHLIST|ALPHA\s+VORTEX)\b",
+                head_sample,
+                re.IGNORECASE,
+            )
+            and not re.search(r"\bUPDATE\s*(?:#?\d+|·|:|-)\b", head_sample, re.IGNORECASE)
+        )
+        if is_new_call:
+            is_update_flag = False
+        else:
+            is_update_flag = bool(
+                re.search(r"\bUPDATE\s*(?:#?\d+|·|:|-)\b", head_sample, re.IGNORECASE)
+                or re.search(
+                    r"\b(?:TARGET\s+(?:0\.5|\d+)|FINAL\s+TARGET|TRAILING\s+STOP|VIEW\s+INVALIDATED|STOP\s+LOSS\s+HIT|STOP-LOSS\s+HIT|STOPPED\s+OUT|RUNNER\s+(?:EXIT|CLOSED)|PROFIT\s+SECURED|BREAKEVEN\s+LOCKED|SPREAD\s+(?:FREE-ROLL|70%\s+PROFIT|SHORT\s+STRIKE|RISK\s+MITIGATION)|VELOCITY\s+TIME-STOP|SETUP\s+(?:EXPIRED|DISQUALIFIED))\b",
+                    head_sample,
+                    re.IGNORECASE,
+                )
+            )
 
     now = time.time()
     if not bypass_dedup:
         normalized = _normalize_push_message(message)
         digest = hashlib.sha256(f"{target_chat_id}:{normalized}".encode("utf-8")).hexdigest()
 
+        sig_root_key = (
+            f"SIG_ROOT:{target_chat_id}:{resolved_sig}"
+            if (resolved_sig and not is_update_flag)
+            else None
+        )
+        sig_upd_key = None
+        if resolved_sig and is_update_flag:
+            head_line_norm = re.sub(
+                r"\bupdate\s*(?:#\d+\s*)?",
+                "update ",
+                _normalize_push_message((message or "").splitlines()[0] if message else ""),
+            ).strip()
+            # Keep distinct SL ratchet values distinct while blocking duplicate un-numbered retries
+            lvl_hint = ""
+            if "trail" in head_line_norm or "ratchet" in head_line_norm:
+                lvl_hint = _normalize_push_message(" ".join((message or "").splitlines()[:5]))
+            sig_upd_key = hashlib.sha256(
+                f"SIG_UPD:{target_chat_id}:{resolved_sig}:{head_line_norm}:{lvl_hint}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+
         with _push_dedup_lock:
             # Clean expired items if buffer is growing
             if len(_recent_push_digests) > 200:
                 expired = [
-                    k for k, ts in _recent_push_digests.items() if now - ts > _PUSH_DEDUP_WINDOW_SEC
+                    k
+                    for k, ts in _recent_push_digests.items()
+                    if now - ts
+                    > (1800.0 if str(k).startswith("SIG_ROOT:") else _PUSH_DEDUP_WINDOW_SEC)
                 ]
                 for k in expired:
                     del _recent_push_digests[k]
@@ -3298,6 +3477,24 @@ def send_push(
                     f"[TelegramPush] Suppressed duplicate push notification (hash={digest[:8]})"
                 )
                 return
+
+            if sig_root_key:
+                last_sig_root = _recent_push_digests.get(sig_root_key, 0.0)
+                if (now - last_sig_root) < 1800.0:
+                    logger.info(
+                        f"[TelegramPush] Suppressed duplicate root signal #{resolved_sig} for chat {target_chat_id}"
+                    )
+                    return
+                _recent_push_digests[sig_root_key] = now
+
+            if sig_upd_key:
+                last_sig_upd = _recent_push_digests.get(sig_upd_key, 0.0)
+                if (now - last_sig_upd) < 180.0:
+                    logger.info(
+                        f"[TelegramPush] Suppressed duplicate milestone update for #{resolved_sig} in chat {target_chat_id}"
+                    )
+                    return
+                _recent_push_digests[sig_upd_key] = now
 
             _recent_push_digests[digest] = now
 
@@ -3314,19 +3511,14 @@ def send_push(
         reply_markup=reply_markup,
     )
     if not payload or not payload.get("text"):
-        return
+        return False if wait else None
 
-    resolved_sig = (signal_id or "").lstrip("#").strip()
-    tags = [t.lstrip("#").strip() for t in re.findall(r"#(SIG_[a-zA-Z0-9_]+)", message)]
-    if not resolved_sig and tags:
-        resolved_sig = tags[0]
-
-    def _send():
+    def _send() -> bool:
         if os.environ.get("CHANAKYA_TESTING") == "1" and not _ALLOW_TEST_DISPATCH:
             logger.debug(
                 "[TelegramPush] Network call skipped during test execution (CHANAKYA_TESTING=1)"
             )
-            return
+            return True
         try:
             import httpx
 
@@ -3349,8 +3541,81 @@ def send_push(
                                 msg_id,
                                 chat_id=target_chat_id,
                                 alert_id=alert_id,
-                                overwrite=not bool(is_update),
+                                overwrite=not bool(is_update_flag),
+                                text=message if not bool(is_update_flag) else None,
                             )
+                        if is_update_flag:
+                            # Scan ONLY the alert's header lines so footer Playbook/Original Plan
+                            # text (e.g. "Book 50% at Target 1") never falsely promotes the root call.
+                            head_upper = "\n".join((message or "").splitlines()[:3]).upper()
+                            badge = None
+                            if re.search(
+                                r"\b(?:TARGET\s*1\s*(?:HIT|ACHIEVED)|T1\s*(?:HIT|REACHED|ACHIEVED))\b",
+                                head_upper,
+                            ):
+                                badge = "[🏆 T1 HIT · SL TO COST]"
+                            elif re.search(
+                                r"\b(?:TARGET\s*2\s*(?:HIT|ACHIEVED)|T2\s*(?:HIT|REACHED|ACHIEVED))\b",
+                                head_upper,
+                            ):
+                                badge = "[🎯 T2 HIT · FULL EXTENSION]"
+                            elif re.search(
+                                r"\b(?:FINAL\s+TARGET(?:\s+ACHIEVED)?|T3\s*(?:HIT|ACHIEVED))\b",
+                                head_upper,
+                            ):
+                                badge = "[🏁 FINAL TARGET ACHIEVED]"
+                            elif re.search(
+                                r"\bSPREAD\s+70%\s+PROFIT\b",
+                                head_upper,
+                            ):
+                                badge = "[🎯 SPREAD 70% PROFIT]"
+                            elif re.search(
+                                r"\bSPREAD\s+FREE-ROLL\b",
+                                head_upper,
+                            ):
+                                badge = "[🛡️ SPREAD FREE-ROLL]"
+                            elif re.search(
+                                r"\b(?:TARGET\s*0\.5\s*(?:HIT|ACHIEVED)|T0\.5\s*(?:HIT|REACHED|ACHIEVED|DE-RISK))\b",
+                                head_upper,
+                            ):
+                                badge = "[⚡ T0.5 SCALED]"
+                            elif any(
+                                w in head_upper
+                                for w in (
+                                    "INVALIDATED",
+                                    "STOP LOSS HIT",
+                                    "STOP-LOSS HIT",
+                                    "STOPPED OUT",
+                                    "SPREAD RISK MITIGATION EXIT",
+                                    "SETUP DISQUALIFIED",
+                                )
+                            ):
+                                badge = "[🛑 INVALIDATED / STOPPED OUT]"
+                            elif any(
+                                w in head_upper
+                                for w in ("RUNNER CLOSED", "RUNNER EXIT", "PROFIT SECURED")
+                            ):
+                                badge = "[🏁 RUNNER CLOSED]"
+                            elif "BREAKEVEN LOCKED" in head_upper:
+                                badge = "[🛡️ BREAKEVEN LOCKED]"
+                            elif any(
+                                w in head_upper
+                                for w in (
+                                    "TRAILING STOP RATCHET",
+                                    "TRAIL_RATCHET",
+                                    "TRAIL RATCHET",
+                                    "TRAIL SL",
+                                )
+                            ):
+                                badge = "[🛡️ TRAIL RATCHETED]"
+
+                            if badge and (resolved_sig or alert_id):
+                                update_root_signal_status(
+                                    signal_id=resolved_sig,
+                                    alert_id=alert_id,
+                                    status_badge=badge,
+                                    chat_id=target_chat_id,
+                                )
                         if on_success and callable(on_success):
                             try:
                                 on_success(int(msg_id))
@@ -3367,13 +3632,27 @@ def send_push(
             resp = httpx.post(url, json=payload, timeout=10)
             if resp.is_success:
                 _record_and_callback(resp.json())
-                return
+                return True
 
             err_data: dict[str, Any] = {}
             try:
                 err_data = resp.json()
             except Exception as e_json:
                 logger.debug("[TelegramPush] Non-JSON error response from Telegram: %s", e_json)
+
+            # Respect Telegram 429 Retry-After backoff without triggering barebones flood spam
+            if resp.status_code == 429:
+                retry_after = float((err_data.get("parameters") or {}).get("retry_after", 5) or 5)
+                capped_wait = max(1.0, min(retry_after, 15.0))
+                logger.warning(
+                    f"[TelegramPush] Telegram 429 flood control for chat {target_chat_id}; backing off {capped_wait:.1f}s"
+                )
+                time.sleep(capped_wait)
+                resp_rl = httpx.post(url, json=payload, timeout=10)
+                if resp_rl.is_success:
+                    _record_and_callback(resp_rl.json())
+                    return True
+                return False
             err_desc = err_data.get("description", resp.text[:200])
 
             logger.warning(
@@ -3448,7 +3727,7 @@ def send_push(
                         f"[TelegramPush] Telegram adaptive retry succeeded for chat {target_chat_id}"
                     )
                     _record_and_callback(resp2.json())
-                    return
+                    return True
 
                 err2_data: dict[str, Any] = {}
                 try:
@@ -3478,7 +3757,7 @@ def send_push(
                             f"[TelegramPush] Telegram barebones fail-safe succeeded for chat {target_chat_id}"
                         )
                         _record_and_callback(resp3.json())
-                        return
+                        return True
 
                     err3_data: dict[str, Any] = {}
                     try:
@@ -3492,13 +3771,18 @@ def send_push(
                         f"[TelegramPush] Telegram barebones fail-safe failed for chat {target_chat_id}: "
                         f"HTTP {resp3.status_code} - {err3_desc}"
                     )
+            return False
         except Exception as e:
             logger.warning(
                 f"[TelegramPush] Exception delivering push to Telegram chat {target_chat_id}: {e}",
                 exc_info=True,
             )
+            return False
 
-    _get_push_executor().submit(_send)
+    fut = _get_push_executor().submit(_send)
+    if wait:
+        return bool(fut.result(timeout=25.0))
+    return None
 
 
 # Canonical alias for sending messages / broadcasts
@@ -3867,21 +4151,68 @@ def update_root_signal_status(
     alert_id: Optional[str] = None,
     status_badge: str = "[✅ T1 HIT · +36%]",
     chat_id: Optional[str] = None,
+    new_text: Optional[str] = None,
 ) -> bool:
     """
     Locates the recorded root alert message in Telegram for a signal/alert and
-    updates its status or prepares an in-place update if supported.
+    updates its status badge in-place via edit_message_text.
     """
     cand = (signal_id or alert_id or "").strip()
     if not cand:
         return False
-    msg_id = get_signal_message_id(cand, chat_id=chat_id)
+    msg_id = get_signal_message_id(cand, chat_id=chat_id, alert_id=alert_id)
     if not msg_id:
+        logger.debug(f"[TelegramEdit] No recorded message_id for {cand}; cannot update status")
         return False
+
+    clean_chat = (chat_id or "").strip()
+    if ":" in clean_chat:
+        clean_chat = clean_chat.split(":", 1)[0].strip()
+
+    badge = status_badge.strip()
+    if not badge.startswith("["):
+        badge = f"[{badge}]"
+
+    if new_text:
+        updated_text = new_text
+    else:
+        root_txt = get_signal_root_text(cand, chat_id=clean_chat, alert_id=alert_id)
+        if not root_txt:
+            logger.info(
+                f"[TelegramEdit] Located root msg {msg_id} for {cand}, but no root text cached. Using fallback status: {badge}"
+            )
+            updated_text = f"<b>{badge}</b> <code>#{cand}</code>"
+        else:
+            # Status badge injection / replacement into root header
+            # Match <b>[PROVENANCE] ...</b> with optional existing status badge [ ... ]
+            prov_match = re.search(r"<b>\[(LIVE|TEST|OFF-MARKET)\](?:\s*\[[^\]]+\])?", root_txt)
+            if prov_match:
+                updated_text = re.sub(
+                    r"<b>\[(LIVE|TEST|OFF-MARKET)\](?:\s*\[[^\]]+\])?",
+                    lambda m: f"<b>[{m.group(1)}] {badge}",
+                    root_txt,
+                    count=1,
+                )
+            else:
+                lines = root_txt.split("\n", 1)
+                if len(lines) > 1:
+                    updated_text = f"<b>{badge}</b> {lines[0]}\n{lines[1]}"
+                else:
+                    updated_text = f"<b>{badge}</b> {root_txt}"
+
+    with _signal_map_lock:
+        _signal_text_map[cand] = updated_text
+        if clean_chat:
+            _signal_text_map[f"{clean_chat}:{cand}"] = updated_text
+    try:
+        _save_threads()
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
+
     logger.info(
-        f"[TelegramEdit] Located root alert msg {msg_id} for {cand}. Ready for in-place badge update: {status_badge}"
+        f"[TelegramEdit] Located root alert msg {msg_id} for {cand}. Dispatching in-place badge update: {badge}"
     )
-    return True
+    return edit_message_text(message_id=msg_id, text=updated_text, chat_id=clean_chat or None)
 
 
 class TelegramBotProxy:
@@ -3918,6 +4249,10 @@ class TelegramBotProxy:
     @staticmethod
     def update_root_signal_status(*args, **kwargs) -> bool:
         return update_root_signal_status(*args, **kwargs)
+
+    @staticmethod
+    def get_signal_root_text(*args, **kwargs) -> Optional[str]:
+        return get_signal_root_text(*args, **kwargs)
 
 
 _telegram_bot_proxy = TelegramBotProxy()

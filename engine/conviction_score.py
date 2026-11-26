@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -42,7 +43,8 @@ logger = logging.getLogger("chanakya.conviction_score")
 
 MAX_SCORE_PER_FACTOR = 10
 
-_CONVICTION_CACHE: dict[str, tuple[float, Any]] = {}
+_MAX_CONVICTION_CACHE = 256
+_CONVICTION_CACHE: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 _CONVICTION_LOCK = threading.Lock()
 _CONVICTION_CACHE_TTL = 45.0  # 45-second TTL cache for institutional factor aggregation
 _EVENT_CALENDAR_CACHE: dict[str, tuple[float, Any]] = {}
@@ -87,10 +89,12 @@ class ConvictionScore:
     veto: Optional[VetoResult] = None
     trade_plan: Optional[Any] = None
     as_of: str = ""
+    directional_score: Optional[int] = None
 
     def as_dict(self) -> dict:
         return {
             "total_score": self.total_score,
+            "directional_score": self.directional_score,
             "verdict": self.verdict,
             "verdict_color": self.verdict_color,
             "summary": self.summary,
@@ -1257,6 +1261,10 @@ def get_conviction_score(
     total = sum(f.score for f in factors)  # max = 120
     # Normalize to 100
     total_normalized = round(total / 120 * 100)
+    # Orthogonal directional score excluding descriptive positioning context (max_pain)
+    dir_factors = [f for f in factors if f.factor_id != "max_pain"]
+    dir_max = max(10, len(dir_factors) * MAX_SCORE_PER_FACTOR)
+    dir_normalized = round(sum(f.score for f in dir_factors) / dir_max * 100)
 
     bullish = sum(1 for f in factors if f.signal == "BULLISH")
     bearish = sum(1 for f in factors if f.signal == "BEARISH")
@@ -1266,6 +1274,7 @@ def get_conviction_score(
     veto = _check_veto_conditions(vix, fii_streak, fii_streak_total, data_state)
     if veto.vetoed:
         total_normalized = min(total_normalized, 55)  # Hard cap at MODERATE
+        dir_normalized = min(dir_normalized, 55)
 
     # ── Verdict ───────────────────────────────────────────────────────────────
     if total_normalized >= 85:
@@ -1322,16 +1331,21 @@ def get_conviction_score(
         veto=veto,
         trade_plan=trade_plan,
         as_of=datetime.now().strftime("%H:%M:%S IST"),
+        directional_score=dir_normalized,
     )
 
     if not is_testing:
         with _CONVICTION_LOCK:
             _CONVICTION_CACHE[cache_key] = (now, res)
+            _CONVICTION_CACHE.move_to_end(cache_key)
             _CONVICTION_CACHE[clean_sym_key] = (now, res)
+            _CONVICTION_CACHE.move_to_end(clean_sym_key)
+            cutoff = now - _CONVICTION_CACHE_TTL
             if len(_CONVICTION_CACHE) > 50:
-                cutoff = now - _CONVICTION_CACHE_TTL
                 for k in list(_CONVICTION_CACHE.keys()):
                     if _CONVICTION_CACHE[k][0] < cutoff:
                         _CONVICTION_CACHE.pop(k, None)
+            while len(_CONVICTION_CACHE) > _MAX_CONVICTION_CACHE:
+                _CONVICTION_CACHE.popitem(last=False)
 
     return res

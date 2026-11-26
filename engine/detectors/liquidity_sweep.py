@@ -307,8 +307,13 @@ def detect_predator_liquidity_sweep(
     expiry_date_str = None
     resolved_opt = None
 
+    from engine.position_sizer import get_lot_size
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_index_symbol(clean_sym) or (stock_lot_size > 1)
+
     try:
-        if is_index_symbol(clean_sym):
+        if should_prefer_opt:
             resolved_opt = resolve_option_contract(
                 symbol=clean_sym,
                 spot=curr_ltp,
@@ -322,7 +327,9 @@ def detect_predator_liquidity_sweep(
                 contract_symbol = resolved_opt.contract_symbol
                 strike = resolved_opt.strike
                 option_type = "CE" if is_bullish else "PE"
-                expiry_date_str = resolved_opt.expiry_date
+                expiry_date_str = getattr(
+                    resolved_opt, "expiry", getattr(resolved_opt, "expiry_date", None)
+                )
     except Exception as e_suppressed:
         logger.debug(f"[liquidity_sweep] Option resolution non-fatal exception: {e_suppressed}")
 
@@ -338,19 +345,29 @@ def detect_predator_liquidity_sweep(
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
-        entry_range=f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
-        trigger_level=entry_price,
-        invalidation_stop=stop_loss,
-        target_1=target_1,
-        target_2=target_2,
-        runner_target=runner_target,
-        risk_reward=f"1:{rr_ratio:.1f}",
-        no_chase_boundary=no_chase,
+        entry_range=f"₹{opt_entry * 0.98:,.2f} – ₹{opt_entry * 1.02:,.2f}"
+        if has_opt
+        else f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+        trigger_level=opt_entry if has_opt else entry_price,
+        invalidation_stop=opt_sl if has_opt else stop_loss,
+        target_1=opt_t1 if has_opt else target_1,
+        target_2=opt_t2 if has_opt else target_2,
+        runner_target=opt_t3 if has_opt else runner_target,
+        risk_reward=f"1:{round((opt_t1 - opt_entry) / max(0.5, opt_entry - opt_sl), 1)}"
+        if has_opt
+        else f"1:{rr_ratio:.1f}",
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
-        when_to_buy=f"Limit order at OTE pullback near ₹{entry_price:,.2f} following trap rejection."
-        + (f" (Option {contract_symbol} near ₹{opt_entry:,.2f})" if has_opt else ""),
-        when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
-        + (f" (or premium beyond ₹{opt_nc:,.2f})" if has_opt else ""),
+        when_to_buy=(
+            f"Limit order at OTE pullback near ₹{opt_entry:,.2f} ({contract_symbol})."
+            if has_opt
+            else f"Limit order at OTE pullback near ₹{entry_price:,.2f} following trap rejection."
+        ),
+        when_to_wait=(
+            f"Do not chase if premium exceeds ₹{opt_nc:,.2f}."
+            if has_opt
+            else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
+        ),
         profit_rule="Book 50% at Target 1 (+2R) and shift SL to Breakeven (+0.2%). Trail runner to Target 2.",
         segment="FNO_INDEX" if is_index_symbol(clean_sym) else "EQUITY",
         contract=contract_symbol,
@@ -446,26 +463,31 @@ def detect_predator_liquidity_sweep(
         alert_type="PREDATOR_SWEEP",
         stage="IGNITED",
         symbol=clean_sym,
-        exchange=exchange,
+        exchange="BFO"
+        if clean_sym in ("SENSEX", "BANKEX")
+        else ("NFO" if (is_index_symbol(clean_sym) or contract_symbol) else exchange),
         segment="FNO_INDEX"
         if is_index_symbol(clean_sym)
-        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
+        else ("FNO_STOCK" if (contract_symbol or stock_lot_size > 1) else "EQUITY"),
         direction=direction,
         headline=headline,
         summary=summary,
-        ltp=curr_ltp,
-        trigger_level=entry_price,
-        target_level=target_1,
-        stop_loss=stop_loss,
+        ltp=opt_entry if has_opt else curr_ltp,
+        trigger_level=opt_entry if has_opt else entry_price,
+        target_level=opt_t1 if has_opt else target_1,
+        stop_loss=opt_sl if has_opt else stop_loss,
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
         confidence=conf_val,
-        preferred_vehicle="NAKED_OPTION",
+        preferred_vehicle="NAKED_OPTION"
+        if (is_index_symbol(clean_sym) or contract_symbol)
+        else "EQUITY",
         time_horizon=time_horizon,
         actionable_plan=blueprint.to_dict(),
+        option_premium=opt_entry if has_opt else None,
         underlying_spot=curr_ltp,
-        no_chase_boundary=no_chase,
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         metrics={
             "sweep_type": sweep_type,
             "sweep_level": sweep_level,

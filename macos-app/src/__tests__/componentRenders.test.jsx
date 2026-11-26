@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { useChatStore } from '../renderer/src/store/chatStore'
 
 // Import Modals & Cards
@@ -1076,7 +1076,14 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
   })
 
   describe('ScanCard Component', () => {
-    it('renders unusual open interest without duplicate symbol buttons and with contract badges', () => {
+    it('renders unusual open interest without duplicate symbol buttons and with contract badges', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ status: 'ok', data: { sectors: [] } }),
+        })
+      )
       const mockScanData = {
         summary: 'Scanned 2 symbols. High IV: 0 | Unusual OI: 2 symbols (4 strikes) | Put writing: 0',
         high_iv: [],
@@ -1117,6 +1124,11 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
 
       render(<ScanCard data={mockScanData} />)
 
+      // Allow initial sector_heatmap effect to settle cleanly inside act
+      await act(async () => {
+        await Promise.resolve()
+      })
+
       // Section header exists
       expect(screen.getByText(/Unusual Open Interest Spike/i)).toBeTruthy()
 
@@ -1136,6 +1148,34 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
 
       // Verify spikes badge
       expect(screen.getByText('3⚡')).toBeTruthy()
+    })
+  })
+
+  describe('Wave 1 Truthfulness & Canonical Lot Safety Gates', () => {
+    it('ModeBanner renders explicit MODE UNAVAILABLE banner for UNKNOWN mode instead of defaulting to PAPER', async () => {
+      const ModeBanner = (await import('../renderer/src/components/Common/ModeBanner')).default
+      render(<ModeBanner mode="UNKNOWN" loading={false} />)
+      expect(screen.getByText(/MODE UNAVAILABLE/i)).toBeTruthy()
+      expect(screen.queryByText(/PAPER MODE/i)).toBeNull()
+    })
+
+    it('PositionSizerCard preserves 0 lots when risk budget cannot afford 1 canonical lot (no 1-lot floor)', async () => {
+      const PositionSizerCard = (await import('../renderer/src/components/Cards/PositionSizerCard')).default
+      render(
+        <PositionSizerCard
+          data={{
+            symbol: 'NIFTY',
+            entry_price: 500,
+            stop_loss: 400,
+            capital: 100000,
+            max_risk_pct: 1.0, // ₹1,000 budget, ₹100 stop -> max 10 shares < 65 lot -> MUST be 0 lots
+            lot_size: 65,
+            is_fno: true,
+          }}
+        />
+      )
+      expect(screen.getByText('0 Contract Lot')).toBeTruthy()
+      expect(screen.getByText('0')).toBeTruthy()
     })
   })
 })

@@ -15,22 +15,29 @@ from engine.position_sizer import calculate_position_size
 
 
 def test_0dte_intraday_resolution(monkeypatch):
-    """Expiry day contracts must compute intraday fractional year, not 0 or 1-day floor."""
-    # 2026-11-03 at 14:30 IST -> 60 minutes remaining of 375 minutes in trading session
-    sample_now = datetime(2026, 11, 3, 14, 30, tzinfo=IST_ZONE)
-
+    """Expiry day contracts must compute intraday fractional year using effective-dated session close."""
     import config.constants
 
-    monkeypatch.setattr(config.constants, "now_ist", lambda: sample_now)
+    # 2026-11-03 (CAS Phase 1: derivative_close = 15:40 IST -> 385 mins total) at 14:30 IST -> 70 mins remaining
+    sample_now_nov = datetime(2026, 11, 3, 14, 30, tzinfo=IST_ZONE)
+    monkeypatch.setattr(config.constants, "now_ist", lambda: sample_now_nov)
 
-    t_0dte = _dte_years("2026-11-03")
-    assert t_0dte > 0.0
-    # Expected T = (60 / 375) / 365 = 0.16 / 365 ~ 0.000438
-    expected_t = (60.0 / 375.0) / 365.0
-    assert pytest.approx(t_0dte, rel=1e-3) == expected_t
+    t_0dte_nov = _dte_years("2026-11-03")
+    assert t_0dte_nov > 0.0
+    expected_t_nov = (70.0 / 385.0) / 365.0
+    assert pytest.approx(t_0dte_nov, rel=1e-3) == expected_t_nov
+
+    # 2026-12-08 (Post-Dec 7 CAS: expiring index closes 15:30 IST -> 375 mins total) at 14:30 IST -> 60 mins remaining
+    sample_now_dec = datetime(2026, 12, 8, 14, 30, tzinfo=IST_ZONE)
+    monkeypatch.setattr(config.constants, "now_ist", lambda: sample_now_dec)
+
+    t_0dte_dec = _dte_years("2026-12-08")
+    assert t_0dte_dec > 0.0
+    expected_t_dec = (60.0 / 375.0) / 365.0
+    assert pytest.approx(t_0dte_dec, rel=1e-3) == expected_t_dec
 
     # Expired contract must return 0.0
-    t_expired = _dte_years("2026-11-02")
+    t_expired = _dte_years("2026-12-07")
     assert t_expired == 0.0
 
 

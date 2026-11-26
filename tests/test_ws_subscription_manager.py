@@ -140,12 +140,12 @@ def test_parse_contract_expiry_and_is_contract_expired():
     # Cash equities never expire
     assert is_contract_expired("NSE:RELIANCE-EQ", ref_dt=ref_dt) is False
 
-    # 6. Expiry day session cutoff
-    # On expiry day before 15:30 IST -> active
+    # 6. Expiry day session cutoff (NSE CAS modalities: Oct 2026 closes at 15:40 IST)
+    # On expiry day before session close -> active
     ref_day_active = datetime(2026, 10, 19, 14, 0, tzinfo=IST)
     assert is_contract_expired("NSE:NIFTY26O1922900CE", ref_dt=ref_day_active) is False
-    # On expiry day after 15:30 IST -> expired
-    ref_day_closed = datetime(2026, 10, 19, 15, 35, tzinfo=IST)
+    # On expiry day after 15:40 IST close -> expired
+    ref_day_closed = datetime(2026, 10, 19, 15, 45, tzinfo=IST)
     assert is_contract_expired("NSE:NIFTY26O1922900CE", ref_dt=ref_day_closed) is True
 
 
@@ -272,3 +272,90 @@ def test_mcx_tender_auto_roll_resolution():
     grid_rolled = get_active_commodity_grid(ref_time=dt.datetime(2026, 5, 16, 10, 0, 0))
     assert grid_rolled
     assert not [s for s in grid_rolled if s.endswith(("CE", "PE"))]
+
+
+def test_mcx_option_expiry_cycle_and_is_expired():
+    """Verify MCX option expiry cycle resolves exact options expiry and identifies expired contracts."""
+    from datetime import date
+    from market.instruments import parse_derivative_contract, is_contract_expired
+
+    # Natural Gas 26NOV options expired on Monday, 23 Nov 2026 (prior to futures expiry)
+    p_opt = parse_derivative_contract("MCX:NATURALGAS26NOV290PE")
+    assert p_opt is not None
+    assert p_opt.expiry_date == date(2026, 11, 23)
+    assert p_opt.is_option is True
+
+    # On 24 Nov 2026, the 26NOV option is expired
+    assert is_contract_expired("MCX:NATURALGAS26NOV290PE", ref_dt=date(2026, 11, 24)) is True
+
+    # Natural Gas 26NOV futures expire on 25 Nov 2026
+    p_fut = parse_derivative_contract("MCX:NATURALGAS26NOVFUT")
+    assert p_fut is not None
+    assert p_fut.expiry_date == date(2026, 11, 25)
+    assert p_fut.is_future is True
+    # On 24 Nov 2026, the future is still unexpired
+    assert is_contract_expired("MCX:NATURALGAS26NOVFUT", ref_dt=date(2026, 11, 24)) is False
+
+
+def test_ws_subscription_manager_remove_invalid_symbols(tmp_path):
+    """Verify remove_invalid_symbols purges unlisted symbols from both dynamic & core sets and persists."""
+    from unittest.mock import patch
+    from market.ws_subscription_manager import WsSubscriptionManager
+
+    sub_file = tmp_path / "sub.json"
+    with patch("market.ws_subscription_manager._get_cache_path", return_value=sub_file):
+        mgr = WsSubscriptionManager(max_subscriptions=5000)
+        test_sym = "MCX:NATURALGAS26DECFUT"
+        mgr.add_subscriptions(["NSE:RELIANCE-EQ", test_sym])
+        assert test_sym in mgr.get_all_desired_subscriptions()
+
+        # Prune invalid symbol
+        mgr.remove_invalid_symbols([test_sym])
+        assert test_sym not in mgr.get_all_desired_subscriptions()
+
+        # Verify disk persistence reflected the purge
+        mgr_reloaded = WsSubscriptionManager(max_subscriptions=5000)
+        assert test_sym not in mgr_reloaded.get_all_desired_subscriptions()
+
+
+def test_fyers_socket_patch_send_message_suppression():
+    """Verify FyersDataSocket monkeypatch suppresses WebSocketConnectionClosedException."""
+    from fyers_apiv3.FyersWebsocket import data_ws
+    from websocket._exceptions import WebSocketConnectionClosedException
+
+    class MockClosedSocket:
+        def send(self, *args, **kwargs):
+            raise WebSocketConnectionClosedException("Connection is already closed.")
+
+    # Create dummy instance
+    dummy = data_ws.FyersDataSocket.__new__(data_ws.FyersDataSocket)
+    dummy.websocket_lock = MagicMock()
+    dummy.__enter__ = MagicMock()
+    dummy.__exit__ = MagicMock()
+    setattr(dummy, "_FyersDataSocket__ws_object", MockClosedSocket())
+
+    # Calling __send_message must NOT raise WebSocketConnectionClosedException
+    send_fn = getattr(dummy, "_FyersDataSocket__send_message")
+    send_fn("test_message")
+
+
+def test_auto_alert_tags_property():
+    """Verify AutoAlert.tags returns confluence factors from metrics."""
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-test-1",
+        alert_type="SMC_SWEEP",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Test",
+        summary="Test",
+        ltp=6800.0,
+        trigger_level=6800.0,
+        target_level=6900.0,
+        stop_loss=6750.0,
+        metrics={"confluence_factors": ["CVD Bullish Absorption", "VWAP Support"]},
+    )
+    assert alert.tags == ["CVD Bullish Absorption", "VWAP Support"]

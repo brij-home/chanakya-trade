@@ -245,10 +245,12 @@ def _to_ws_symbol(instrument: str) -> str:
 try:
     from market.ws_subscription_manager import (
         is_valid_ws_symbol,
-        CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS,
+        CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS,  # noqa: F401 - public backward-compat export
     )
 except Exception:
     from market.ws_subscription_manager import is_valid_ws_symbol
+
+    DEFAULT_SYMBOLS = []
 
 
 @dataclass
@@ -302,6 +304,7 @@ class WebSocketManager:
         self._callbacks: list[Callable] = []
         self._subscribed: set[str] = set()
         self._lock = threading.Lock()
+        self._sub_lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._dispatch_queue: queue.Queue[Optional[Tick]] = queue.Queue(maxsize=32768)
         self._dispatch_thread: Optional[threading.Thread] = None
@@ -453,16 +456,8 @@ class WebSocketManager:
 
         if self._connected:
             logger.info("WebSocket connected")
-            # Auto-subscribe to default symbols & restore manager subscriptions
-            try:
-                from market.ws_subscription_manager import get_ws_subscription_manager
-
-                get_ws_subscription_manager().on_ws_connected(self)
-            except Exception as e_sub:
-                logger.warning(f"[WebSocket] Error calling ws_subscription_manager: {e_sub}")
-                from config.discovery_policy import allows_context_symbol
-
-                self.subscribe([s for s in DEFAULT_SYMBOLS if allows_context_symbol(s)])
+            # Note: _on_connect() already invokes ws_subscription_manager.on_ws_connected(self);
+            # avoid double-subscribing the full 2,400+ grid concurrently on connect.
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 
@@ -571,6 +566,7 @@ class WebSocketManager:
         #     Dropping a valid symbol due to a transient cache miss is a worse failure than
         #     submitting an invalid one (the latter is caught by the broker, the former is silent data loss).
         verified_ws_symbols = []
+        dropped_invalids = []
         for s in ws_symbols:
             # Bypass check for test mock symbols in unit tests
             if s.startswith(("NSE:EXTRA_", "NSE:PERSIST_")):
@@ -605,6 +601,7 @@ class WebSocketManager:
                             f"[WebSocket] Proactively dropped invalid symbol '{s}' before broker dispatch"
                             " (master loaded OK but symbol absent from official exchange master)."
                         )
+                        dropped_invalids.append(s)
                 else:
                     # DEGRADED: master unavailable — pass through rather than silently drop valid symbols
                     verified_ws_symbols.append(s)
@@ -614,45 +611,153 @@ class WebSocketManager:
                 )
                 verified_ws_symbols.append(s)
 
-        new_symbols = [s for s in verified_ws_symbols if s not in self._subscribed]
+        if dropped_invalids:
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
 
-        if not new_symbols:
-            return
+                get_ws_subscription_manager().remove_invalid_symbols(dropped_invalids)
+            except Exception as _e_prune:
+                logger.debug(f"[WebSocket] Failed pruning dropped invalids: {_e_prune}")
 
-        try:
-            CHUNK_SIZE = 50
-            for i in range(0, len(new_symbols), CHUNK_SIZE):
-                if not self._ws or not self._connected:
-                    logger.debug("[WebSocket] Disconnected during batch subscription dispatch")
-                    break
-                batch = new_symbols[i : i + CHUNK_SIZE]
-                self._ws.subscribe(batch)
-                self._subscribed.update(batch)
-                if i + CHUNK_SIZE < len(new_symbols):
-                    time.sleep(0.05)
-            logger.info(
-                f"Subscribed to {len(new_symbols)} symbols (batched in chunks of {CHUNK_SIZE})"
-            )
-            if record_in_manager:
-                try:
-                    from market.ws_subscription_manager import get_ws_subscription_manager
+        sub_lock = getattr(self, "_sub_lock", None)
+        if sub_lock is None:
+            sub_lock = self._lock
+        with sub_lock:
+            sdk_sym_tok, sdk_chan_lst, sdk_tracked_syms = self._sanitize_sdk_subscription_state()
+            with self._lock:
+                # Re-sync symbols already registered inside SDK symbol_token without duplicate subscribe() calls
+                already_in_sdk = [s for s in verified_ws_symbols if s in sdk_tracked_syms]
+                if already_in_sdk:
+                    self._subscribed.update(already_in_sdk)
+                new_symbols = [
+                    s
+                    for s in verified_ws_symbols
+                    if s not in self._subscribed and s not in sdk_tracked_syms
+                ]
+                # Deduplicate within the incoming batch while preserving order
+                new_symbols = list(dict.fromkeys(new_symbols))
+                effective_used = max(len(self._subscribed), sdk_sym_tok, sdk_chan_lst)
+                # Fyers Data Socket enforces strictly < 5,000 total subscribed symbols (code -99)
+                remaining_cap = max(0, 4999 - effective_used)
+                if len(new_symbols) > remaining_cap:
+                    logger.warning(
+                        f"[WebSocket] Capping subscription batch from {len(new_symbols)} to {remaining_cap} "
+                        f"(effective_used={effective_used}, Fyers limit=<5000)"
+                    )
+                    new_symbols = new_symbols[:remaining_cap]
 
-                    get_ws_subscription_manager().add_subscriptions(new_symbols)
-                except Exception as exc:
-                    logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
-        except Exception as e:
-            logger.error(f"Subscribe failed: {e}", exc_info=True)
+            if not new_symbols:
+                return
+
+            try:
+                CHUNK_SIZE = 400
+                subscribed_any: list[str] = []
+                for i in range(0, len(new_symbols), CHUNK_SIZE):
+                    if not self._ws or not self._connected:
+                        logger.debug("[WebSocket] Disconnected during batch subscription dispatch")
+                        break
+                    sdk_sym_tok, sdk_chan_lst, sdk_tracked_syms = (
+                        self._sanitize_sdk_subscription_state()
+                    )
+                    with self._lock:
+                        effective_used = max(len(self._subscribed), sdk_sym_tok, sdk_chan_lst)
+                        chunk_cap = max(0, 4999 - effective_used)
+                        batch = [
+                            s
+                            for s in new_symbols[i : i + CHUNK_SIZE]
+                            if s not in self._subscribed and s not in sdk_tracked_syms
+                        ][:chunk_cap]
+                    if not batch:
+                        if chunk_cap <= 0:
+                            break
+                        continue
+                    self._ws.subscribe(batch)
+                    with self._lock:
+                        self._subscribed.update(batch)
+                    subscribed_any.extend(batch)
+                    if i + CHUNK_SIZE < len(new_symbols):
+                        time.sleep(0.05)
+                logger.info(
+                    f"Subscribed to {len(subscribed_any)} symbols (batched in chunks of {CHUNK_SIZE})"
+                )
+            except Exception as e:
+                logger.error(f"Subscribe failed: {e}", exc_info=True)
+                return
+
+        if record_in_manager and subscribed_any:
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
+
+                get_ws_subscription_manager().add_subscriptions(subscribed_any)
+            except Exception as exc:
+                logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
+
+    def _sanitize_sdk_subscription_state(self) -> tuple[int, int, set[str]]:
+        """
+        Repair FyersDataSocket internal list/dict drift before subscribe/unsubscribe calls.
+        `fyers_apiv3.data_ws.FyersDataSocket` appends HSM tokens to `scrips_per_channel[ch]`
+        without deduplication (`+= symbols`) and checks `len(scrips_per_channel[ch]) > 5000`
+        before both `subscribe` and `unsubscribe` (`code: -99`). Deduplicating against
+        `symbol_token` prevents permanent 5254 > 5000 subscription lockout.
+        """
+        ws = getattr(self, "_ws", None)
+        if ws is None:
+            return 0, 0, set()
+
+        sym_tok = getattr(ws, "symbol_token", None)
+        sym_tok_dict = sym_tok if isinstance(sym_tok, dict) else {}
+        tracked_syms = set(str(v) for v in sym_tok_dict.values() if v)
+
+        chan_map = getattr(ws, "scrips_per_channel", None)
+        if isinstance(chan_map, dict):
+            valid_toks = set(sym_tok_dict.keys())
+            for ch, lst in list(chan_map.items()):
+                if isinstance(lst, list):
+                    deduped = list(dict.fromkeys(lst))
+                    if valid_toks and ch == 11:
+                        # Keep only tokens still tracked in symbol_token (preserves legitimate tokens)
+                        cleaned = [t for t in deduped if t in valid_toks]
+                        if not cleaned and sym_tok_dict:
+                            cleaned = list(sym_tok_dict.keys())
+                        chan_map[ch] = cleaned
+                    else:
+                        chan_map[ch] = deduped
+            chan_lst = chan_map.get(11)
+            sdk_chan_len = len(chan_lst) if isinstance(chan_lst, (list, set, tuple)) else 0
+        else:
+            sdk_chan_len = 0
+
+        return len(sym_tok_dict), sdk_chan_len, tracked_syms
 
     def unsubscribe(self, symbols: list[str]) -> None:
-        """Unsubscribe from symbols."""
+        """Unsubscribe from symbols and immediately release SDK symbol/channel capacity."""
         if not self._ws or not self._connected:
             return
         ws_symbols = [_to_ws_symbol(s) for s in symbols]
-        try:
-            self._ws.unsubscribe(ws_symbols)
-            self._subscribed -= set(ws_symbols)
-        except Exception as e_suppressed:
-            logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
+        ws_set = set(ws_symbols)
+        sub_lock = getattr(self, "_sub_lock", None) or self._lock
+        with sub_lock:
+            try:
+                self._sanitize_sdk_subscription_state()
+                # FyersDataSocket.unsubscribe() checks `scrips_count[11]`, which its own
+                # subscribe() overwrites with only the final batch; ensure all active tokens are eligible.
+                sym_tok = getattr(self._ws, "symbol_token", None)
+                scrips_count = getattr(self._ws, "scrips_count", None)
+                if isinstance(sym_tok, dict) and isinstance(scrips_count, dict):
+                    scrips_count[11] = list(sym_tok.keys())
+                self._ws.unsubscribe(ws_symbols)
+                # Proactively prune SDK symbol_token & scrips_per_channel so freed slots recover synchronously
+                if isinstance(sym_tok, dict):
+                    removed_toks = {tok for tok, sym in list(sym_tok.items()) if sym in ws_set}
+                    for tok in removed_toks:
+                        sym_tok.pop(tok, None)
+                    chan_map = getattr(self._ws, "scrips_per_channel", None)
+                    if isinstance(chan_map, dict) and isinstance(chan_map.get(11), list):
+                        chan_map[11] = [t for t in chan_map[11] if t not in removed_toks]
+                with self._lock:
+                    self._subscribed -= ws_set
+            except Exception as e_suppressed:
+                logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_tick(self, instrument: str, max_age_seconds: Optional[float] = None) -> Optional[Tick]:
         """
@@ -765,6 +870,18 @@ class WebSocketManager:
     def _on_connect(self) -> None:
         self._connected = True
         self._last_packet_at = time.time()
+        cur_ws_id = id(self._ws) if self._ws is not None else None
+        prev_ws_id = getattr(self, "_connected_ws_id", None)
+        sdk_has_subs = bool(
+            (getattr(self._ws, "symbol_token", None) or {})
+            or ((getattr(self._ws, "scrips_per_channel", None) or {}).get(11) or [])
+        )
+        if cur_ws_id is not None and cur_ws_id == prev_ws_id and sdk_has_subs:
+            logger.info(
+                f"WebSocket: repeat OnOpen on same socket instance ({len(self._subscribed)} tracked); skipping duplicate re-subscribe."
+            )
+            return
+        self._connected_ws_id = cur_ws_id
         with self._lock:
             self._subscribed.clear()
         logger.info("WebSocket: connected")

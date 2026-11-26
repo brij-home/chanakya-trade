@@ -91,6 +91,21 @@ def is_mcx_golden_hours_window(dt: Optional[datetime] = None) -> bool:
     return dtime(17, 30) <= t <= dtime(22, 30)
 
 
+def is_mcx_active_session_window(dt: Optional[datetime] = None) -> bool:
+    """
+    Returns True during the full active international commodity trading window (15:30–23:30 IST).
+    Encompasses the London/European open (15:30–17:30) and the US Golden Hours (17:30–22:30/23:30),
+    ensuring trend pullbacks and European session volatility surges are active.
+    """
+    now = dt or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return dtime(15, 30) <= t <= dtime(23, 30)
+
+
 def is_mcx_midday_lull_window(dt: Optional[datetime] = None) -> bool:
     """
     Returns True during the MCX European pre-market / Asian lull (11:30–15:30 IST).

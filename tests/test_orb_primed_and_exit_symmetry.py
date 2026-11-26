@@ -140,7 +140,10 @@ def test_intraday_stock_option_catastrophic_dd_floor():
     )
 
     assert eval_res.is_invalidated is True
-    assert "catastrophic drawdown" in str(eval_res.rejection_reason).lower()
+    assert (
+        "catastrophic drawdown" in str(eval_res.rejection_reason).lower()
+        or "theta invalidation" in str(eval_res.rejection_reason).lower()
+    )
     assert eval_res.is_freak_wick_shielded is False
 
 

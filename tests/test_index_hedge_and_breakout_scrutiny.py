@@ -31,7 +31,7 @@ class DummyContract:
         self.oi = oi
         self.pchange = 12.0
         self.symbol = f"BANKNIFTY26SEP{int(strike)}{opt_type}"
-        self.expiry = "2026-11-26"
+        self.expiry = (datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d")
 
 
 def _make_dummy_ohlcv(

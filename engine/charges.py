@@ -12,12 +12,12 @@ Used identically across:
   - Backtesting engines (vectorized & event-driven)
   - Post-trade reconciliation & P&L accounting
 
-Statutory Rates (Effective 2024-2026 Union Budget / SEBI schedules):
+Statutory Rates (Effective 2024–2026 Finance Act / SEBI schedules; Apr 1, 2026 STT revision):
   - STT:
       • Equity Delivery : 0.1% on Buy and Sell turnover
       • Equity Intraday : 0.025% on Sell turnover
-      • Futures         : 0.02% on Sell turnover
-      • Options         : 0.1% (or 0.125% for exercised contracts) on Sell premium turnover
+      • Futures         : 0.05% on Sell turnover (0.02% prior to 2026-04-01)
+      • Options         : 0.15% on Sell premium turnover & exercise intrinsic (0.1%/0.125% prior to 2026-04-01)
   - Exchange Turnover Charges:
       • NSE Cash        : 0.00297% (₹297 / crore)
       • NSE Futures     : 0.00173% (₹173 / crore)

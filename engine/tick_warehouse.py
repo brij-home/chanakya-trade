@@ -140,7 +140,13 @@ class TickWarehouse:
         auto_flush_threshold: int = 500,
         retention_days: int = 30,
     ) -> None:
-        self.base_dir = Path(base_dir or DEFAULT_WAREHOUSE_DIR)
+        if base_dir is not None:
+            self.base_dir = Path(base_dir)
+        elif os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            test_dir = Path(os.environ.get("TRADING_PLATFORM_DATA", ".pytest_trading_platform"))
+            self.base_dir = test_dir / "tick_warehouse"
+        else:
+            self.base_dir = Path(DEFAULT_WAREHOUSE_DIR)
         self.auto_flush_threshold = max(10, auto_flush_threshold)
         self.retention_days = max(1, retention_days)
 

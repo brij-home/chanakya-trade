@@ -11,13 +11,10 @@ suppressed during active market sessions:
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock, patch
 import pandas as pd
-import pytest
 
 from config.discovery_policy import (
-    DiscoveryPolicy,
     get_discovery_policy,
     set_discovery_policy,
 )
@@ -80,9 +77,31 @@ def test_naturalgas_confirmed_breakout_allows_momentum_rsi(monkeypatch):
 
     dates = pd.date_range("2026-11-24 18:00", periods=25, freq="5min")
     closes = [
-        335.0, 335.0, 335.0, 335.0, 335.0, 335.0, 335.0, 335.0, 335.0, 335.0,
-        336.0, 335.5, 336.5, 336.0, 337.0, 336.5, 337.5, 337.0, 338.0, 335.5,
-        338.5, 337.5, 341.0, 343.0, 345.0
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        335.0,
+        336.0,
+        335.5,
+        336.5,
+        336.0,
+        337.0,
+        336.5,
+        337.5,
+        337.0,
+        338.0,
+        335.5,
+        338.5,
+        337.5,
+        341.0,
+        343.0,
+        345.0,
     ]
     opens = [c - 0.5 for c in closes]
     highs = [c + 0.2 for c in closes]
@@ -107,7 +126,9 @@ def test_naturalgas_confirmed_breakout_allows_momentum_rsi(monkeypatch):
         with patch("market.history.get_ohlcv", return_value=df_5m):
             with patch("market.quotes.get_ltp", return_value=345.0):
                 alerts = detect_commodity_breakouts(universe=["NATURALGAS"])
-                assert len(alerts) >= 1, "Confirmed NatGas breakout must NOT be suppressed by rigid 68.0 RSI cap!"
+                assert len(alerts) >= 1, (
+                    "Confirmed NatGas breakout must NOT be suppressed by rigid 68.0 RSI cap!"
+                )
                 assert alerts[0].direction == "BULLISH"
 
 
@@ -129,10 +150,31 @@ def test_silver_confirmed_breakdown_not_hard_vetoed_by_soft_dxy(monkeypatch):
 
     dates = pd.date_range("2026-11-24 18:00", periods=25, freq="5min")
     closes = [
-        148000.0, 148000.0, 148000.0, 148000.0, 148000.0, 148000.0, 148000.0,
-        148000.0, 148000.0, 148000.0, 147800.0, 148400.0, 147500.0, 147600.0,
-        147200.0, 147400.0, 147000.0, 147300.0, 146600.0, 146800.0, 146300.0,
-        146100.0, 145900.0, 145700.0, 145500.0
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        148000.0,
+        147800.0,
+        148400.0,
+        147500.0,
+        147600.0,
+        147200.0,
+        147400.0,
+        147000.0,
+        147300.0,
+        146600.0,
+        146800.0,
+        146300.0,
+        146100.0,
+        145900.0,
+        145700.0,
+        145500.0,
     ]
     opens = [c + 150.0 for c in closes]
     highs = [c + 200.0 for c in closes]
@@ -167,14 +209,18 @@ def test_silver_confirmed_breakdown_not_hard_vetoed_by_soft_dxy(monkeypatch):
         with patch("market.history.get_ohlcv", return_value=df_5m):
             with patch("market.quotes.get_ltp", return_value=145500.0):
                 alerts = detect_commodity_breakouts(universe=["SILVER"])
-                assert len(alerts) >= 1, "Confirmed Silver breakdown must NOT be dropped by counter-trend DXY tailwind!"
+                assert len(alerts) >= 1, (
+                    "Confirmed Silver breakdown must NOT be dropped by counter-trend DXY tailwind!"
+                )
                 assert alerts[0].direction == "BEARISH"
                 # Assert mindful friction was recorded
                 tags = getattr(alerts[0], "tags", [])
                 assert any("Macro Counter-Trend Friction" in str(t) for t in tags)
                 # Assert mini alternative is present
                 plan = getattr(alerts[0], "actionable_plan", {}) or {}
-                assert "mini_alternative" in plan, "Silver alert must provide mini sizing alternative"
+                assert "mini_alternative" in plan, (
+                    "Silver alert must provide mini sizing alternative"
+                )
                 assert plan["mini_alternative"]["symbol"] == "MCX:SILVERM"
                 assert plan["mini_alternative"]["micro_symbol"] == "MCX:SILMIC"
 
@@ -214,9 +260,11 @@ def test_natgasmini_pre_tender_auto_roll():
 
     # Before tender window (e.g. 20 Nov)
     pre_tender_dt = dt.datetime(2026, 11, 20, 18, 0)
-    assert _resolve_commodity_contract("NATGASMINI", ref_time=pre_tender_dt) == "MCX:NATGASMINI26NOVFUT"
+    assert (
+        _resolve_commodity_contract("NATGASMINI", ref_time=pre_tender_dt)
+        == "MCX:NATGASMINI26NOVFUT"
+    )
 
     # Inside tender window (e.g. 24 Nov)
     tender_dt = dt.datetime(2026, 11, 24, 18, 0)
     assert _resolve_commodity_contract("NATGASMINI", ref_time=tender_dt) == "MCX:NATGASMINI26DECFUT"
-

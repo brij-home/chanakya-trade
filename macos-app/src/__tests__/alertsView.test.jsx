@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import AlertsView from '../renderer/src/components/Views/AlertsView'
 import { resolveHorizonAndETA } from '../renderer/src/components/Views/alerts/alertHelpers'
 
@@ -248,7 +248,10 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(screen.getByText(/Today's Session/i)).toBeTruthy()
     })
 
-    fireEvent.click(screen.getByText(/Today's Session/i))
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Today's Session/i))
+      await Promise.resolve()
+    })
 
     expect(screen.getByText('NIFTY')).toBeTruthy()
   })
@@ -260,7 +263,10 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(screen.getByText(/Archived & History/i)).toBeTruthy()
     })
 
-    fireEvent.click(screen.getByText(/Archived & History/i))
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Archived & History/i))
+      await Promise.resolve()
+    })
 
     expect(screen.getAllByText('TCS').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('INFY').length).toBeGreaterThanOrEqual(1)
@@ -351,17 +357,20 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(screen.getByText('NIFTY')).toBeTruthy()
     })
 
-    window.dispatchEvent(
-      new CustomEvent('new-market-alert', {
-        detail: {
-          alert: {
-            ...sampleAutoAlerts[0],
-            ltp: 185.0,
-            headline: 'NIFTY 24500 CE [UPDATED] Gamma Blast Breakout',
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('new-market-alert', {
+          detail: {
+            alert: {
+              ...sampleAutoAlerts[0],
+              ltp: 185.0,
+              headline: 'NIFTY 24500 CE [UPDATED] Gamma Blast Breakout',
+            },
           },
-        },
-      })
-    )
+        })
+      )
+      await Promise.resolve()
+    })
 
     await waitFor(() => {
       expect(screen.getByText(/\[UPDATED\]/i)).toBeTruthy()

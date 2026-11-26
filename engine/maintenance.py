@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -93,7 +94,7 @@ class MaintenanceReport:
 
 
 def _file_or_dir_size_bytes(path: Path) -> int:
-    """Return total bytes for a file or directory tree."""
+    """Return total bytes for a file or directory tree using fast scandir metadata."""
     try:
         if not path.exists():
             return 0
@@ -102,30 +103,36 @@ def _file_or_dir_size_bytes(path: Path) -> int:
     except OSError:
         return 0
     total = 0
-    try:
-        for root, _, files in os.walk(path):
-            for f in files:
-                try:
-                    total += Path(root, f).stat().st_size
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-    except OSError as e_os:
-        logger.debug(f"[engine.maintenance] Storage walk OSError suppressed: {e_os}")
+    stack = [os.fspath(path)]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError as e_entry_stat:
+                        logger.debug(
+                            f"[engine.maintenance] Storage entry stat OSError suppressed: {e_entry_stat}"
+                        )
+        except OSError as e_os:
+            logger.debug(f"[engine.maintenance] Storage walk OSError suppressed: {e_os}")
     return total
 
 
+_STORAGE_CACHE_TTL_SECONDS = 300.0
+_storage_lock = threading.Lock()
+_storage_refresh_in_flight = False
 _last_storage_breakdown: Optional[tuple[float, StorageBreakdown]] = None
 
 
-def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
-    """Analyze current storage allocation across tiers and SSD free space with 60s caching."""
+def _compute_storage_breakdown_sync() -> StorageBreakdown:
+    """Synchronously compute storage metrics across all tiers."""
     global _last_storage_breakdown
     now = time.time()
-    if not force and _last_storage_breakdown and (now - _last_storage_breakdown[0] < 60.0):
-        return _last_storage_breakdown[1]
-
     root = app_data_dir()
 
     # Business files
@@ -141,10 +148,16 @@ def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
     b_bytes = sum(_file_or_dir_size_bytes(f) for f in business_files)
 
     # Market data
+    try:
+        from engine.eod_store import _get_db_path as _get_eod_db_path
+
+        _eod_db_path = _get_eod_db_path()
+    except Exception:
+        _eod_db_path = Path("data/eod_bars.db")
     m_bytes = (
         _file_or_dir_size_bytes(root / "market_data.db")
         + _file_or_dir_size_bytes(root / "persona_track_records.db")
-        + _file_or_dir_size_bytes(Path("data/eod_bars.db"))
+        + _file_or_dir_size_bytes(_eod_db_path)
     )
 
     # Analysis Cache
@@ -158,7 +171,25 @@ def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
     # Telemetry and logs
     t_bytes = _file_or_dir_size_bytes(root / "telemetry")
 
-    total_bytes = _file_or_dir_size_bytes(root)
+    # Compute remaining root entries without re-walking cache/ and telemetry/ twice.
+    total_bytes = dc_bytes + t_bytes
+    try:
+        skip_dirs = {"cache", "telemetry"}
+        with os.scandir(root) as it:
+            for entry in it:
+                if entry.name in skip_dirs:
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        total_bytes += _file_or_dir_size_bytes(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                except OSError as e_root_stat:
+                    logger.debug(
+                        f"[engine.maintenance] Root storage entry stat OSError suppressed: {e_root_stat}"
+                    )
+    except OSError as e_os:
+        logger.debug(f"[engine.maintenance] Root storage walk OSError suppressed: {e_os}")
 
     # Free SSD space
     try:
@@ -184,8 +215,68 @@ def get_storage_breakdown(force: bool = False) -> StorageBreakdown:
         total_ssd_gb=total_ssd_gb,
         wal_mb=wal_bytes / (1024 * 1024),
     )
-    _last_storage_breakdown = (now, res)
+    with _storage_lock:
+        _last_storage_breakdown = (now, res)
     return res
+
+
+def _trigger_storage_refresh_bg() -> None:
+    """Spawn a single-flight background thread to refresh storage breakdown."""
+    global _storage_refresh_in_flight
+    with _storage_lock:
+        if _storage_refresh_in_flight:
+            return
+        _storage_refresh_in_flight = True
+
+    def _worker() -> None:
+        global _storage_refresh_in_flight
+        try:
+            _compute_storage_breakdown_sync()
+        except Exception as exc:
+            logger.debug(f"[engine.maintenance] Background storage breakdown note: {exc}")
+        finally:
+            with _storage_lock:
+                _storage_refresh_in_flight = False
+
+    threading.Thread(target=_worker, daemon=True, name="storage-breakdown-bg").start()
+
+
+def get_storage_breakdown(force: bool = False, stale_ok: bool = False) -> StorageBreakdown:
+    """Analyze current storage allocation across tiers and SSD free space with 300s caching."""
+    now = time.time()
+    with _storage_lock:
+        cached = _last_storage_breakdown
+    if not force and cached:
+        cached_ts, cached_res = cached
+        if (now - cached_ts) < _STORAGE_CACHE_TTL_SECONDS:
+            return cached_res
+        if stale_ok:
+            _trigger_storage_refresh_bg()
+            return cached_res
+
+    if stale_ok and not force:
+        _trigger_storage_refresh_bg()
+        root = app_data_dir()
+        try:
+            usage = shutil.disk_usage(root)
+            free_ssd_gb = usage.free / (1024**3)
+            total_ssd_gb = usage.total / (1024**3)
+        except Exception:
+            free_ssd_gb = 0.0
+            total_ssd_gb = 0.0
+        return StorageBreakdown(
+            business_data_mb=0.0,
+            market_data_mb=0.0,
+            analysis_cache_mb=0.0,
+            disk_cache_mb=0.0,
+            telemetry_mb=0.0,
+            total_app_data_mb=0.0,
+            free_ssd_gb=free_ssd_gb,
+            total_ssd_gb=total_ssd_gb,
+            wal_mb=0.0,
+        )
+
+    return _compute_storage_breakdown_sync()
 
 
 def run_maintenance_purge(
@@ -358,6 +449,12 @@ def run_maintenance_purge(
         logger.warning(f"Error pruning temporary files: {e}")
 
     # 5. Checkpoint WAL logs for SQLite databases with active TRUNCATE
+    try:
+        from engine.eod_store import _get_db_path as _get_eod_db_path
+
+        _eod_db_path = _get_eod_db_path()
+    except Exception:
+        _eod_db_path = Path("data/eod_bars.db")
     databases = [
         app_data_path("orders.db"),
         app_data_path("audit.db"),
@@ -368,7 +465,7 @@ def run_maintenance_purge(
         app_data_path("chanakya_ledger.db"),
         app_data_path("risk_limits.db"),
         app_data_path("persona_track_records.db"),
-        Path("data/eod_bars.db"),
+        _eod_db_path,
     ]
 
     for db_file in databases:

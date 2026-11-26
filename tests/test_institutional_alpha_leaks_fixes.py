@@ -228,11 +228,11 @@ def test_preopen_stock_catalyst_detector_bearish():
 
 
 def test_preopen_stock_catalyst_mismatched_rrg_vetoed():
-    """Verify that a stock gapping up when its sector is bearish (or vice versa) is vetoed."""
+    """Verify that a modest stock gap (<2% decoupler floor) opposing its bearish sector is vetoed."""
     alert = detect_preopen_stock_catalyst(
         symbol="WEAK_STOCK",
-        preopen_price=105.0,
-        prev_close=100.0,  # +5% gap up, but sector is BEARISH
+        preopen_price=101.5,
+        prev_close=100.0,  # +1.5% modest gap up, opposing BEARISH sector -> vetoed
         direction_bias="BEARISH",
         sector_name="REALTY",
         rrg_quadrant="LAGGING",
@@ -295,6 +295,7 @@ def test_execute_order_intent_allows_override_on_double_confirmation(tmp_path, m
     risk_limits.reset_all()
 
     monkeypatch.setenv("MAX_DAILY_LOSS", "5000.0")
+    monkeypatch.setattr("engine.paper.PaperBroker._ltp", lambda self, sym: 3000.0)
     order = preview_order_intent(
         symbol="TCS", side="BUY", quantity=1, price=3000.0, idempotency_key="IDEMP-ADV-1"
     )
@@ -321,13 +322,16 @@ def test_option_resolver_prioritizes_delta_sweet_spot():
     # 1. 24200 CE (OTM, delta 0.28) -> outside sweet spot
     # 2. 24000 CE (ATM, delta 0.49) -> in sweet spot [0.40 - 0.55]
     # 3. 23800 CE (ITM, delta 0.72) -> deep ITM
+    from datetime import timedelta
+
+    fut_exp = (datetime.now(IST) + timedelta(days=20)).strftime("%Y-%m-%d")
     contracts = [
         OptionsContract(
-            symbol="NIFTY26NOV24200CE",
+            symbol="NIFTY26DEC24200CE",
             underlying="NIFTY",
             strike=24200.0,
             option_type="CE",
-            expiry="2026-11-26",
+            expiry=fut_exp,
             last_price=80.0,
             oi=100000,
             oi_change=5000,
@@ -337,11 +341,11 @@ def test_option_resolver_prioritizes_delta_sweet_spot():
             delta=0.28,
         ),
         OptionsContract(
-            symbol="NIFTY26NOV24000CE",
+            symbol="NIFTY26DEC24000CE",
             underlying="NIFTY",
             strike=24000.0,
             option_type="CE",
-            expiry="2026-11-26",
+            expiry=fut_exp,
             last_price=160.0,
             oi=150000,
             oi_change=8000,
@@ -351,11 +355,11 @@ def test_option_resolver_prioritizes_delta_sweet_spot():
             delta=0.49,
         ),
         OptionsContract(
-            symbol="NIFTY26NOV23800CE",
+            symbol="NIFTY26DEC23800CE",
             underlying="NIFTY",
             strike=23800.0,
             option_type="CE",
-            expiry="2026-11-26",
+            expiry=fut_exp,
             last_price=270.0,
             oi=80000,
             oi_change=2000,
@@ -366,14 +370,20 @@ def test_option_resolver_prioritizes_delta_sweet_spot():
         ),
     ]
 
-    plan = resolve_option_contract(
-        symbol="NIFTY",
-        spot=24000.0,
-        direction="BULLISH",
-        strike_tier="ATM",
-        contracts_override=contracts,
-        require_listed_contract=True,
+    mock_active = MagicMock(
+        is_valid=True,
+        rejection_reason=None,
+        contract=MagicMock(symbol="NSE:NIFTY26DEC24000CE", expiry=fut_exp, lot_size=75),
     )
+    with patch("market.contract_selection.resolve_active_contract", return_value=mock_active):
+        plan = resolve_option_contract(
+            symbol="NIFTY",
+            spot=24000.0,
+            direction="BULLISH",
+            strike_tier="ATM",
+            contracts_override=contracts,
+            require_listed_contract=True,
+        )
 
     assert plan is not None
     assert plan.strike == 24000.0

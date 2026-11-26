@@ -165,13 +165,22 @@ def test_defined_risk_spread_construction_for_hedged_mandate():
     assert spread.max_profit > 0
 
 
-def test_trend_day_adaptive_time_stop_bypass():
+def test_trend_day_adaptive_time_stop_bypass(monkeypatch):
     """Verify that on confirmed trend days with intact VWAP structure, time-stop is bypassed."""
+    from datetime import datetime as real_datetime
+    import engine.alert_evaluator as alert_eval_mod
     from engine.alert_evaluator import evaluate_alert_targets_and_trailing
 
-    now = datetime.now(IST)
+    fixed_now = real_datetime(2026, 10, 8, 11, 30, tzinfo=IST)
+
+    class _FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(alert_eval_mod, "datetime", _FixedDateTime)
     # Set created_at 22 minutes ago so elapsed_mins is 22.0
-    created_time = (now - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
+    created_time = (fixed_now - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
     alert = AutoAlert(
         alert_id="aa-index-put-setup-nifty-pe-22450-20261008",
         alert_type="INDEX_PUT_SETUP",

@@ -244,14 +244,33 @@ def test_settlement_invalidation_permitted_post_market(clean_engine, monkeypatch
 
 def test_scan_post_market_digest_runs_only_swing_detectors(clean_engine):
     """scan_post_market_digest() runs precursors, asymmetric opportunities, and squeezes; skips options & circuits."""
-    with patch.object(clean_engine, "scan_precursor_radars", return_value=[]) as m_prec:
-        with patch.object(clean_engine, "scan_asymmetric_opportunities", return_value=[]) as m_asym:
-            with patch.object(clean_engine, "scan_squeeze_breakouts", return_value=[]) as m_sqz:
-                with patch.object(clean_engine, "scan_gamma_blasts", return_value=[]) as m_gamma:
-                    with patch.object(clean_engine, "scan_circuits", return_value=[]) as m_circ:
-                        clean_engine.scan_post_market_digest()
-                        m_prec.assert_called_once()
-                        m_asym.assert_called_once()
-                        m_sqz.assert_called_once()
-                        m_gamma.assert_not_called()
-                        m_circ.assert_not_called()
+    with patch.object(clean_engine, "scan_swing_inflections", return_value=[]):
+        with patch.object(clean_engine, "scan_fno_stock_swing_setups", return_value=[]):
+            with patch.object(clean_engine, "scan_precursor_radars", return_value=[]) as m_prec:
+                with patch.object(
+                    clean_engine, "scan_asymmetric_opportunities", return_value=[]
+                ) as m_asym:
+                    with patch.object(
+                        clean_engine, "scan_squeeze_breakouts", return_value=[]
+                    ) as m_sqz:
+                        with patch.object(
+                            clean_engine, "scan_pre_inflection_dryup", return_value=[]
+                        ):
+                            with patch.object(
+                                clean_engine, "scan_incubation_triggers", return_value=[]
+                            ):
+                                with patch.object(
+                                    clean_engine, "scan_multibagger_compounders", return_value=[]
+                                ):
+                                    with patch.object(
+                                        clean_engine, "scan_gamma_blasts", return_value=[]
+                                    ) as m_gamma:
+                                        with patch.object(
+                                            clean_engine, "scan_circuits", return_value=[]
+                                        ) as m_circ:
+                                            clean_engine.scan_post_market_digest()
+                                            m_prec.assert_called_once()
+                                            m_asym.assert_called_once()
+                                            m_sqz.assert_called_once()
+                                            m_gamma.assert_not_called()
+                                            m_circ.assert_not_called()

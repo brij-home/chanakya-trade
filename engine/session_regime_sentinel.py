@@ -86,8 +86,10 @@ def calculate_cpr(
         return CPRMetrics(0.0, 0.0, 0.0, 0.0, 0.0, "AVERAGE")
 
     pivot = round((high + low + close) / 3.0, 2)
-    bc = round((high + low) / 2.0, 2)
-    tc = round((pivot - bc) + pivot, 2)
+    raw_bc = (high + low) / 2.0
+    raw_tc = (pivot - raw_bc) + pivot
+    bc = round(min(raw_bc, raw_tc), 2)
+    tc = round(max(raw_bc, raw_tc), 2)
 
     width_pts = round(abs(tc - bc), 2)
     width_pct = round((width_pts / pivot) * 100.0, 3) if pivot > 0 else 0.0

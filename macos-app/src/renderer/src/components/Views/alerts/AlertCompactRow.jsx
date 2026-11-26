@@ -61,6 +61,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     liveReturn,
     stagePill,
     isTimeStop,
+    isScratchDirective,
     isSLHit,
     isExpired,
     isInvalidated,
@@ -599,9 +600,13 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
                 })
               }
             }}
-            className="btn btn-xs text-[10px] px-2.5 py-0.5 font-black flex-shrink-0 text-slate-950 bg-emerald-500 hover:bg-emerald-400 border border-emerald-400/80 shadow-sm transition-all rounded"
-            title="1-Click Trade: Open pre-populated Order Ticket"
-          >⚡ Trade</button>
+            className={`btn btn-xs text-[10px] px-2.5 py-0.5 font-black flex-shrink-0 transition-all rounded shadow-sm ${
+              isScratchDirective
+                ? 'text-slate-950 bg-amber-500 hover:bg-amber-400 border border-amber-400/80 animate-pulse'
+                : 'text-slate-950 bg-emerald-500 hover:bg-emerald-400 border border-emerald-400/80'
+            }`}
+            title={isScratchDirective ? 'Velocity Stagnation Scratch: Close / square off position near CMP' : '1-Click Trade: Open pre-populated Order Ticket'}
+          >{isScratchDirective ? '⏱️ Scratch Exit' : '⚡ Trade'}</button>
 
           {onDismiss && (
             <button

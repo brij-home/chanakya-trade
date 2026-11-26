@@ -17,14 +17,20 @@ import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 # Registered cache purge callbacks
 _trim_callbacks: List[Callable[[], int]] = []
 _callbacks_lock = threading.Lock()
+_mem_status_lock = threading.Lock()
+_mem_status_refresh_lock = threading.Lock()
+_MEM_STATUS_TTL_SEC = 15.0
+_mem_status_cache: tuple[float, Optional["MemoryStatus"]] = (0.0, None)
+_cached_proc = None
 
 
 @dataclass
@@ -64,12 +70,16 @@ def unregister_trim_callback(callback: Callable[[], int]) -> None:
 
 def _get_process_rss_mb() -> float:
     """Return current process RSS memory in MB."""
-    # 1. Try psutil if available
+    global _cached_proc
+    # 1. Try psutil if available (reuse Process handle to avoid repeated handle allocation)
     try:
         import psutil
 
-        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        if _cached_proc is None:
+            _cached_proc = psutil.Process(os.getpid())
+        return _cached_proc.memory_info().rss / (1024 * 1024)
     except Exception as e_suppressed:
+        _cached_proc = None
         logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Windows ctypes fallback
@@ -156,49 +166,72 @@ def get_memory_budget_mb(total_ram_mb: float) -> tuple[float, float, float, floa
     Computes dynamic process RSS budget and warning thresholds based on total host physical RAM.
     Returns: (target_budget_mb, moderate_rss_mb, critical_rss_mb, min_avail_mb)
     """
-    # Dynamically scales process budget:
-    # 8 GB RAM  -> ~1,200 MB target budget, critical at ~1,440 MB, min avail 500 MB
-    # 16 GB RAM -> ~3,500 MB target budget, critical at ~4,200 MB, min avail 1,000 MB
-    # 24 GB RAM -> ~5,500 MB target budget, critical at ~6,500 MB, min avail 1,400 MB
-    # >= 32 GB  -> ~8,000 MB target budget
-    target_budget = min(8000.0, max(1200.0, total_ram_mb * 0.25))
+    # Dynamically scales process budget while keeping sidecar RSS disciplined on developer laptops:
+    # 8 GB RAM   -> ~1,000 MB target budget, moderate ~850 MB, critical ~1,200 MB
+    # 16-32 GB   -> capped at 1,500 MB default (moderate ~1,275 MB; override via CHANAKYA_MEM_BUDGET_MB)
+    env_override = os.environ.get("CHANAKYA_MEM_BUDGET_MB", "").strip()
+    target_budget = 0.0
+    if env_override:
+        try:
+            target_budget = max(512.0, float(env_override))
+        except ValueError:
+            target_budget = 0.0
+    if target_budget <= 0.0:
+        target_budget = min(1500.0, max(1000.0, total_ram_mb * 0.12))
     moderate_rss = target_budget * 0.85
     critical_rss = target_budget * 1.20
     min_avail_mb = min(2000.0, max(500.0, total_ram_mb * 0.06))
     return target_budget, moderate_rss, critical_rss, min_avail_mb
 
 
-def get_memory_status() -> MemoryStatus:
-    """Evaluate current host and process memory metrics dynamically."""
-    total_mb, avail_mb, used_pct = _get_system_ram_mb()
-    rss_mb = _get_process_rss_mb()
-    target_budget, moderate_rss, critical_rss, min_avail = get_memory_budget_mb(total_mb)
+def get_memory_status(force: bool = False) -> MemoryStatus:
+    """Evaluate current host and process memory metrics dynamically (cached 15s, single-flight)."""
+    global _mem_status_cache
+    now = time.monotonic()
+    if not force:
+        with _mem_status_lock:
+            cached_at, cached_val = _mem_status_cache
+            if cached_val is not None and (now - cached_at) < _MEM_STATUS_TTL_SEC:
+                return cached_val
 
-    # Dynamic classification boundaries adapting to detected host RAM
-    if avail_mb < (min_avail * 0.6) or rss_mb > critical_rss:
-        level = "CRITICAL"
-        rec = (
-            f"Memory pressure is severe (RSS {rss_mb:.0f} MB > {critical_rss:.0f} MB or available < {min_avail * 0.6:.0f} MB). "
-            f"Aggressive cache trimming and garbage collection required."
-        )
-    elif avail_mb < min_avail or rss_mb > moderate_rss:
-        level = "MODERATE"
-        rec = (
-            f"Memory usage approaching limits for {total_mb / 1024:.1f} GB RAM profile "
-            f"(RSS {rss_mb:.0f} MB > {moderate_rss:.0f} MB). Trimming expired in-memory items."
-        )
-    else:
-        level = "NORMAL"
-        rec = f"Memory consumption optimal within {total_mb / 1024:.1f} GB RAM / {target_budget:.0f} MB process budget."
+    with _mem_status_refresh_lock:
+        if not force:
+            with _mem_status_lock:
+                cached_at, cached_val = _mem_status_cache
+                if cached_val is not None and (time.monotonic() - cached_at) < _MEM_STATUS_TTL_SEC:
+                    return cached_val
+        total_mb, avail_mb, used_pct = _get_system_ram_mb()
+        rss_mb = _get_process_rss_mb()
+        target_budget, moderate_rss, critical_rss, min_avail = get_memory_budget_mb(total_mb)
 
-    return MemoryStatus(
-        total_ram_mb=total_mb,
-        available_ram_mb=avail_mb,
-        used_ram_pct=used_pct,
-        process_rss_mb=rss_mb,
-        pressure_level=level,
-        recommendation=rec,
-    )
+        # Dynamic classification boundaries adapting to detected host RAM
+        if avail_mb < (min_avail * 0.6) or rss_mb > critical_rss:
+            level = "CRITICAL"
+            rec = (
+                f"Memory pressure is severe (RSS {rss_mb:.0f} MB > {critical_rss:.0f} MB or available < {min_avail * 0.6:.0f} MB). "
+                f"Aggressive cache trimming and garbage collection required."
+            )
+        elif avail_mb < min_avail or rss_mb > moderate_rss:
+            level = "MODERATE"
+            rec = (
+                f"Memory usage approaching limits for {total_mb / 1024:.1f} GB RAM profile "
+                f"(RSS {rss_mb:.0f} MB > {moderate_rss:.0f} MB). Trimming expired in-memory items."
+            )
+        else:
+            level = "NORMAL"
+            rec = f"Memory consumption optimal within {total_mb / 1024:.1f} GB RAM / {target_budget:.0f} MB process budget."
+
+        status = MemoryStatus(
+            total_ram_mb=total_mb,
+            available_ram_mb=avail_mb,
+            used_ram_pct=used_pct,
+            process_rss_mb=rss_mb,
+            pressure_level=level,
+            recommendation=rec,
+        )
+        with _mem_status_lock:
+            _mem_status_cache = (time.monotonic(), status)
+        return status
 
 
 def trim_memory_if_needed(force: bool = False) -> dict:
@@ -206,7 +239,7 @@ def trim_memory_if_needed(force: bool = False) -> dict:
     Check memory pressure and invoke registered trim callbacks if under pressure.
     Returns audit details of actions taken.
     """
-    status = get_memory_status()
+    status = get_memory_status(force=force)
     evicted_total = 0
     triggered = force or status.pressure_level in ("MODERATE", "CRITICAL")
 

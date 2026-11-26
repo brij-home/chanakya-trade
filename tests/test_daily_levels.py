@@ -225,8 +225,8 @@ def test_format_premarket_strike_radar(monkeypatch):
 
     assert "PRE-MARKET INDEX STRIKE RADAR" in card
     assert "NIFTY" in card
-    assert "BULL TRIGGER" in card
-    assert "BEAR TRIGGER" in card
+    assert "BULL:" in card
+    assert "BEAR:" in card
     assert "CE" in card
     assert "PE" in card
     assert "Chop Trap Zone" in card

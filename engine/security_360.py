@@ -141,7 +141,10 @@ def _unavailable_dossier(
 
 
 def build_security_360_dossier(
-    symbol: str, current_price: Optional[float] = None
+    symbol: str,
+    current_price: Optional[float] = None,
+    *,
+    include_live_analysis: bool = False,
 ) -> Security360Dossier:
     """
     Builds a complete, institutional 360-degree security dossier with transparent provenance.
@@ -199,10 +202,27 @@ def build_security_360_dossier(
 
     # ── Path B: real data with honest UNAVAILABLE markers ─────────────────────
 
-    # Valuation: DCF fair value computation is not yet wired.
-    # Mark UNAVAILABLE rather than inventing price × 1.15.
+    # Valuation: honest UNAVAILABLE by default; opt-in live DCF via include_live_analysis=True.
     valuation_fair_value: Optional[float] = None
     valuation_status = "UNAVAILABLE"
+    if include_live_analysis:
+        try:
+            from analysis.dcf import dcf_for_symbol
+
+            dcf_res = dcf_for_symbol(canon.symbol)
+            fair_val = getattr(dcf_res, "fair_value", None) if dcf_res is not None else None
+            if isinstance(fair_val, (int, float)) and fair_val > 0:
+                valuation_fair_value = round(float(fair_val), 2)
+                margin_pct = (valuation_fair_value - price) / price
+                if margin_pct >= 0.15:
+                    valuation_status = "UNDERVALUED"
+                elif margin_pct <= -0.15:
+                    valuation_status = "OVERVALUED"
+                else:
+                    valuation_status = "FAIR_VALUE"
+        except Exception:
+            valuation_fair_value = None
+            valuation_status = "UNAVAILABLE"
 
     # Forensic status: call the real forensic audit module.
     # Do NOT hardcode "CLEAN".
@@ -219,14 +239,114 @@ def build_security_360_dossier(
     except Exception:
         forensic_status = "UNAVAILABLE"
 
-    # Methodology lenses: real per-lens computation is not yet wired into this
-    # module.  Return an empty list rather than four hardcoded BULLISH verdicts.
-    # When lenses are wired, populate this list with real MethodologyLens objects.
+    # Methodology lenses & market structure: empty/UNAVAILABLE by default unless opt-in live analysis
+    # computes real quantitative lenses (Valuation, Forensic Quality, Daily Structure). Never hardcode verdicts.
     lenses: list[MethodologyLens] = []
-
-    # Decision summary: omit when lenses are empty — no defensible thesis exists.
-    # Hardcoded stop-loss at 3.5% / fixed R-multiples are removed.
+    market_structure_trend = "UNAVAILABLE"
     decision = None
+    if include_live_analysis:
+        if valuation_fair_value is not None and price > 0:
+            upside_pct = ((valuation_fair_value - price) / price) * 100.0
+            val_verdict = (
+                "BULLISH"
+                if upside_pct >= 12.0
+                else ("BEARISH" if upside_pct <= -12.0 else "NEUTRAL")
+            )
+            lenses.append(
+                MethodologyLens(
+                    lens_id="intrinsic_dcf",
+                    name="2-Stage DCF Intrinsic Valuation",
+                    verdict=val_verdict,
+                    confidence_pct=min(85.0, max(50.0, 60.0 + abs(upside_pct) * 0.6)),
+                    rationale=(
+                        f"DCF Fair Value ₹{valuation_fair_value:,.2f} vs Spot ₹{price:,.2f} "
+                        f"({upside_pct:+.1f}% margin of safety)."
+                    ),
+                    key_metrics={
+                        "fair_value": valuation_fair_value,
+                        "margin_of_safety_pct": round(upside_pct, 1),
+                    },
+                )
+            )
+        if forensic_status not in ("UNAVAILABLE", "", None):
+            f_verdict = (
+                "BULLISH"
+                if forensic_status in ("CLEAN_PASS", "CLEAN")
+                else ("BEARISH" if forensic_status in ("RED_FLAG", "FLAGGED") else "NEUTRAL")
+            )
+            f_conf = 78.0 if f_verdict == "BULLISH" else (82.0 if f_verdict == "BEARISH" else 55.0)
+            lenses.append(
+                MethodologyLens(
+                    lens_id="forensic_accounting",
+                    name="Forensic Earnings & Governance",
+                    verdict=f_verdict,
+                    confidence_pct=f_conf,
+                    rationale=f"Automated Beneish/Altman/Piotroski & governance verdict: {forensic_status}.",
+                    key_metrics={"forensic_status": forensic_status},
+                )
+            )
+        try:
+            from engine.historical_warehouse import historical_warehouse
+
+            df_day = historical_warehouse.load_bars(canon.symbol, interval="day")
+            if df_day is not None and len(df_day) >= 50 and "close" in df_day.columns:
+                close_s = df_day["close"].astype(float)
+                ema20 = float(close_s.ewm(span=20, adjust=False).mean().iloc[-1])
+                ema50 = float(close_s.ewm(span=50, adjust=False).mean().iloc[-1])
+                atr14 = float(
+                    (df_day["high"].astype(float) - df_day["low"].astype(float)).tail(14).mean()
+                )
+                if price > ema20 > ema50:
+                    market_structure_trend = "BULLISH_EXPANSION"
+                    verdict, conf = "BULLISH", 72.0
+                elif price < ema20 < ema50:
+                    market_structure_trend = "BEARISH_CONTRACTION"
+                    verdict, conf = "BEARISH", 72.0
+                else:
+                    market_structure_trend = "CONSOLIDATION"
+                    verdict, conf = "NEUTRAL", 55.0
+                lenses.append(
+                    MethodologyLens(
+                        lens_id="trend_structure",
+                        name="Daily EMA Trend Structure",
+                        verdict=verdict,
+                        confidence_pct=conf,
+                        rationale=(
+                            f"Spot ₹{price:,.2f} vs EMA20 ₹{ema20:,.2f} / EMA50 ₹{ema50:,.2f} "
+                            f"across {len(df_day)} warehouse daily sessions."
+                        ),
+                        key_metrics={
+                            "ema20": round(ema20, 2),
+                            "ema50": round(ema50, 2),
+                            "atr14": round(atr14, 2),
+                            "bars": len(df_day),
+                        },
+                    )
+                )
+                # Synthesize DecisionSummary only when >= 2 quantitative lenses + valid ATR stop exist
+                if len(lenses) >= 2 and atr14 > 0 and market_structure_trend != "CONSOLIDATION":
+                    bull_votes = sum(1 for ln in lenses if ln.verdict == "BULLISH")
+                    bear_votes = sum(1 for ln in lenses if ln.verdict == "BEARISH")
+                    if bull_votes >= 2 and bear_votes == 0:
+                        sl = round(max(ema20 * 0.99, price - 1.5 * atr14), 2)
+                        risk = max(0.05, price - sl)
+                        t1 = round(price + 2.0 * risk, 2)
+                        t2 = round(price + 3.5 * risk, 2)
+                        decision = DecisionSummary(
+                            action_eligibility=ActionEligibility.ELIGIBLE
+                            if hasattr(ActionEligibility, "ELIGIBLE")
+                            else list(ActionEligibility)[0],
+                            primary_thesis=f"Multi-lens bullish alignment ({bull_votes}/{len(lenses)} quantitative lenses) above rising daily EMAs.",
+                            counter_thesis=f"Invalidate below EMA20/ATR anchor ₹{sl:,.2f}.",
+                            invalidation_level=sl,
+                            max_planned_loss=round(risk, 2),
+                            target_1=t1,
+                            target_2=t2,
+                            risk_reward_ratio=round((t1 - price) / risk, 2),
+                            suggested_position_sizing_pct=1.0,
+                        )
+        except Exception:
+            market_structure_trend = "UNAVAILABLE"
 
     return Security360Dossier(
         symbol=canon.symbol,
@@ -240,10 +360,10 @@ def build_security_360_dossier(
         valuation_fair_value=valuation_fair_value,
         valuation_status=valuation_status,
         forensic_status=forensic_status,
-        market_structure_trend="UNAVAILABLE",
+        market_structure_trend=market_structure_trend,
         methodology_lenses=lenses,
         decision=decision,
-        _status="PARTIAL",  # Price available but lenses not yet computed
+        _status="READY" if (lenses and valuation_status != "UNAVAILABLE") else "PARTIAL",
         _source_name="CHANAKYA_SECURITY_360_ENGINE",
         _as_of=as_of,
         _unavailable_reason=(

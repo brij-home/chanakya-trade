@@ -30,9 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timezone, timedelta
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 
 from engine.alert_identity import canonical_alert_symbol
@@ -40,11 +38,6 @@ from engine.pullback_level_resolver import resolve_pullback_entry, PullbackLevel
 from engine.option_resolver import is_index_symbol
 
 logger = logging.getLogger("chanakya.engine.confluence")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass

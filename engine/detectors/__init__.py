@@ -38,6 +38,10 @@ from engine.detectors.gamma_unpin_squeezer import (
 from engine.detectors.trend_day_continuation import detect_trend_day_pullback
 from engine.detectors.initial_balance import detect_initial_balance_setups
 from engine.detectors.liquidity_inversion import detect_liquidity_inversion
+from engine.detectors.breakout_retest import detect_breakout_retest_setups
+from engine.detectors.institutional_reversal import detect_institutional_reversals
+from engine.detectors.chart_pattern_detector import detect_chart_pattern_setups
+from engine.detectors.strat_scalper import detect_strat_scalp_setups
 
 from engine.detection_context import (
     BaseDetector,
@@ -93,4 +97,8 @@ __all__ = [
     "detect_0dte_gamma_unpin",
     "GammaUnpinSqueezerDetector",
     "detect_liquidity_inversion",
+    "detect_breakout_retest_setups",
+    "detect_institutional_reversals",
+    "detect_chart_pattern_setups",
+    "detect_strat_scalp_setups",
 ]

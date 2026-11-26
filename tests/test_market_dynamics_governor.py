@@ -215,11 +215,37 @@ def test_governor_diagnostics():
     assert "sample_index_calibration" in diag
 
 
-def test_api_market_dynamics_endpoint():
+def test_governor_diagnostics_cold_vix_non_blocking(monkeypatch):
+    """Cold VIX in get_diagnostics() must trigger background refresh rather than blocking."""
+    gov = MarketDynamicsGovernor()
+    gov._cache.clear()
+    gov._vix_cache = (0.0, None)
+    bg_calls = 0
+
+    def _mock_bg():
+        nonlocal bg_calls
+        bg_calls += 1
+
+    monkeypatch.setattr(gov, "_bg_refresh_vix", _mock_bg)
+    monkeypatch.setattr(
+        "analysis.regime_governor._fresh_live_vix",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not call sync _fresh_live_vix")),
+    )
+
+    diag = gov.get_diagnostics()
+    assert diag["status"] == "DEGRADED"
+    assert diag["india_vix"] is None
+    assert diag["sample_index_calibration"]["symbol"] == "NIFTY"
+
+
+def test_api_market_dynamics_endpoint(monkeypatch):
     """Verify GET /api/market/dynamics returns accurate JSON telemetry."""
     from starlette.testclient import TestClient
 
     from web.api import app
+
+    gov = get_market_dynamics_governor()
+    monkeypatch.setattr(gov, "_vix_cache", (time.time(), 14.0))
 
     client = TestClient(app)
     resp = client.get("/api/market/dynamics?symbol=BANKNIFTY")

@@ -81,17 +81,32 @@ def sync_historical_index_data(days: int = 90) -> None:
 
 
 def compute_tod_volume_profile() -> list[float]:
-    """Computes empirical 75-slot cumulative volume accumulation across NIFTY and BANKNIFTY."""
+    """Compute empirical 75-slot cumulative volume accumulation from traded index futures.
+
+    Spot indices do not carry exchange-traded volume; we resolve near-month NIFTY/BANKNIFTY
+    futures from the warehouse first and fall back to the default profile if absent.
+    """
     print("\n[2/4] Fitting empirical Time-of-Day (TOD) Volume Accumulation U-Curve...")
     curves = []
+    candidate_syms: list[str] = []
+    try:
+        from market.symbol_master import resolve_active_future
 
-    for sym in ("NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"):
+        for base in ("NIFTY", "BANKNIFTY"):
+            fut = resolve_active_future(base)
+            if fut:
+                candidate_syms.append(fut)
+    except Exception:
+        pass
+    for fallback_fut in ("NSE:NIFTY26NOVFUT", "NSE:BANKNIFTY26NOVFUT"):
+        if fallback_fut not in candidate_syms:
+            candidate_syms.append(fallback_fut)
+
+    for sym in candidate_syms:
         df_5m = historical_warehouse.load_bars(sym, interval="5m")
-        if df_5m.empty:
-            df_5m = historical_warehouse.load_bars(
-                sym.split(":")[-1].replace("-INDEX", ""), interval="5m"
-            )
         if df_5m.empty or "volume" not in df_5m.columns:
+            continue
+        if float(df_5m["volume"].fillna(0).sum()) <= 0:
             continue
 
         df = df_5m.copy()

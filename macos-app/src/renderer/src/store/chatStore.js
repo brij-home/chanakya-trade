@@ -1,10 +1,21 @@
 import { create } from 'zustand'
 import { getSymbolExchange } from '../data/universeData'
 
+export const DEFAULT_SIDECAR_PORT = 8765
+
 /** Get the API base URL — works in both Electron and web mode. */
 export function getBaseUrl(port) {
-  if (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173') return window.location.origin
-  return port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765'
+  if (typeof window !== 'undefined' && window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173') {
+    return window.location.origin
+  }
+  const resolved = port || (() => {
+    try {
+      return typeof window !== 'undefined' ? localStorage.getItem('chanakya_sidecar_port') : null
+    } catch (_) {
+      return null
+    }
+  })() || DEFAULT_SIDECAR_PORT
+  return `http://127.0.0.1:${resolved}`
 }
 
 /** Generate a UUID-like id for sessions. */
@@ -283,12 +294,13 @@ export const useChatStore = create((set, get) => ({
       // Create a fresh default session
       const newId = uuid()
       updated[newId] = { id: newId, title: 'New Session', messages: [], createdAt: Date.now() }
-      set({ sessions: updated, activeSessionId: newId, messages: [] })
+      set({ sessions: updated, activeSessionId: newId, messages: [], _msgIndex: {} })
       return
     }
     if (id === activeSessionId) {
       const nextId = remaining[0]
-      set({ sessions: updated, activeSessionId: nextId, messages: updated[nextId].messages })
+      const nextMessages = updated[nextId].messages
+      set({ sessions: updated, activeSessionId: nextId, messages: nextMessages, _msgIndex: _buildMsgIndex(nextMessages) })
     } else {
       // Save current messages before updating sessions
       if (activeSessionId && updated[activeSessionId]) {

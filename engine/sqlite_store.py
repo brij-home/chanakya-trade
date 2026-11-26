@@ -740,6 +740,36 @@ class SQLiteAlertStore:
             conn.commit()
             return True
 
+    def acknowledge_outbox_by_alert_channel(
+        self,
+        alert_id: str,
+        channel: str = "TELEGRAM",
+    ) -> int:
+        """
+        Marks all non-terminal outbox entries for (alert_id, channel) as ACKNOWLEDGED
+        after synchronous delivery succeeds, preventing redundant OutboxWorker retries.
+        """
+        if not alert_id:
+            return 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        channel_upper = channel.upper().strip()
+        with self._lock, self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE alert_outbox
+                SET status = 'ACKNOWLEDGED',
+                    acknowledged_at = ?,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE alert_id = ?
+                  AND channel = ?
+                  AND status IN ('PENDING', 'CLAIMED', 'DISPATCHED', 'FAILED_RETRY');
+                """,
+                (now_iso, now_iso, alert_id, channel_upper),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def mark_outbox_failed(
         self,
         outbox_id: str,

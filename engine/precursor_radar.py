@@ -144,7 +144,9 @@ def _load_calibrated_coilers() -> list[str]:
         import json
         from pathlib import Path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        from config.paths import app_data_path
+
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             repo_cal = (
                 Path(__file__).resolve().parent.parent

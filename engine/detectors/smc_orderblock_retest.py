@@ -42,6 +42,7 @@ import pandas as pd
 
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
+from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -142,16 +143,18 @@ def detect_smc_orderblock_retest(
     ltp: float = 0.0,
     exchange: str = "NSE",
     rvol: Optional[float] = None,
+    timeframe: str = "day",
 ) -> list[AutoAlert]:
     """
     Scans for price retesting an unmitigated institutional Order Block.
 
     Args:
         symbol: Clean equity or index symbol (e.g. 'RELIANCE', 'NIFTY')
-        df: Daily OHLCV DataFrame (at least 30 bars). Fetched if None.
+        df: Daily or 15m OHLCV DataFrame. Fetched if None.
         ltp: Current last traded price. Fetched if 0.
         exchange: Market exchange (NSE, BSE, NFO, MCX)
         rvol: Relative volume (current / expected avg). Fetched if None.
+        timeframe: Candle interval ('day', '15m', '5m').
 
     Returns:
         List of AutoAlert objects (0–2 per symbol: one bullish, one bearish).
@@ -165,19 +168,41 @@ def detect_smc_orderblock_retest(
     clean_sym = canonical_alert_symbol(symbol)
     found: list[AutoAlert] = []
 
+    # Detect intraday resolution
+    is_intraday = timeframe in ("15m", "5m", "1h", "intraday")
+    if not is_intraday and df is not None and len(df) >= 2:
+        try:
+            if hasattr(df.index, "to_series"):
+                diffs = df.index.to_series().diff().dropna()
+                if len(diffs) > 0 and diffs.iloc[-1].total_seconds() < 86400:
+                    is_intraday = True
+                    if diffs.iloc[-1].total_seconds() <= 900:
+                        timeframe = "15m"
+        except Exception as e_res:
+            logging.getLogger(__name__).debug(
+                f"[SMCOrderBlockRetest] Resolution auto-detect skipped: {e_res}"
+            )
+
+    min_bars = 15 if is_intraday else 25
+
     # ── 1. Fetch OHLCV if not provided ────────────────────────────────────────
-    if df is None or len(df) < 30:
+    if df is None or len(df) < min_bars:
         if is_test:
             return []
         try:
             from market.history import get_ohlcv
 
-            df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=250)
+            df = get_ohlcv(
+                clean_sym,
+                exchange=exchange,
+                interval=timeframe,
+                days=250 if not is_intraday else 5,
+            )
         except Exception as e:
             logger.debug(f"[SMC_OB] OHLCV fetch failed for {clean_sym}: {e}")
             return []
 
-    if df is None or len(df) < 30:
+    if df is None or len(df) < min_bars:
         return []
 
     # ── 2. Fetch LTP if not provided ──────────────────────────────────────────
@@ -196,10 +221,10 @@ def detect_smc_orderblock_retest(
     if not ltp or ltp <= 0:
         return []
 
-    # ── 3. Compute ATR (daily, 14-period) ─────────────────────────────────────
+    # ── 3. Compute ATR (14-period) ───────────────────────────────────────────
     atr = _compute_atr(df, period=14)
     if atr <= 0:
-        atr = ltp * 0.015  # 1.5% daily range proxy
+        atr = ltp * (0.005 if is_intraday else 0.015)
 
     change_pct = 0.0
     if df is not None and len(df) >= 2:
@@ -214,7 +239,9 @@ def detect_smc_orderblock_retest(
     try:
         from analysis.market_structure import analyze_market_structure
 
-        ms = analyze_market_structure(symbol=clean_sym, df=df, exchange=exchange)
+        ms = analyze_market_structure(
+            symbol=clean_sym, df=df, exchange=exchange, timeframe=timeframe
+        )
     except Exception as e:
         logger.debug(f"[SMC_OB] Market structure analysis failed for {clean_sym}: {e}")
         return []
@@ -237,7 +264,7 @@ def detect_smc_orderblock_retest(
         return []
 
     # ── 5. OB Re-test proximity window ────────────────────────────────────────
-    proximity_buffer = max(round(0.35 * atr, 4), ltp * 0.004)
+    proximity_buffer = max(round(0.35 * atr, 4), ltp * (0.002 if is_intraday else 0.004))
     now_ist = datetime.now(IST)
 
     # Flow Analysis via Wyckoff VSA & Granville OBV
@@ -247,8 +274,8 @@ def detect_smc_orderblock_retest(
         from analysis.vsa import analyse_vsa
         from analysis.obv import analyse_obv
 
-        vsa_res = analyse_vsa(df, is_intraday=False)
-        obv_res = analyse_obv(df, is_intraday=False)
+        vsa_res = analyse_vsa(df, is_intraday=is_intraday)
+        obv_res = analyse_obv(df, is_intraday=is_intraday)
     except Exception as e_flow:
         logger.debug(f"[SMC_OB] Flow analysis skipped: {e_flow}")
 
@@ -397,18 +424,111 @@ def detect_smc_orderblock_retest(
         except Exception as _e_frac:
             logger.debug(f"[smc_orderblock_retest] Fractal coordination non-fatal: {_e_frac}")
 
-        headline = (
-            f"🧲 SMC Demand OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
-            f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
-        )
-        summary = (
-            f"Price retesting unmitigated institutional Demand OB. "
-            f"OTE Entry: ₹{entry_price:,.2f}. "
-            f"SL: ₹{stop_loss:,.2f} (sub-ATR below OB bottom). "
-            f"T1: ₹{t1:,.2f} (+{rr_t1:.1f}R · {t1_rationale}). "
-            f"T2: ₹{t2:,.2f} (+{rr_t2:.1f}R extension). "
-            f"NO CHASE above ₹{ob.top:,.2f} — OB mitigated if price closes above top."
-        )
+        # Option Resolution for Index or F&O Stock
+        from engine.position_sizer import get_lot_size
+        from engine.option_resolver import resolve_option_contract, is_index_symbol
+
+        is_idx = is_index_symbol(clean_sym)
+        stock_lot = get_lot_size(clean_sym)
+        resolved_opt = None
+        if is_idx or stock_lot > 1:
+            try:
+                resolved_opt = resolve_option_contract(
+                    symbol=clean_sym,
+                    spot=ltp,
+                    direction="BULLISH",
+                    underlying_sl=stop_loss,
+                    underlying_target=t1,
+                    prefer_options=True,
+                )
+            except Exception as e_opt:
+                logger.debug(f"[SMC_OB] Option resolution error for {clean_sym}: {e_opt}")
+
+        has_opt = resolved_opt is not None and getattr(resolved_opt, "entry_premium", 0) > 0
+        opt_contract_sym = resolved_opt.contract_symbol if has_opt else None
+        opt_ltp = resolved_opt.entry_premium if has_opt else None
+        opt_sl = resolved_opt.sl_premium if has_opt else None
+        opt_t1 = resolved_opt.t1_premium if has_opt else None
+        opt_t2 = resolved_opt.t2_premium if has_opt else None
+        opt_runner = resolved_opt.t3_premium if has_opt else None
+        opt_strike = resolved_opt.strike if has_opt else None
+        opt_type = resolved_opt.option_type if has_opt else "CE"
+        opt_lot_sz = resolved_opt.lot_size if has_opt else (stock_lot if stock_lot > 1 else 1)
+        opt_exp = getattr(resolved_opt, "expiry", None) if has_opt else None
+        opt_nc = round(opt_ltp * 1.05, 2) if has_opt else None
+
+        if has_opt and opt_strike:
+            headline = (
+                f"🧲 [SMC OB RETEST] {clean_sym} {format_strike(opt_strike)} {opt_type} Buy: "
+                f"Demand OB ₹{ob.bottom:,.1f}–₹{ob.top:,.1f} ({tier})"
+            )
+            summary = (
+                f"Price retesting unmitigated institutional Demand OB. "
+                f"Option Plan: Buy {format_strike(opt_strike)} {opt_type} near ₹{opt_ltp:,.2f} (SL ₹{opt_sl:,.2f}, T1 ₹{opt_t1:,.2f}). "
+                f"Spot Invalidation SL: ₹{stop_loss:,.2f}. NO CHASE above ₹{ob.top:,.2f}."
+            )
+        else:
+            headline = (
+                f"🧲 SMC Demand OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
+                f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
+            )
+            summary = (
+                f"Price retesting unmitigated institutional Demand OB. "
+                f"OTE Entry: ₹{entry_price:,.2f}. "
+                f"SL: ₹{stop_loss:,.2f} (sub-ATR below OB bottom). "
+                f"T1: ₹{t1:,.2f} (+{rr_t1:.1f}R · {t1_rationale}). "
+                f"T2: ₹{t2:,.2f} (+{rr_t2:.1f}R extension). "
+                f"NO CHASE above ₹{ob.top:,.2f} — OB mitigated if price closes above top."
+            )
+
+        act_plan = {
+            "action": "BUY",
+            "instrument_type": "OPTION" if has_opt else "EQUITY",
+            "entry_range": f"₹{ob.bottom:,.2f} – ₹{round(ob.bottom + 0.85 * (ob.top - ob.bottom), 2):,.2f}",
+            "stop_loss": f"₹{stop_loss:,.2f}",
+            "target": f"₹{t1:,.2f}",
+            "target_1": f"₹{t1:,.2f}",
+            "target_2": f"₹{t2:,.2f}",
+            "runner_target": f"₹{runner:,.2f}",
+            "no_chase_boundary": f"₹{ob.top:,.2f}",
+            "risk_reward": f"1:{rr_t2}",
+            "scale_out_plan": scale_out_plan,
+            "no_chase_rule": (
+                f"DO NOT ENTER above ₹{ob.top:,.2f} — OB mitigated once price closes above its top."
+            ),
+            "trade_plan": {
+                "entry_price": entry_price,
+                "invalidation_stop": stop_loss,
+                "target_1": t1,
+                "target_2": t2,
+                "runner_target": runner,
+                "no_chase_boundary": round(ob.top, 2),
+                "rr_t1": rr_t1,
+                "rr_t2": rr_t2,
+            },
+        }
+        if has_opt:
+            act_plan["option_action"] = f"BUY {opt_type}"
+            act_plan["contract_symbol"] = opt_contract_sym
+            act_plan["strike"] = opt_strike
+            act_plan["option_type"] = opt_type
+            act_plan["option_entry"] = f"₹{opt_ltp:,.2f}"
+            act_plan["option_sl"] = f"₹{opt_sl:,.2f}"
+            act_plan["option_target_1"] = f"₹{opt_t1:,.2f}"
+            act_plan["option_target_2"] = f"₹{opt_t2:,.2f}" if opt_t2 else None
+            act_plan["option_plan"] = {
+                "contract_symbol": opt_contract_sym,
+                "strike": opt_strike,
+                "option_type": opt_type,
+                "entry_premium": opt_ltp,
+                "sl_premium": opt_sl,
+                "t1_premium": opt_t1,
+                "t2_premium": opt_t2,
+                "t3_premium": opt_runner,
+                "no_chase_boundary": opt_nc,
+                "lot_size": opt_lot_sz,
+                "expiry": opt_exp,
+            }
 
         alert = AutoAlert(
             alert_id=alert_id,
@@ -429,6 +549,13 @@ def detect_smc_orderblock_retest(
             created_at=now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
             is_live=not is_test,
             environment="TEST" if is_test else "LIVE",
+            contract_symbol=opt_contract_sym,
+            strike=opt_strike,
+            option_type=opt_type if has_opt else None,
+            option_premium=opt_ltp,
+            tactical_sl=opt_sl if has_opt else stop_loss,
+            structural_spot_sl=stop_loss,
+            segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if stock_lot > 1 else "EQUITY"),
             metrics={
                 "ob_type": "DEMAND",
                 "ob_top": ob.top,
@@ -457,35 +584,11 @@ def detect_smc_orderblock_retest(
                 "vsa_signal": vsa_sig_bull,
                 "obv_regime": obv_div_bull,
                 "fractal_blueprint": fractal_dict,
+                "timeframe": timeframe,
+                "is_intraday": is_intraday,
             },
             preferred_vehicle="NAKED_OPTION",
-            actionable_plan={
-                "action": "BUY",
-                "instrument_type": "EQUITY",
-                "entry_range": f"₹{ob.bottom:,.2f} – ₹{round(ob.bottom + 0.85 * (ob.top - ob.bottom), 2):,.2f}",
-                "stop_loss": f"₹{stop_loss:,.2f}",
-                "target": f"₹{t1:,.2f}",
-                "target_1": f"₹{t1:,.2f}",
-                "target_2": f"₹{t2:,.2f}",
-                "runner_target": f"₹{runner:,.2f}",
-                "no_chase_boundary": f"₹{ob.top:,.2f}",
-                "risk_reward": f"1:{rr_t2}",
-                "scale_out_plan": scale_out_plan,
-                "no_chase_rule": (
-                    f"DO NOT ENTER above ₹{ob.top:,.2f} — "
-                    f"OB mitigated once price closes above its top."
-                ),
-                "trade_plan": {
-                    "entry_price": entry_price,
-                    "invalidation_stop": stop_loss,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "runner_target": runner,
-                    "no_chase_boundary": round(ob.top, 2),
-                    "rr_t1": rr_t1,
-                    "rr_t2": rr_t2,
-                },
-            },
+            actionable_plan=act_plan,
         )
         found.append(alert)
         break  # One bullish OB alert per symbol per session
@@ -634,18 +737,112 @@ def detect_smc_orderblock_retest(
                 f"[smc_orderblock_retest] Bearish fractal coordination non-fatal: {_e_frac}"
             )
 
-        headline = (
-            f"🔴 SMC Supply OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
-            f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
-        )
-        summary = (
-            f"Price retesting unmitigated institutional Supply OB. "
-            f"OTE Short Entry: ₹{entry_price:,.2f}. "
-            f"SL: ₹{stop_loss:,.2f} (sub-ATR above OB top). "
-            f"T1: ₹{t1:,.2f} (-{rr_t1:.1f}R · {t1_rationale}). "
-            f"T2: ₹{t2:,.2f} (-{rr_t2:.1f}R extension). "
-            f"NO CHASE below ₹{ob.bottom:,.2f} — OB mitigated if price closes below bottom."
-        )
+        # Option Resolution for Index or F&O Stock
+        from engine.position_sizer import get_lot_size
+        from engine.option_resolver import resolve_option_contract, is_index_symbol
+
+        is_idx = is_index_symbol(clean_sym)
+        stock_lot = get_lot_size(clean_sym)
+        resolved_opt = None
+        if is_idx or stock_lot > 1:
+            try:
+                resolved_opt = resolve_option_contract(
+                    symbol=clean_sym,
+                    spot=ltp,
+                    direction="BEARISH",
+                    underlying_sl=stop_loss,
+                    underlying_target=t1,
+                    prefer_options=True,
+                )
+            except Exception as e_opt:
+                logger.debug(f"[SMC_OB] Bearish option resolution error for {clean_sym}: {e_opt}")
+
+        has_opt = resolved_opt is not None and getattr(resolved_opt, "entry_premium", 0) > 0
+        opt_contract_sym = resolved_opt.contract_symbol if has_opt else None
+        opt_ltp = resolved_opt.entry_premium if has_opt else None
+        opt_sl = resolved_opt.sl_premium if has_opt else None
+        opt_t1 = resolved_opt.t1_premium if has_opt else None
+        opt_t2 = resolved_opt.t2_premium if has_opt else None
+        opt_runner = resolved_opt.t3_premium if has_opt else None
+        opt_strike = resolved_opt.strike if has_opt else None
+        opt_type = resolved_opt.option_type if has_opt else "PE"
+        opt_lot_sz = resolved_opt.lot_size if has_opt else (stock_lot if stock_lot > 1 else 1)
+        opt_exp = getattr(resolved_opt, "expiry", None) if has_opt else None
+        opt_nc = round(opt_ltp * 1.05, 2) if has_opt else None
+
+        if has_opt and opt_strike:
+            headline = (
+                f"🔴 [SMC OB RETEST] {clean_sym} {format_strike(opt_strike)} {opt_type} Buy: "
+                f"Supply OB ₹{ob.bottom:,.1f}–₹{ob.top:,.1f} ({tier})"
+            )
+            summary = (
+                f"Price retesting unmitigated institutional Supply OB. "
+                f"Option Plan: Buy {format_strike(opt_strike)} {opt_type} near ₹{opt_ltp:,.2f} (SL ₹{opt_sl:,.2f}, T1 ₹{opt_t1:,.2f}). "
+                f"Spot Invalidation SL: ₹{stop_loss:,.2f}. NO CHASE below ₹{ob.bottom:,.2f}."
+            )
+        else:
+            headline = (
+                f"🔴 SMC Supply OB Re-Test: {clean_sym} at ₹{ob.bottom:,.2f}–₹{ob.top:,.2f} "
+                f"({tier}) | SL ₹{stop_loss:,.2f} | R:R 1:{rr_t2}"
+            )
+            summary = (
+                f"Price retesting unmitigated institutional Supply OB. "
+                f"OTE Short Entry: ₹{entry_price:,.2f}. "
+                f"SL: ₹{stop_loss:,.2f} (sub-ATR above OB top). "
+                f"T1: ₹{t1:,.2f} (-{rr_t1:.1f}R · {t1_rationale}). "
+                f"T2: ₹{t2:,.2f} (-{rr_t2:.1f}R extension). "
+                f"NO CHASE below ₹{ob.bottom:,.2f} — OB mitigated if price closes below bottom."
+            )
+
+        act_plan = {
+            "action": "SELL_SHORT",
+            "instrument_type": "OPTION" if has_opt else "EQUITY",
+            "entry_range": f"₹{round(ob.top - 0.85 * (ob.top - ob.bottom), 2):,.2f} – ₹{ob.top:,.2f}",
+            "stop_loss": f"₹{stop_loss:,.2f}",
+            "target": f"₹{t1:,.2f}",
+            "target_1": f"₹{t1:,.2f}",
+            "target_2": f"₹{t2:,.2f}",
+            "runner_target": f"₹{runner:,.2f}",
+            "no_chase_boundary": f"₹{ob.bottom:,.2f}",
+            "risk_reward": f"1:{rr_t2}",
+            "scale_out_plan": scale_out_plan,
+            "no_chase_rule": (
+                f"DO NOT ENTER below ₹{ob.bottom:,.2f} — "
+                f"OB mitigated once price closes below its bottom."
+            ),
+            "trade_plan": {
+                "entry_price": entry_price,
+                "invalidation_stop": stop_loss,
+                "target_1": t1,
+                "target_2": t2,
+                "runner_target": runner,
+                "no_chase_boundary": round(ob.bottom, 2),
+                "rr_t1": rr_t1,
+                "rr_t2": rr_t2,
+            },
+        }
+        if has_opt:
+            act_plan["option_action"] = f"BUY {opt_type}"
+            act_plan["contract_symbol"] = opt_contract_sym
+            act_plan["strike"] = opt_strike
+            act_plan["option_type"] = opt_type
+            act_plan["option_entry"] = f"₹{opt_ltp:,.2f}"
+            act_plan["option_sl"] = f"₹{opt_sl:,.2f}"
+            act_plan["option_target_1"] = f"₹{opt_t1:,.2f}"
+            act_plan["option_target_2"] = f"₹{opt_t2:,.2f}" if opt_t2 else None
+            act_plan["option_plan"] = {
+                "contract_symbol": opt_contract_sym,
+                "strike": opt_strike,
+                "option_type": opt_type,
+                "entry_premium": opt_ltp,
+                "sl_premium": opt_sl,
+                "t1_premium": opt_t1,
+                "t2_premium": opt_t2,
+                "t3_premium": opt_runner,
+                "no_chase_boundary": opt_nc,
+                "lot_size": opt_lot_sz,
+                "expiry": opt_exp,
+            }
 
         alert = AutoAlert(
             alert_id=alert_id,
@@ -666,6 +863,13 @@ def detect_smc_orderblock_retest(
             created_at=now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
             is_live=not is_test,
             environment="TEST" if is_test else "LIVE",
+            contract_symbol=opt_contract_sym,
+            strike=opt_strike,
+            option_type=opt_type if has_opt else None,
+            option_premium=opt_ltp,
+            tactical_sl=opt_sl if has_opt else stop_loss,
+            structural_spot_sl=stop_loss,
+            segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if stock_lot > 1 else "EQUITY"),
             metrics={
                 "ob_type": "SUPPLY",
                 "ob_top": ob.top,
@@ -694,35 +898,11 @@ def detect_smc_orderblock_retest(
                 "vsa_signal": vsa_sig_bear,
                 "obv_regime": obv_div_bear,
                 "fractal_blueprint": fractal_dict,
+                "timeframe": timeframe,
+                "is_intraday": is_intraday,
             },
             preferred_vehicle="NAKED_OPTION",
-            actionable_plan={
-                "action": "SELL_SHORT",
-                "instrument_type": "EQUITY",
-                "entry_range": f"₹{round(ob.top - 0.85 * (ob.top - ob.bottom), 2):,.2f} – ₹{ob.top:,.2f}",
-                "stop_loss": f"₹{stop_loss:,.2f}",
-                "target": f"₹{t1:,.2f}",
-                "target_1": f"₹{t1:,.2f}",
-                "target_2": f"₹{t2:,.2f}",
-                "runner_target": f"₹{runner:,.2f}",
-                "no_chase_boundary": f"₹{ob.bottom:,.2f}",
-                "risk_reward": f"1:{rr_t2}",
-                "scale_out_plan": scale_out_plan,
-                "no_chase_rule": (
-                    f"DO NOT ENTER below ₹{ob.bottom:,.2f} — "
-                    f"OB mitigated once price closes below its bottom."
-                ),
-                "trade_plan": {
-                    "entry_price": entry_price,
-                    "invalidation_stop": stop_loss,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "runner_target": runner,
-                    "no_chase_boundary": round(ob.bottom, 2),
-                    "rr_t1": rr_t1,
-                    "rr_t2": rr_t2,
-                },
-            },
+            actionable_plan=act_plan,
         )
         found.append(alert)
         break  # One bearish OB alert per symbol per session

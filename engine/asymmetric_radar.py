@@ -948,7 +948,18 @@ class AsymmetricOpportunityRadar:
         if ltp <= 0:
             return None
 
-        # Heuristic MWPL calculation if not provided explicitly:
+        # Query authentic MWPL utilization if not provided explicitly:
+        if mwpl_pct is None:
+            try:
+                from market.fno_ban import get_mwpl_utilization
+
+                mwpl_pct = get_mwpl_utilization(clean_sym)
+            except Exception:
+                mwpl_pct = None
+
+        # If MWPL is not recorded in official reports, do NOT invent synthetic numbers.
+        # Fallback to authentic option-chain short squeeze signals only if substantial CE unwinding is observed.
+        mwpl_provenance = "REPORTED" if mwpl_pct is not None else "INFERRED_FLOW"
         if mwpl_pct is None:
             from market.options import get_options_chain
 
@@ -958,22 +969,32 @@ class AsymmetricOpportunityRadar:
                 ce_shedding = []
                 pe_building = []
                 for c in chain:
-                    doi = getattr(c, "oi_change", 0)
-                    oi = getattr(c, "oi", 0)
-                    opt_type = getattr(c, "option_type", "")
+                    doi = (
+                        getattr(c, "oi_change", 0)
+                        if not isinstance(c, dict)
+                        else c.get("oi_change", 0)
+                    )
+                    oi = getattr(c, "oi", 0) if not isinstance(c, dict) else c.get("oi", 0)
+                    opt_type = (
+                        getattr(c, "option_type", "")
+                        if not isinstance(c, dict)
+                        else c.get("option_type", "")
+                    )
                     if opt_type == "CE" and doi < 0 and oi > 0:
                         ce_shedding.append(abs(doi) / oi * 100.0)
                     elif opt_type == "PE" and doi > 0 and oi > 0:
                         pe_building.append(doi / oi * 100.0)
                 if ce_shedding and max(ce_shedding) >= 12.0 and chg >= 1.0:
-                    mwpl_pct = 89.5  # Inferred Pre-Ban Squeeze Condition
+                    is_pre_ban = True
+                    is_ban_exit = False
+                    mwpl_pct = 0.0  # Explicit 0.0 to signal unquantified MWPL percentage
                 else:
-                    mwpl_pct = 72.0
+                    return None
             else:
-                mwpl_pct = 70.0
-
-        is_pre_ban = mwpl_pct >= 88.0
-        is_ban_exit = 75.0 <= mwpl_pct < 80.0 and chg > 1.2
+                return None
+        else:
+            is_pre_ban = mwpl_pct >= 88.0
+            is_ban_exit = 75.0 <= mwpl_pct < 80.0 and chg > 1.2
 
         if not (is_pre_ban or is_ban_exit):
             return None
@@ -1003,8 +1024,15 @@ class AsymmetricOpportunityRadar:
             if is_pre_ban
             else "🚀 F&O Ban Exit Institutional Ignition"
         )
+        if mwpl_provenance == "REPORTED" and mwpl_pct > 0:
+            mwpl_line = f"MWPL at {mwpl_pct:.1f}% (Bears prohibited from adding fresh short hedges)"
+        else:
+            mwpl_line = (
+                "Significant CE Call shedding and short covering observed (>12% OI unwinding)"
+            )
+
         confluences = [
-            f"MWPL at {mwpl_pct:.1f}% (Bears prohibited from adding fresh short hedges)",
+            mwpl_line,
             "Price holding comfortably above intraday VWAP with expanding turnover",
             "Call writers shedding open interest in panic delta-hedging",
         ]
@@ -2492,6 +2520,16 @@ class AsymmetricOpportunityRadar:
             except Exception as e:
                 logger.debug(f"[AsymmetricRadar] Batch quote fetch error: {e}")
 
+        # Pre-warm batch EOD cache for all candidate symbols to eliminate thread contention & disk latency
+        eod_batch: dict[str, Any] = {}
+        try:
+            from engine.eod_store import get_cached_ohlcv_batch
+
+            clean_syms = [canonical_alert_symbol(s) for s in universe]
+            eod_batch = get_cached_ohlcv_batch(clean_syms, days=90)
+        except Exception as _e_batch:
+            logger.debug(f"[AsymmetricRadar] Batch EOD load error: {_e_batch}")
+
         def _evaluate_sym(sym: str) -> list[AsymmetricOpportunity]:
             sym_opps: list[AsymmetricOpportunity] = []
             clean_sym = canonical_alert_symbol(sym)
@@ -2515,20 +2553,21 @@ class AsymmetricOpportunityRadar:
             if spot_px <= 0.0:
                 return []
 
-            # Pre-fetch OHLCV once for this symbol
-            df = None
-            try:
-                from market.history import get_ohlcv
+            # Pre-fetch OHLCV once for this symbol (using batch EOD cache first)
+            df = eod_batch.get(clean_sym) or eod_batch.get(sym) if eod_batch else None
+            if df is None or len(df) < 20:
+                try:
+                    from market.history import get_ohlcv
 
-                hist_exch = "CRYPTO" if is_crypto else ("MCX" if is_comm else "NSE")
-                df = get_ohlcv(
-                    clean_sym,
-                    exchange=hist_exch,
-                    interval="day",
-                    days=90 if not is_comm else 60,
-                )
-            except Exception:
-                df = None
+                    hist_exch = "CRYPTO" if is_crypto else ("MCX" if is_comm else "NSE")
+                    df = get_ohlcv(
+                        clean_sym,
+                        exchange=hist_exch,
+                        interval="day",
+                        days=90 if not is_comm else 60,
+                    )
+                except Exception:
+                    df = None
 
             # 1. Pocket Pivot check
             try:

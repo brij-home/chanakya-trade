@@ -389,12 +389,17 @@ def evaluate_synthetic_spot_sl(
                 or 0.0
             )
 
-    # Determine option entry price
+    # Determine option entry price (prioritize immutable initial entry anchors over mutable live quotes)
+    act_plan = _safe_get(alert, "actionable_plan", {}) or {}
+    trade_plan = act_plan.get("trade_plan", {}) if isinstance(act_plan, dict) else {}
     opt_entry = float(
-        _safe_get(alert, "option_premium", 0.0)
-        or _safe_get(alert, "trigger_level", 0.0)
+        _safe_get(alert, "initial_entry_premium", 0.0)
+        or _safe_get(alert, "entry_price", 0.0)
+        or trade_plan.get("entry_price", 0.0)
+        or (act_plan.get("entry_price", 0.0) if isinstance(act_plan, dict) else 0.0)
         or (_safe_get(alert, "metrics", {}) or {}).get("option_entry_premium", 0.0)
-        or (_safe_get(alert, "actionable_plan", {}) or {}).get("entry_price", 0.0)
+        or _safe_get(alert, "trigger_level", 0.0)
+        or _safe_get(alert, "option_premium", 0.0)
         or _safe_get(alert, "ltp", 0.0)
         or 0.0
     )
@@ -462,6 +467,29 @@ def evaluate_synthetic_spot_sl(
 
     # Case 1: Spot genuinely breached thesis anchor
     if spot_breached:
+        # Plausibility & Circuit Limit Filter (Invariant 10 & 11):
+        # Under SEBI circuit bands, an equity underlying cannot jump >25% instantaneously,
+        # nor can an index jump >15%. Any breach exceeding this threshold is an impossible corrupt
+        # tick, mis-scaled decimal, or venue collision (e.g. MCX commodity tick colliding with MCX equity).
+        max_plausible_breach_pct = 15.0 if is_index else 25.0
+        if abs(spot_distance_pct) > max_plausible_breach_pct:
+            logger.warning(
+                f"[SyntheticSL] ⚠️ Implausible spot drop rejected for {und_sym}: "
+                f"Live ₹{live_spot:,.1f} vs anchor ₹{spot_anchor:,.1f} ({spot_distance_pct:+.2f}% > {max_plausible_breach_pct}% circuit band). "
+                f"Corrupt feed anomaly suppressed."
+            )
+            return SyntheticSLEvaluation(
+                is_invalidated=False,
+                rejection_reason=None,
+                is_freak_wick_shielded=True,
+                shield_reason=f"Implausible spot feed anomaly ({spot_distance_pct:+.1f}%) shielded against corrupt tick",
+                live_spot=live_spot,
+                spot_anchor=spot_anchor,
+                spot_distance_pct=round(spot_distance_pct, 2),
+                option_drawdown_pct=round(opt_drawdown * 100.0, 2),
+                underlying_symbol=und_sym,
+            )
+
         breach_desc = "below support" if is_bullish else "above resistance"
         reason = (
             f"Underlying {und_sym} spot breached thesis invalidation anchor {breach_desc} "
@@ -547,8 +575,14 @@ def evaluate_synthetic_spot_sl(
     elif has_derisked:
         catastrophic_dd_threshold = 0.05
     elif not is_idx and is_intraday:
-        # Intraday single-stock equity option: wider than 25% drawdown indicates severe illiquidity or gamma decay
-        catastrophic_dd_threshold = min(0.25, max(0.16, designed_risk_ratio * 1.15))
+        # Intraday single-stock equity option:
+        # If the underlying spot is completely holding its structural anchor, provide room
+        # for normal derivative bid-ask spread and noise wicks up to 38%.
+        # If spot anchor is not holding or unanchored, maintain the tighter 25% safety ceiling.
+        if spot_is_holding and live_spot > 0 and spot_anchor > 0:
+            catastrophic_dd_threshold = min(0.38, max(0.28, designed_risk_ratio * 1.45))
+        else:
+            catastrophic_dd_threshold = min(0.25, max(0.16, designed_risk_ratio * 1.15))
     else:
         catastrophic_dd_threshold = max(0.32, min(0.42, designed_risk_ratio * 1.25))
 

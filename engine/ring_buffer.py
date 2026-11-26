@@ -37,7 +37,7 @@ class RollingTickBuffer:
         if capacity <= 0:
             raise ValueError("Capacity must be greater than 0")
         self.capacity = int(capacity)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Circular buffer arrays
         self._prices: list[float] = [0.0] * self.capacity
@@ -48,9 +48,13 @@ class RollingTickBuffer:
         self._count = 0  # Current number of items stored
         self._total_appended = 0  # Monotonic tick sequence index
 
-        # Online VWAP accumulators
+        # Online VWAP accumulators (sliding window)
         self._sum_pv = 0.0
         self._sum_v = 0
+
+        # Session-Cumulative VWAP accumulators (un-evicted from 09:15 open)
+        self._session_sum_pv = 0.0
+        self._session_sum_v = 0
 
         # Online Variance accumulators
         self._sum_p = 0.0
@@ -112,6 +116,10 @@ class RollingTickBuffer:
         # Update write head circularly
         self._head = (idx + 1) % self.capacity
         self._total_appended += 1
+
+        # Accumulate to session-cumulative VWAP (un-evicted from 09:15 open)
+        self._session_sum_pv += p * v
+        self._session_sum_v += v
 
         # Periodic exact recalibration every 2,000 appends
         if self._total_appended % self._recalc_interval == 0:
@@ -193,6 +201,20 @@ class RollingTickBuffer:
             return self._sum_pv / self._sum_v
 
     @property
+    def session_vwap(self) -> float:
+        """O(1) True Session-Cumulative Volume Weighted Average Price (un-evicted from 09:15 open)."""
+        with self._lock:
+            if self._session_sum_v <= 0:
+                return (self._sum_pv / self._sum_v) if self._sum_v > 0 and self._count > 0 else 0.0
+            return self._session_sum_pv / self._session_sum_v
+
+    def reset_session(self) -> None:
+        """Resets session-cumulative VWAP accumulators at daily market open (09:15 IST)."""
+        with self._lock:
+            self._session_sum_pv = 0.0
+            self._session_sum_v = 0
+
+    @property
     def mean(self) -> float:
         """O(1) Rolling Mean Price."""
         with self._lock:
@@ -255,6 +277,7 @@ class RollingTickBuffer:
                     "count": 0,
                     "last_price": 0.0,
                     "vwap": 0.0,
+                    "session_vwap": 0.0,
                     "mean": 0.0,
                     "std": 0.0,
                     "min": 0.0,
@@ -265,6 +288,9 @@ class RollingTickBuffer:
             mean = self._sum_p / cnt
             var = max(0.0, (self._sum_p2 / cnt) - (mean * mean)) if cnt > 1 else 0.0
             vwap = (self._sum_pv / self._sum_v) if self._sum_v > 0 else 0.0
+            sess_vwap = (
+                (self._session_sum_pv / self._session_sum_v) if self._session_sum_v > 0 else vwap
+            )
             max_p = self._max_deque[0][0] if self._max_deque else 0.0
             min_p = self._min_deque[0][0] if self._min_deque else 0.0
 
@@ -272,6 +298,7 @@ class RollingTickBuffer:
                 "count": cnt,
                 "last_price": self._prices[last_idx],
                 "vwap": round(vwap, 4),
+                "session_vwap": round(sess_vwap, 4),
                 "mean": round(mean, 4),
                 "std": round(math.sqrt(var), 4),
                 "min": min_p,

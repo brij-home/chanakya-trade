@@ -30,9 +30,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -45,10 +44,7 @@ from engine.dynamic_risk import resolve_price_tier
 logger = logging.getLogger("chanakya.detectors.orb")
 
 
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def extract_opening_range(
@@ -735,6 +731,10 @@ def detect_opening_range_breakout(
 
     clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
+    from engine.position_sizer import get_lot_size
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_idx or (stock_lot_size > 1)
     opt_plan = (
         resolve_option_contract(
             symbol=clean_sym,
@@ -742,8 +742,9 @@ def detect_opening_range_breakout(
             direction=direction,
             underlying_sl=stop_loss,
             underlying_target=target_1,
+            prefer_options=should_prefer_opt,
         )
-        if is_idx
+        if should_prefer_opt
         else None
     )
 
@@ -809,11 +810,12 @@ def detect_opening_range_breakout(
             "retest_invalidation_sl": round(max(orb_mid, orb_high - 0.28 * orb_range), 1)
             if (is_bullish or (is_primed and direction == "BULLISH"))
             else round(min(orb_mid, orb_low + 0.28 * orb_range), 1),
+            "entry_type": "LIMIT_ON_PULLBACK" if is_primed else "BREAKOUT_STOP",
             "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
             "when_to_buy": (
                 f"WATCHLIST SURVEILLANCE ONLY. Await 5m candle close {'above ₹' + str(orb_high) if direction == 'BULLISH' else 'below ₹' + str(orb_low)} to trigger ORB_BREAKOUT. Do not front-run."
                 if is_primed
-                else f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if direction == 'BULLISH' else 'below'} ₹{trigger_level:,.1f}."
+                else f"Buy {opt_plan.contract_symbol} on retest while {clean_sym} spot holds {'above' if direction == 'BULLISH' else 'below'} ₹{trigger_level:,.1f}."
             ),
             "when_to_wait": when_wait,
             "profit_rule": "Scale Blueprint: Book 50% at T1 (+2.0R to +3.0R), move Stop-Loss to Breakeven (+0.2% fee cushion). Risk becomes ₹0.00 (Free-Roll). Hold 25% for T2, trail 25% runner on 5m 9-EMA.",
@@ -825,7 +827,9 @@ def detect_opening_range_breakout(
             alert_type=alert_type,
             stage=stage_val,
             symbol=clean_sym,
-            exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
+            exchange="BFO"
+            if clean_sym in ("SENSEX", "BANKEX")
+            else ("NFO" if (is_idx or opt_plan) else exchange),
             direction=direction,
             headline=opt_headline,
             summary=summary,
@@ -839,13 +843,13 @@ def detect_opening_range_breakout(
             option_premium=opt_plan.entry_premium,
             underlying_spot=ltp,
             lot_size=opt_plan.lot_size,
-            segment="FNO_INDEX",
+            segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if opt_plan else "EQUITY"),
             no_chase_boundary=opt_no_chase,
             spot_no_chase_boundary=no_chase_lvl,
             confidence=confidence,
             created_at=now_iso,
-            is_live=False if is_primed else True,
-            environment="TEST" if is_primed else "LIVE",
+            is_live=not is_primed,
+            environment="LIVE",
             entry_type="BREAKOUT_STOP",
             setup_style="SURVEILLANCE" if is_primed else "CONTINUATION",
             metrics={
@@ -878,6 +882,21 @@ def detect_opening_range_breakout(
                 "vsa_signal": vsa_sig,
                 "is_watch_only": bool(is_primed),
                 "execution_ready": not is_primed,
+                **(
+                    {
+                        "scrutiny": {
+                            "status": "QUANT_VERIFIED",
+                            "score": confidence,
+                            "logic_confirmation": f"Tier-1 ORB coil & range geometry verified for {clean_sym} ({direction}).",
+                            "trap_risk_warning": "Coiling surveillance setup; await physical range breakout confirmation.",
+                            "actionable_guidance": f"Pre-stage only. Enter on confirmed breakout beyond {trigger_level}.",
+                            "auditor_model": "TIER1_QUANT",
+                            "audited_at": now_iso,
+                        }
+                    }
+                    if is_primed
+                    else {}
+                ),
             },
             preferred_vehicle="NAKED_OPTION",
             actionable_plan=act_plan,
@@ -897,10 +916,11 @@ def detect_opening_range_breakout(
         target_level=target_1,
         stop_loss=stop_loss,
         no_chase_boundary=no_chase_lvl,
+        segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if stock_lot_size > 1 else "EQUITY"),
         confidence=confidence,
         created_at=now_iso,
-        is_live=False if is_primed else True,
-        environment="TEST" if is_primed else "LIVE",
+        is_live=not is_primed,
+        environment="LIVE",
         entry_type="BREAKOUT_STOP",
         setup_style="SURVEILLANCE" if is_primed else "CONTINUATION",
         metrics={
@@ -929,6 +949,21 @@ def detect_opening_range_breakout(
             "fractal_blueprint": fractal_meta,
             "is_watch_only": bool(is_primed),
             "execution_ready": not is_primed,
+            **(
+                {
+                    "scrutiny": {
+                        "status": "QUANT_VERIFIED",
+                        "score": confidence,
+                        "logic_confirmation": f"Tier-1 ORB coil & range geometry verified for {clean_sym} ({direction}).",
+                        "trap_risk_warning": "Coiling surveillance setup; await physical range breakout confirmation.",
+                        "actionable_guidance": f"Pre-stage only. Enter on confirmed breakout beyond {trigger_level}.",
+                        "auditor_model": "TIER1_QUANT",
+                        "audited_at": now_iso,
+                    }
+                }
+                if is_primed
+                else {}
+            ),
         },
         preferred_vehicle="NAKED_OPTION",
         actionable_plan={

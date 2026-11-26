@@ -43,8 +43,9 @@ async def get_auto_alerts(
     """
     from engine.auto_alert_engine import auto_alert_engine
 
-    # In-memory filtered slice (< 1ms). Direct execution avoids thread pool queue starvation.
-    alerts = auto_alert_engine.get_alerts(
+    # Offload snapshot filtering cleanly so large history queries never block the asyncio loop
+    alerts = await asyncio.to_thread(
+        auto_alert_engine.get_alerts,
         limit=limit,
         alert_type=alert_type,
         stage=stage,
@@ -87,14 +88,15 @@ async def archive_auto_alert(payload: dict):
     try:
         from web.sse import event_bus
 
-        await event_bus.broadcast(
+        event_bus.publish_sync(
+            "alert",
             {
                 "type": "auto_alert_archived",
                 "alert_id": alert_id,
                 "is_archived": archive,
                 "reason": reason,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            },
         )
     except Exception as e_suppressed:
         logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
@@ -176,7 +178,32 @@ async def rescrutinize_auto_alert(payload: dict):
     if not isinstance(target.metrics, dict):
         target.metrics = {}
     target.metrics["scrutiny"] = scrutiny.to_dict()
-    target.confidence = max(target.confidence, scrutiny.score)
+
+    # Preserve detector circuit-breaker probation penalty during on-demand rescrutiny
+    eff_score = float(scrutiny.score)
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        _, cb_mult, _ = detector_circuit_breaker.evaluate_alert_allowed(
+            getattr(target, "alert_type", "")
+        )
+        eff_score = eff_score * float(cb_mult)
+    except Exception as e_cb:
+        logger.debug(f"[web.routers.alerts_api] Probation check skipped on rescrutinize: {e_cb}")
+
+    if getattr(scrutiny, "status", "") == "REJECTED":
+        target.confidence = int(round(min(float(target.confidence), eff_score)))
+    else:
+        target.confidence = int(
+            round(
+                min(
+                    max(float(target.confidence), float(scrutiny.score)),
+                    eff_score
+                    if eff_score < float(scrutiny.score)
+                    else max(float(target.confidence), eff_score),
+                )
+            )
+        )
     await asyncio.to_thread(auto_alert_engine._save)
     return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
 
@@ -506,12 +533,13 @@ async def scan_swing_trades(
         from web.sse import event_bus
 
         for a in alerts:
-            await event_bus.broadcast(
+            event_bus.publish_sync(
+                "alert",
                 {
                     "type": "auto_alert_new",
                     "alert": a.to_dict(),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                },
             )
     except Exception as e_suppressed:
         logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
@@ -553,12 +581,13 @@ async def scan_fno_stock_swings(
         from web.sse import event_bus
 
         for a in alerts:
-            await event_bus.broadcast(
+            event_bus.publish_sync(
+                "alert",
                 {
                     "type": "auto_alert_new",
                     "alert": a.to_dict(),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                },
             )
     except Exception as e_suppressed:
         logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")

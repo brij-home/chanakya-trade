@@ -33,7 +33,6 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -53,9 +52,11 @@ from brokers.base import (
     UserProfile,
 )
 
+from config.paths import app_data_path
+
 logger = logging.getLogger(__name__)
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "kotak.json"
+TOKEN_FILE = app_data_path("kotak.json")
 
 # Exchange mappings
 NSE_CM = "nse_cm"

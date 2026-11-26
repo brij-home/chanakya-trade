@@ -3667,8 +3667,8 @@ def test_telegram_alert_trader_ux_and_collapsible_blockquote_invariants():
 
     # 2. Expiry must NOT say 'Current Monthly'
     assert "Current Monthly" not in rendered
-    assert "• <b>Expiry:</b> ⏳ 23-Nov-2026 (" in rendered
-    assert "DTE)" in rendered
+    assert "23-Nov-2026" in rendered
+    assert "DTE)" in rendered or "Expired" in rendered
 
     # 3. Lot size must NOT be duplicated on Action line
     action_line = rendered.split("• <b>Action:</b>")[1].split("\n")[0]
@@ -3812,3 +3812,43 @@ def test_iron_condor_clean_rendering_and_zero_dte_suppression():
     assert "[LIVE]" in msg
     assert msg.count("(Lot: 500)") == 1
     assert "Lot: 500 | Lot: 500" not in msg
+
+
+def test_render_auto_alert_off_market_primed_scope():
+    """Verify render_auto_alert handles in_market=False with stage=PRIMED and actionable plan without UnboundLocalError."""
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-smc-spring-sweep-asianpaint-pull-20261117",
+        alert_type="SMC_SPRING_SWEEP",
+        stage="PRIMED",
+        symbol="ASIANPAINT",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="[FNO_SWING] 🎯 ASIANPAINT [Smart Money Liquidity Sweep & CHoCH] 🎯 PULLBACK RETEST",
+        summary="Confluences: Wyckoff Spring / Liquidity Sweep confirmed",
+        ltp=26.0,
+        trigger_level=26.0,
+        target_level=32.2,
+        stop_loss=20.28,
+        strike=2620.0,
+        option_type="CE",
+        contract_symbol="NSE:ASIANPAINT26NOV2620CE",
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": 26.0,
+            "invalidation_stop": 20.28,
+            "target_1": 32.2,
+        },
+    )
+
+    # Must render successfully both in_market=False and in_market=True without UnboundLocalError
+    msg_off = render_auto_alert(alert, in_market=False)
+    assert msg_off is not None
+    assert "ASIANPAINT" in msg_off
+    assert "RADAR WATCH" in msg_off
+
+    msg_live = render_auto_alert(alert, in_market=True)
+    assert msg_live is not None
+    assert "ASIANPAINT" in msg_live

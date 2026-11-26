@@ -82,7 +82,12 @@ def test_alert_templates_turtle_soup_sweep_alignment():
     }
 
     d = date(2026, 10, 3)
-    bull_alert = detect_turtle_soup_sweep("NSE:INFY", df=df, ltp=prior_low + 3.0, session_date=d)
+    from unittest.mock import patch
+
+    with patch("engine.daily_levels.get_daily_levels", return_value=None):
+        bull_alert = detect_turtle_soup_sweep(
+            "NSE:INFY", df=df, ltp=prior_low + 3.0, session_date=d
+        )
     assert bull_alert is not None
 
     msg_bull = render_auto_alert(bull_alert, in_market=True)
@@ -140,8 +145,9 @@ def test_web_api_symbol_and_regime_endpoints():
             if data_regime.get("governor"):
                 gov = data_regime["governor"]
                 assert "regime" in gov
-                assert "breakout_weight" in gov
-                assert "position_size_multiplier" in gov
+                assert "min_scrutiny_score" in gov
+                assert "dominant_bias" in gov
+                assert "data_status" in gov
 
             # 2. Symbol search
             res_search = await client.get("/api/market/symbol/search?q=NIFTY&limit=5")

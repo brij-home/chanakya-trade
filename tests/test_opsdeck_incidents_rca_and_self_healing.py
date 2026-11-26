@@ -551,11 +551,11 @@ def test_telemetry_handler_websocket_routine_disconnect_p3():
         handler.emit(record)
         assert mock_record.called
         kwargs = mock_record.call_args[1]
-        # Routine socket closure is downgraded from P1 (Error) to P2 (Operational Diagnostic)
-        assert kwargs["priority"] == "P2", (
-            f"Expected P2 for routine websocket drop, got {kwargs['priority']}"
+        # Routine socket closure is downgraded from P1 (Error) to P3 (Informational Diagnostic)
+        assert kwargs["priority"] == "P3", (
+            f"Expected P3 for routine websocket drop, got {kwargs['priority']}"
         )
-        assert kwargs["severity"] == "WARNING"
+        assert kwargs["severity"] == "INFO"
 
 
 # ── 14. NIFTYNXT50 Index Symbol Canonicalization ──────────────────────────────

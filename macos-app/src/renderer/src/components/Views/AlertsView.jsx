@@ -151,7 +151,7 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
               is_archived: true,
               is_active: false,
               stage: 'EXPIRED',
-              invalidation_reason: oldItem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+              invalidation_reason: oldItem.invalidation_reason || `Intraday session expired (${oldItem.session_close_ist || 'session close'} cutoff reached). Trade closed.`
             })
             continue
           }

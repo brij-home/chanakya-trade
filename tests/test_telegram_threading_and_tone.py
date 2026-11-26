@@ -751,3 +751,254 @@ def test_channel_anchoring_prevents_segment_migration(tmp_path, monkeypatch):
     # Must be dispatched to the original anchored chat "-1003524867091", NOT "-1004393392375"
     assert len(dispatched_targets) == 1
     assert dispatched_targets[0] == "-1003524867091"
+
+
+def test_root_text_recording_and_retrieval():
+    """Verify recording and retrieving root signal message text with and without chat isolation."""
+    from bot.telegram_bot import get_signal_root_text
+
+    initial_text = (
+        "<b>[LIVE] 🟢 NIFTY 24500 CE</b> · <code>24-Nov-2026 (0 DTE)</code>\n"
+        "• <b>Action:</b> BUY NIFTY 24500 CE @ <code>₹120.00</code>\n"
+        "• <b>Stop-Loss:</b> <code>₹95.00</code> | <b>Target 1:</b> <code>₹165.00</code>\n"
+        "🏷️ <code>#SIG_NIFTY_24500CE_24NOV</code>"
+    )
+
+    # 1. Global / unpartitioned
+    record_signal_message_id("SIG_NIFTY_24500CE_24NOV", 5001, text=initial_text)
+    assert get_signal_message_id("SIG_NIFTY_24500CE_24NOV") == 5001
+    assert get_signal_root_text("SIG_NIFTY_24500CE_24NOV") == initial_text
+
+    # 2. Channel partitioned
+    chat_fno = "-1004393392375"
+    chat_eq = "-1003524867091"
+    record_signal_message_id(
+        "SIG_RELIANCE_CE",
+        6001,
+        chat_id=chat_fno,
+        alert_id="aa-fno-reliance-20261124",
+        text=initial_text,
+    )
+
+    assert get_signal_message_id("SIG_RELIANCE_CE", chat_id=chat_fno) == 6001
+    assert get_signal_root_text("SIG_RELIANCE_CE", chat_id=chat_fno) == initial_text
+
+    # Cross-channel isolation: querying from chat_eq returns None
+    assert get_signal_message_id("SIG_RELIANCE_CE", chat_id=chat_eq) is None
+    assert get_signal_root_text("SIG_RELIANCE_CE", chat_id=chat_eq) is None
+
+
+def test_inplace_lifecycle_ratcheting_sequence(monkeypatch):
+    """
+    Verify full in-place message lifecycle ratcheting sequence:
+    Root alert -> T1 Hit -> T2 Hit -> Final Target -> Invalidated.
+    """
+    from bot.telegram_bot import update_root_signal_status
+
+    edited_messages = []
+
+    def mock_edit(message_id, text, chat_id=None, **kwargs):
+        edited_messages.append({"message_id": message_id, "text": text, "chat_id": chat_id})
+        return True
+
+    monkeypatch.setattr("bot.telegram_bot.edit_message_text", mock_edit)
+
+    chat_id = "-1004393392375"
+    sig = "SIG_NIFTY_24NOV_TEST"
+    root_text = (
+        "<b>[LIVE] 🟢 NIFTY 24500 CE</b> · <code>24-Nov-2026 (0 DTE)</code>\n"
+        "• <b>Action:</b> BUY @ <code>₹120.00</code>"
+    )
+
+    # Record initial root message
+    record_signal_message_id(sig, 7701, chat_id=chat_id, text=root_text)
+
+    # 1. Major Milestone: Target 1 Hit
+    ok = update_root_signal_status(
+        signal_id=sig,
+        chat_id=chat_id,
+        status_badge="[🏆 T1 HIT · SL TO COST]",
+    )
+    assert ok is True
+    assert len(edited_messages) == 1
+    assert edited_messages[-1]["message_id"] == 7701
+    assert "<b>[LIVE] [🏆 T1 HIT · SL TO COST] 🟢 NIFTY 24500 CE</b>" in edited_messages[-1]["text"]
+
+    # 2. Major Milestone: Target 2 Hit (replaces T1 badge in root header)
+    ok = update_root_signal_status(
+        signal_id=sig,
+        chat_id=chat_id,
+        status_badge="[🎯 T2 HIT · FULL EXTENSION]",
+    )
+    assert ok is True
+    assert len(edited_messages) == 2
+    assert (
+        "<b>[LIVE] [🎯 T2 HIT · FULL EXTENSION] 🟢 NIFTY 24500 CE</b>"
+        in edited_messages[-1]["text"]
+    )
+    assert "[🏆 T1 HIT" not in edited_messages[-1]["text"]
+
+    # 3. Final Milestone: Runner Closed
+    ok = update_root_signal_status(
+        signal_id=sig,
+        chat_id=chat_id,
+        status_badge="[🏁 RUNNER CLOSED]",
+    )
+    assert ok is True
+    assert len(edited_messages) == 3
+    assert "<b>[LIVE] [🏁 RUNNER CLOSED] 🟢 NIFTY 24500 CE</b>" in edited_messages[-1]["text"]
+    assert "[🎯 T2 HIT" not in edited_messages[-1]["text"]
+
+
+def test_inplace_lifecycle_ratcheting_with_test_environment(monkeypatch):
+    """Verify that [TEST] and [OFF-MARKET] provenance tags are preserved when ratcheting status."""
+    from bot.telegram_bot import update_root_signal_status
+
+    edited = []
+    monkeypatch.setattr(
+        "bot.telegram_bot.edit_message_text", lambda **kw: edited.append(kw) or True
+    )
+
+    sig = "SIG_BANKNIFTY_PE"
+    root_text = "<b>[TEST] 🔴 BANKNIFTY 52000 PE</b> · <code>Test Mode</code>"
+    record_signal_message_id(sig, 8801, text=root_text)
+
+    ok = update_root_signal_status(signal_id=sig, status_badge="[🛑 INVALIDATED / STOPPED OUT]")
+    assert ok is True
+    assert len(edited) == 1
+    assert "<b>[TEST] [🛑 INVALIDATED / STOPPED OUT] 🔴 BANKNIFTY 52000 PE</b>" in edited[0]["text"]
+
+
+@pytest.mark.anyio
+async def test_cmd_quote_html_rendering(monkeypatch):
+    """Verify /quote formats into high-density HTML card with day range bar and monospace figures."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+    from bot.telegram_bot import cmd_quote
+
+    mock_quote = SimpleNamespace(
+        last_price=2450.50,
+        change=25.50,
+        change_pct=1.05,
+        open=2430.00,
+        high=2460.00,
+        low=2425.00,
+        volume=1250000,
+        vwap=2445.00,
+    )
+    monkeypatch.setattr("market.quotes.get_quote", lambda syms: {"NSE:RELIANCE": mock_quote})
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.args = ["RELIANCE"]
+
+    await cmd_quote(update, context)
+
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    rendered = args[0]
+    assert kwargs.get("parse_mode") == "HTML"
+    assert "<b>RELIANCE</b>" in rendered
+    assert "<code>₹2,450.50</code>" in rendered
+    assert "🟢" in rendered
+    assert "Day Range:" in rendered
+
+
+@pytest.mark.anyio
+async def test_cmd_macro_html_rendering(monkeypatch):
+    """Verify /macro formats into monospace dashboard card."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+    from bot.telegram_bot import cmd_macro
+
+    mock_snap = SimpleNamespace(
+        usdinr=84.25,
+        usdinr_change=0.15,
+        crude_oil=74.5,
+        crude_change=-1.2,
+        gold=2750.0,
+        gold_change=0.5,
+        us_10y=4.42,
+    )
+    monkeypatch.setattr("market.macro.get_macro_snapshot", lambda: mock_snap)
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    await cmd_macro(update, context)
+
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    rendered = args[0]
+    assert kwargs.get("parse_mode") == "HTML"
+    assert "<b>Global Macro Dashboard</b>" in rendered
+    assert "<code>₹84.25</code>" in rendered
+    assert "<code>$74.5/bbl</code>" in rendered
+
+
+@pytest.mark.anyio
+async def test_cmd_flows_html_rendering(monkeypatch):
+    """Verify /flows formats into high-density card with expandable blockquote."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+    from bot.telegram_bot import cmd_flows
+
+    mock_flows = SimpleNamespace(
+        fii_net_today=-1250.0,
+        dii_net_today=2100.0,
+        fii_5d_net=-5400.0,
+        fii_streak=-3,
+        divergence=True,
+        divergence_type="DII_ABSORPTION",
+        signal="MODERATE_BULLISH",
+        confidence=75,
+        signal_reason="DII net absorption offsetting FII outflows",
+    )
+    monkeypatch.setattr("market.flow_intel.get_flow_analysis", lambda: mock_flows)
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    await cmd_flows(update, context)
+
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    rendered = args[0]
+    assert kwargs.get("parse_mode") == "HTML"
+    assert "<b>Institutional Flows (FII/DII)</b>" in rendered
+    assert "<blockquote expandable>" in rendered
+    assert "<code>-1,250 Cr</code>" in rendered
+    assert "<code>+2,100 Cr</code>" in rendered
+
+
+@pytest.mark.anyio
+async def test_cmd_pnl_html_rendering(monkeypatch):
+    """Verify /pnl formats into high-density monospace portfolio card."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+    from bot.telegram_bot import cmd_pnl
+
+    mock_summary = SimpleNamespace(
+        total_value=500000.0,
+        total_pnl=25000.0,
+        day_pnl=4500.0,
+        risk=SimpleNamespace(risk_rating="CONSERVATIVE", deployment_pct=40.0),
+    )
+    monkeypatch.setattr("engine.portfolio.get_portfolio_summary", lambda: mock_summary)
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    await cmd_pnl(update, context)
+
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    rendered = args[0]
+    assert kwargs.get("parse_mode") == "HTML"
+    assert "<b>Portfolio Snapshot</b>" in rendered
+    assert "<code>₹500,000</code>" in rendered
+    assert "<code>+₹25,000</code>" in rendered

@@ -179,7 +179,9 @@ def _enrich_quote(
         canonical_id = None
     price = float(getattr(quote, "last_price", 0.0) or 0.0)
     source_kind = (
-        source if source in {"STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE"} else "FALLBACK"
+        source
+        if source in {"STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE", "SYNTHETIC"}
+        else "FALLBACK"
     )
 
     vwap_val = getattr(quote, "vwap", None)
@@ -195,34 +197,49 @@ def _enrich_quote(
         cached_vwap = cache.get(clean_sym) or cache.get(canonical_sym)
         if cached_vwap and cached_vwap > 0:
             vwap_val = cached_vwap
-        # 2. If it's a primary benchmark index and still missing, compute on-demand
-        elif canonical_sym in {
-            "NIFTY",
-            "BANKNIFTY",
-            "FINNIFTY",
-            "MIDCPNIFTY",
-            "SENSEX",
-            "BANKEX",
-        }:
-            vwap_val = get_computed_vwap(
-                canonical_sym, exchange="BSE" if canonical_sym in ("SENSEX", "BANKEX") else "NSE"
-            )
-        # 3. For equities or futures with missing broker VWAP/ATP, compute from 5m bars
-        elif price > 0:
-            exch = "BSE" if instrument.startswith("BSE:") else "NSE"
-            vwap_val = _compute_raw_vwap(clean_sym, exchange=exch)
-            if vwap_val and vwap_val > 0:
-                cache.put(clean_sym, vwap_val)
-                cache.put(canonical_sym, vwap_val)
-            else:
-                # 4. Fallback proxy from today's open/high/low/ltp if available
-                q_o = float(getattr(quote, "open", 0.0) or 0.0)
-                q_h = float(getattr(quote, "high", 0.0) or 0.0)
-                q_l = float(getattr(quote, "low", 0.0) or 0.0)
-                if q_o > 0 and q_h > 0 and q_l > 0:
-                    vwap_val = round((q_o + q_h + q_l + price) / 4.0, 2)
-                elif price > 0:
-                    vwap_val = price
+        # 2. In-memory MarketMatrix check
+        elif not vwap_val:
+            try:
+                from engine.market_matrix import get_market_matrix
+
+                m_vwap = get_market_matrix().get_vwap(clean_sym) or get_market_matrix().get_vwap(
+                    canonical_sym
+                )
+                if m_vwap and m_vwap > 0:
+                    vwap_val = m_vwap
+            except Exception as e_mm_vwap:
+                logger.debug(f"[market.quotes] MarketMatrix VWAP lookup skipped: {e_mm_vwap}")
+
+        # 3. For REST quotes only, allow on-demand calculation from historical 5m bars
+        if not vwap_val and source_kind == "REST":
+            if canonical_sym in {
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            }:
+                vwap_val = get_computed_vwap(
+                    canonical_sym,
+                    exchange="BSE" if canonical_sym in ("SENSEX", "BANKEX") else "NSE",
+                )
+            elif price > 0 and not _OPTION_PATTERN.match(clean_sym):
+                exch = "BSE" if instrument.startswith("BSE:") else "NSE"
+                vwap_val = _compute_raw_vwap(clean_sym, exchange=exch)
+                if vwap_val and vwap_val > 0:
+                    cache.put(clean_sym, vwap_val)
+                    cache.put(canonical_sym, vwap_val)
+
+        # 4. Fast OHL / LTP proxy fallback for streaming and synthetic quotes
+        if not vwap_val:
+            q_o = float(getattr(quote, "open", 0.0) or 0.0)
+            q_h = float(getattr(quote, "high", 0.0) or 0.0)
+            q_l = float(getattr(quote, "low", 0.0) or 0.0)
+            if q_o > 0 and q_h > 0 and q_l > 0:
+                vwap_val = round((q_o + q_h + q_l + price) / 4.0, 2)
+            elif price > 0:
+                vwap_val = price
 
     return replace(
         quote,
@@ -303,7 +320,29 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         market_active = is_market_open(exch)
                     except Exception:
                         market_active = True
-                    max_age = 30.0 if market_active else None
+                    # Tiered Freshness SLA:
+                    # - Benchmark Indices & Core Derivatives: 30.0s (high-frequency, must tick rapidly)
+                    # - F&O Equities & Commodities: 90.0s (allows realistic intra-minute trade lulls without premature REST fallback)
+                    # - Anything older than 90s during active market hours is considered stale
+                    is_index = inst.startswith(("BSE:SENSEX", "BSE:BANKEX", "NSE:INDIAVIX")) or any(
+                        idx in inst
+                        for idx in (
+                            "NIFTY",
+                            "BANKNIFTY",
+                            "SENSEX",
+                            "FINNIFTY",
+                            "MIDCPNIFTY",
+                            "BANKEX",
+                            "INDIAVIX",
+                        )
+                    )
+                    if not market_active:
+                        max_age = None
+                    elif is_index:
+                        max_age = 30.0
+                    else:
+                        max_age = 90.0
+
                     try:
                         tick = ws_manager.get_tick(inst, max_age_seconds=max_age)
                     except TypeError:
@@ -388,9 +427,11 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                     else:
                         missing.append(inst)
 
-                # Subscribe to missing symbols for next time
+                # Subscribe to missing symbols for next time in background to avoid blocking quote query
                 if missing:
-                    ws_manager.subscribe(missing)
+                    threading.Thread(
+                        target=ws_manager.subscribe, args=(missing,), daemon=True
+                    ).start()
 
                 if len(result) >= len(instruments):
                     return result
@@ -494,11 +535,23 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         market_active = is_market_open(exch)
                     except Exception:
                         market_active = True
-                    max_age = 30.0 if market_active else None
+                    is_index = inst.startswith(("BSE:SENSEX", "BSE:BANKEX", "NSE:INDIAVIX")) or any(
+                        idx in inst
+                        for idx in (
+                            "NIFTY",
+                            "BANKNIFTY",
+                            "SENSEX",
+                            "FINNIFTY",
+                            "MIDCPNIFTY",
+                            "BANKEX",
+                            "INDIAVIX",
+                        )
+                    )
+                    max_age = (30.0 if is_index else 90.0) if market_active else None
                     clean = inst.split(":")[-1].strip().upper()
                     tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
                     if tick and market_active and getattr(tick, "timestamp", 0) > 0:
-                        if (time.time() - tick.timestamp) > 30.0:
+                        if (time.time() - tick.timestamp) > (max_age or 90.0):
                             tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
                         c_tick = ws_manager.get_tick(
@@ -627,7 +680,9 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         if getattr(b, "name", "").lower() == "flattrade" and hasattr(
                             b, "subscribe_websocket"
                         ):
-                            b.subscribe_websocket(missing)
+                            threading.Thread(
+                                target=b.subscribe_websocket, args=(missing,), daemon=True
+                            ).start()
                     except Exception as e_sub:
                         logger.debug(f"[Quotes] Flattrade ws subscribe fallback notice: {e_sub}")
 
@@ -803,7 +858,9 @@ def _calculate_cost_of_carry_factor(
     return 1.0 + (repo_rate * (days_to_expiry / 365.0))
 
 
-def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
+def _futures_quotes(
+    instruments: list[str], *, correlation_id: str, ws_only: bool = False
+) -> dict[str, Quote]:
     """Resolve derivative futures contract quotes via institutional cost-of-carry pricing when broker feed is offline or in paper mode."""
     res: dict[str, Quote] = {}
     carry_factor = _calculate_cost_of_carry_factor()
@@ -814,7 +871,7 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             continue
         und = m.group(1).upper()
         try:
-            spot_quotes = get_quote([und])
+            spot_quotes = get_quote([und], ws_only=ws_only)
             spot_q = spot_quotes.get(und) or spot_quotes.get(f"NSE:{und}")
             if spot_q and getattr(spot_q, "last_price", 0.0) > 0:
                 fut_price = round(spot_q.last_price * carry_factor, 2)
@@ -1264,7 +1321,9 @@ def get_quote(
         else:
             fut_candidates = [i for i in missing if _FUT_PATTERN.match(i.split(":")[-1])]
             if fut_candidates:
-                fut_quotes = _futures_quotes(fut_candidates, correlation_id=correlation_id)
+                fut_quotes = _futures_quotes(
+                    fut_candidates, correlation_id=correlation_id, ws_only=True
+                )
                 if fut_quotes:
                     result.update(fut_quotes)
 

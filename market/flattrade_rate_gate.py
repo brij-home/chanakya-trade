@@ -85,15 +85,37 @@ class UnifiedFlattradeRateGate:
         self._sliding_window: deque[tuple[float, FlattradeCallCategory]] = deque()
         self._hist_window: deque[float] = deque()
 
-        # Prioritized waiter queue: (category_priority, tie_breaker, category, threading.Event)
-        self._waiters: list[tuple[int, int, FlattradeCallCategory, threading.Event]] = []
+        # Prioritized waiter queue: (effective_priority, tie_breaker, category, threading.Event, enqueued_at)
+        self._waiters: list[tuple[int, int, FlattradeCallCategory, threading.Event, float]] = []
         self._counter = itertools.count()
 
         self._total_requests: dict[FlattradeCallCategory, int] = {
             c: 0 for c in FlattradeCallCategory
         }
         self._total_throttled: int = 0
+        self._total_timeouts: int = 0
         self._last_hist_dispatch_ts: float = 0.0
+        self._cooldown_until: float = 0.0
+
+    def reset_state(self) -> None:
+        """Reset all in-memory windows, cooldowns, and waiters (for clean test isolation)."""
+        with self._lock:
+            self._sliding_window.clear()
+            self._hist_window.clear()
+            for entry in self._waiters:
+                entry[3].set()
+            self._waiters.clear()
+            self._cooldown_until = 0.0
+            self._last_hist_dispatch_ts = 0.0
+            self._counter = itertools.count()
+
+    def notify_rate_limited(self, cooldown_sec: float = 2.0) -> None:
+        """Apply shared backoff across callers when Flattrade returns HTTP 429 / throttle."""
+        bounded = max(0.5, min(float(cooldown_sec or 2.0), 15.0))
+        with self._lock:
+            target = time.time() + bounded
+            if target > self._cooldown_until:
+                self._cooldown_until = target
 
     def _purge_stale(self, now: float) -> None:
         cutoff_min = now - 60.0
@@ -107,32 +129,34 @@ class UnifiedFlattradeRateGate:
     def _calculate_sleep_needed(self, now: float, category: FlattradeCallCategory) -> float:
         self._purge_stale(now)
 
+        sleep_cd = 0.0
+        if category != FlattradeCallCategory.ORDER and self._cooldown_until > now:
+            sleep_cd = self._cooldown_until - now
+
         # 1. Historical candle pacing (max 1.0 req/s)
+        sleep_hist = 0.0
         if category == FlattradeCallCategory.HISTORICAL:
             if len(self._hist_window) >= self._max_hist_per_sec:
                 oldest_hist = self._hist_window[0]
-                hist_sleep = (oldest_hist + 1.0) - now
-                if hist_sleep > 0.0:
-                    return hist_sleep
+                sleep_hist = max(0.0, (oldest_hist + 1.0) - now + 0.005)
 
         # 2. Per-second rolling ceiling
         sec_cutoff = now - 1.0
         reqs_last_sec = sum(1 for t, _ in self._sliding_window if t >= sec_cutoff)
         sleep_sec = 0.0
         if reqs_last_sec >= self._max_per_sec:
-            # Find oldest in the 1s window
             for t, _ in self._sliding_window:
                 if t >= sec_cutoff:
-                    sleep_sec = max(sleep_sec, (t + 1.0) - now)
+                    sleep_sec = max(sleep_sec, (t + 1.0) - now + 0.005)
                     break
 
         # 3. Per-minute rolling ceiling
         sleep_min = 0.0
         if len(self._sliding_window) >= self._max_per_min:
             oldest_min = self._sliding_window[0][0]
-            sleep_min = max(sleep_min, (oldest_min + 60.0) - now)
+            sleep_min = max(sleep_min, (oldest_min + 60.0) - now + 0.01)
 
-        return max(0.0, sleep_sec, sleep_min)
+        return max(0.0, sleep_cd, sleep_hist, sleep_sec, sleep_min)
 
     def acquire(
         self,
@@ -144,14 +168,22 @@ class UnifiedFlattradeRateGate:
         Returns True if clearance granted; False if timed out.
         """
         if timeout is None:
-            timeout = 5.0 if category == FlattradeCallCategory.ORDER else 15.0
+            if category == FlattradeCallCategory.ORDER:
+                timeout = 5.0
+            elif category == FlattradeCallCategory.URGENT_QUOTE:
+                timeout = 8.0
+            elif category == FlattradeCallCategory.HISTORICAL:
+                timeout = 30.0
+            else:
+                timeout = 25.0
 
         start = time.time()
         deadline = start + timeout
 
         event = threading.Event()
         tie_breaker = next(self._counter)
-        waiter = (int(category), tie_breaker, category, event)
+        waiter = (int(category), tie_breaker, category, event, start)
+        acquired = False
 
         with self._lock:
             now = time.time()
@@ -167,33 +199,61 @@ class UnifiedFlattradeRateGate:
             heapq.heappush(self._waiters, waiter)
             self._total_throttled += 1
 
-        while True:
-            now = time.time()
-            if now >= deadline:
+        try:
+            while True:
                 with self._lock:
-                    self._waiters = [w for w in self._waiters if w[1] != tie_breaker]
-                    heapq.heapify(self._waiters)
-                return False
+                    now = time.time()
+                    # Anti-starvation aging for queued non-ORDER requests (every 3.0s raises tier by 1, floor 1)
+                    if len(self._waiters) > 1:
+                        re_heapify = False
+                        aged_waiters = []
+                        for prio, tb, cat, evt, enq_t in self._waiters:
+                            if cat != FlattradeCallCategory.ORDER:
+                                boost = int((now - enq_t) // 3.0)
+                                target_prio = max(1, int(cat) - boost)
+                                if target_prio != prio:
+                                    prio = target_prio
+                                    re_heapify = True
+                            aged_waiters.append((prio, tb, cat, evt, enq_t))
+                        if re_heapify:
+                            self._waiters = aged_waiters
+                            heapq.heapify(self._waiters)
 
-            with self._lock:
-                is_top = bool(self._waiters and self._waiters[0][1] == tie_breaker)
-                if is_top:
-                    sleep_needed = self._calculate_sleep_needed(now, category)
-                    if sleep_needed <= 0.0:
-                        heapq.heappop(self._waiters)
-                        self._sliding_window.append((now, category))
-                        if category == FlattradeCallCategory.HISTORICAL:
-                            self._hist_window.append(now)
-                        self._total_requests[category] += 1
+                    is_top = bool(self._waiters and self._waiters[0][1] == tie_breaker)
+                    if is_top:
+                        sleep_needed = self._calculate_sleep_needed(now, category)
+                        if sleep_needed <= 0.0:
+                            heapq.heappop(self._waiters)
+                            self._sliding_window.append((now, category))
+                            if category == FlattradeCallCategory.HISTORICAL:
+                                self._hist_window.append(now)
+                            self._total_requests[category] += 1
+                            if self._waiters:
+                                self._waiters[0][3].set()
+                            acquired = True
+                            return True
+                        sleep_to_use = sleep_needed
+                    else:
+                        sleep_to_use = 0.25
+
+                    remaining = deadline - now
+                    if remaining <= 0.0:
+                        self._total_timeouts += 1
+                        return False
+
+                    # Clear inside lock so concurrent head wakeup set() is never overwritten.
+                    event.clear()
+                    wait_sec = max(0.005, min(sleep_to_use, remaining, 1.0))
+
+                event.wait(timeout=wait_sec)
+        finally:
+            if not acquired:
+                with self._lock:
+                    if any(w[1] == tie_breaker for w in self._waiters):
+                        self._waiters = [w for w in self._waiters if w[1] != tie_breaker]
+                        heapq.heapify(self._waiters)
                         if self._waiters:
                             self._waiters[0][3].set()
-                        return True
-                    sleep_to_use = min(sleep_needed, deadline - now)
-                else:
-                    sleep_to_use = deadline - now
-
-            event.clear()
-            event.wait(timeout=max(0.01, min(sleep_to_use, 1.0)))
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return real-time usage metrics and governor diagnostics."""

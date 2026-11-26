@@ -371,3 +371,111 @@ def test_one_signal_per_sector_daily_throttle():
 
     # SBIN is suppressed because Banking already fulfilled its daily quota!
     assert len(found_c2) == 0
+
+
+def test_extended_option_pullback_limit_entry():
+    """Option with premium surge >= 20% mandates a pullback limit order instead of market chase."""
+    now_dt = datetime(2026, 9, 23, 10, 30, tzinfo=IST)
+    quote = DummyQuote(ltp=1500.0, open_p=1480.0, vwap=1490.0, chg=1.35)
+    # 28% surge on option premium:
+    contracts = [
+        DummyOptionContract("INFY1520CE", 1520.0, "CE", 32.0, volume=4000, oi=2000, pchange=28.0)
+    ]
+
+    tailwind = StockTailwind(
+        symbol="INFY",
+        sector="IT",
+        quadrant="LEADING",
+        rs_ratio=103.5,
+        rs_momentum=102.1,
+        tailwind_score=85,
+        alignment="STRONG_TAILWIND",
+        analysis="Sector IT in strong tailwind",
+        intraday_rs=1.1,
+        intraday_alignment="STRONG_INTRADAY_TAILWIND",
+    )
+
+    with mock.patch(
+        "market.quotes.get_quote",
+        return_value={"NSE:INFY": quote, "NSE:NIFTY 50": DummyQuote(24500, 24450, 24480, 0.4)},
+    ):
+        with mock.patch("market.quotes.get_ltp", return_value=1500.0):
+            with mock.patch("market.options.get_options_chain", return_value=contracts):
+                with mock.patch("market.options.get_expiries", return_value=["2026-09-29"]):
+                    with mock.patch("market.history.get_ohlcv", return_value=None):
+                        with mock.patch(
+                            "engine.daily_levels.get_daily_levels",
+                            return_value=SimpleNamespace(cpr={}, camarilla={}),
+                        ):
+                            with mock.patch(
+                                "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind
+                            ):
+                                with mock.patch(
+                                    "analysis.universe.get_stock_sector",
+                                    return_value=("it", "IT, Software & Technology"),
+                                ):
+                                    alerts = detect_options_momentum_breakouts(
+                                        targets=["INFY"],
+                                        watched_indices=[],
+                                        now_dt=now_dt,
+                                    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.actionable_plan["broker_order_type"] == "BUY LIMIT (PULLBACK RETEST)"
+    assert alert.actionable_plan["entry_mode"] == "LIMIT_ON_PULLBACK"
+    assert "[PULLBACK LIMIT]" in alert.headline
+    assert "LIMIT ORDER ON PULLBACK MANDATORY" in alert.actionable_plan["when_to_buy"]
+
+
+def test_midday_spread_mandate():
+    """Stock options during midday lull (11:15-13:15) mandate defined-risk spread to neutralize theta decay."""
+    now_dt = datetime(2026, 9, 23, 12, 0, tzinfo=IST)
+    quote = DummyQuote(ltp=1500.0, open_p=1480.0, vwap=1490.0, chg=1.35)
+    # Strong volume to clear midday thrust gate
+    contracts = [
+        DummyOptionContract("INFY1520CE", 1520.0, "CE", 32.0, volume=6000, oi=2000, pchange=12.0)
+    ]
+
+    tailwind = StockTailwind(
+        symbol="INFY",
+        sector="IT",
+        quadrant="LEADING",
+        rs_ratio=103.5,
+        rs_momentum=102.1,
+        tailwind_score=85,
+        alignment="STRONG_TAILWIND",
+        analysis="Sector IT in strong tailwind",
+        intraday_rs=1.1,
+        intraday_alignment="STRONG_INTRADAY_TAILWIND",
+    )
+
+    with mock.patch(
+        "market.quotes.get_quote",
+        return_value={"NSE:INFY": quote, "NSE:NIFTY 50": DummyQuote(24500, 24450, 24480, 0.4)},
+    ):
+        with mock.patch("market.quotes.get_ltp", return_value=1500.0):
+            with mock.patch("market.options.get_options_chain", return_value=contracts):
+                with mock.patch("market.options.get_expiries", return_value=["2026-09-29"]):
+                    with mock.patch("market.history.get_ohlcv", return_value=None):
+                        with mock.patch(
+                            "engine.daily_levels.get_daily_levels",
+                            return_value=SimpleNamespace(cpr={}, camarilla={}),
+                        ):
+                            with mock.patch(
+                                "analysis.sector_rotation.get_stock_tailwind", return_value=tailwind
+                            ):
+                                with mock.patch(
+                                    "analysis.universe.get_stock_sector",
+                                    return_value=("it", "IT, Software & Technology"),
+                                ):
+                                    alerts = detect_options_momentum_breakouts(
+                                        targets=["INFY"],
+                                        watched_indices=[],
+                                        now_dt=now_dt,
+                                    )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.preferred_vehicle == "SPREAD_ONLY"
+    assert "[HEDGED SPREAD MANDATORY]" in alert.headline

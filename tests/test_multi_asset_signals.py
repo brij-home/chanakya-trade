@@ -286,10 +286,13 @@ def test_auto_alert_engine_option_enrichment_signature():
         metrics={"segment": "INDEX"},
     )
 
+    from datetime import timedelta
+
+    fut_exp = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
     c1 = OptionsContract(
-        symbol="NSE:NIFTY26NOV25000CE",
+        symbol="NSE:NIFTY26DEC25000CE",
         underlying="NIFTY",
-        expiry="2026-11-26",
+        expiry=fut_exp,
         strike=25000.0,
         option_type="CE",
         last_price=150.0,
@@ -316,7 +319,7 @@ def test_auto_alert_engine_option_enrichment_signature():
     with (
         patch(
             "market.options.get_options_snapshot",
-            return_value=([c1], 25000.0, ["2026-11-26"], mock_source),
+            return_value=([c1], 25000.0, [fut_exp], mock_source),
         ),
         patch("analysis.regime_governor._fresh_live_vix", return_value=15.3),
         patch(

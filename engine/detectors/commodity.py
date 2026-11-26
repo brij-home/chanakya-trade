@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -20,7 +20,7 @@ import pandas as pd
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.commodity")
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 DEFAULT_COMMODITIES = [
     "CRUDEOIL",
@@ -208,8 +208,10 @@ def detect_commodity_breakouts(
                     mm_df = mm.get_candles_df(c_sym, timeframe="5m", limit=80)
                     if mm_df is not None and len(mm_df) >= 10:
                         return c_sym, mm_df
-                except Exception:
-                    pass
+                except Exception as e_mm:
+                    logger.debug(
+                        f"[CommodityDetector] MarketMatrix 5m lookup skipped for {c_sym}: {e_mm}"
+                    )
 
             try:
                 df_mcx = get_ohlcv(c_sym, exchange="MCX", interval="5minute", days=2)
@@ -218,8 +220,10 @@ def detect_commodity_breakouts(
                         from engine.market_matrix import get_market_matrix
 
                         get_market_matrix().seed_historical_candles(c_sym, "5m", df_mcx)
-                    except Exception:
-                        pass
+                    except Exception as e_seed:
+                        logger.debug(
+                            f"[CommodityDetector] MarketMatrix 5m seed skipped for {c_sym}: {e_seed}"
+                        )
                 return c_sym, df_mcx
             except Exception as e_hist:
                 logger.debug(
@@ -757,8 +761,10 @@ def detect_commodity_breakouts(
                     span_20 = min(60, max(10, len(closes_5m) // 2))
                     ema50_15m = float(closes_5m.ewm(span=span_50, adjust=False).mean().iloc[-1])
                     ema20_15m = float(closes_5m.ewm(span=span_20, adjust=False).mean().iloc[-1])
-                except Exception:
-                    pass
+                except Exception as e_ema_mcx:
+                    logger.debug(
+                        f"[CommodityDetector] MTF EMA skipped for {clean_sym}: {e_ema_mcx}"
+                    )
 
             pdl_val = 0.0
             pdh_val = 0.0
@@ -777,16 +783,15 @@ def detect_commodity_breakouts(
                     y_pivot = (y_high + y_low + y_close) / 3.0
                     daily_s1 = 2.0 * y_pivot - y_high
                     daily_r1 = 2.0 * y_pivot - y_low
-            except Exception:
-                pass
+            except Exception as e_yd:
+                logger.debug(f"[CommodityDetector] Prior session pivot calculation skipped: {e_yd}")
 
             # A. Bearish Pullback Rejection (Sell the Rally in a Downtrend):
             macro_bear = (
-                (chg_prev <= -0.6 or chg_open <= -0.6 or (vwap > 0 and ltp <= vwap * 0.998))
-                and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m <= ema50_15m * 1.002)
-            )
-            has_bear_pullback = (
-                trough_recent > 0 and (cur_high >= trough_recent * 1.0035 or chg_from_low >= 0.35)
+                chg_prev <= -0.6 or chg_open <= -0.6 or (vwap > 0 and ltp <= vwap * 0.998)
+            ) and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m <= ema50_15m * 1.002)
+            has_bear_pullback = trough_recent > 0 and (
+                cur_high >= trough_recent * 1.0035 or chg_from_low >= 0.35
             )
             hit_resistance = False
             res_reason = ""
@@ -804,20 +809,24 @@ def detect_commodity_breakouts(
                 res_reason = f"Supply Zone Resistance (₹{peak_recent:,.1f})"
 
             has_bear_rejection = (
-                (upper_wick_ratio >= 0.14 or cur_close < cur_open or is_1m_micro_bear)
-                and (cur_close < cur_high or is_1m_micro_bear)
-            )
-            if not is_locked_bear and macro_bear and has_bear_pullback and hit_resistance and has_bear_rejection:
+                upper_wick_ratio >= 0.14 or cur_close < cur_open or is_1m_micro_bear
+            ) and (cur_close < cur_high or is_1m_micro_bear)
+            if (
+                not is_locked_bear
+                and macro_bear
+                and has_bear_pullback
+                and hit_resistance
+                and has_bear_rejection
+            ):
                 is_pullback_bear = True
                 pullback_notes.append(f"Pullback Fade at {res_reason}")
 
             # B. Bullish Pullback Bounce (Buy the Dip in an Uptrend):
             macro_bull = (
-                (chg_prev >= 0.6 or chg_open >= 0.6 or (vwap > 0 and ltp >= vwap * 1.002))
-                and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m >= ema50_15m * 0.998)
-            )
-            has_bull_pullback = (
-                peak_recent > 0 and (cur_low <= peak_recent * 0.9965 or chg_from_high >= 0.35)
+                chg_prev >= 0.6 or chg_open >= 0.6 or (vwap > 0 and ltp >= vwap * 1.002)
+            ) and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m >= ema50_15m * 0.998)
+            has_bull_pullback = peak_recent > 0 and (
+                cur_low <= peak_recent * 0.9965 or chg_from_high >= 0.35
             )
             hit_support = False
             sup_reason = ""
@@ -835,10 +844,15 @@ def detect_commodity_breakouts(
                 sup_reason = f"Demand Zone Support (₹{trough_recent:,.1f})"
 
             has_bull_bounce = (
-                (lower_wick_ratio >= 0.14 or cur_close > cur_open or is_1m_micro_bull)
-                and (cur_close > cur_low or is_1m_micro_bull)
-            )
-            if not is_locked_bull and macro_bull and has_bull_pullback and hit_support and has_bull_bounce:
+                lower_wick_ratio >= 0.14 or cur_close > cur_open or is_1m_micro_bull
+            ) and (cur_close > cur_low or is_1m_micro_bull)
+            if (
+                not is_locked_bull
+                and macro_bull
+                and has_bull_pullback
+                and hit_support
+                and has_bull_bounce
+            ):
                 is_pullback_bull = True
                 pullback_notes.append(f"Dip Reclaim at {sup_reason}")
 
@@ -1041,7 +1055,9 @@ def detect_commodity_breakouts(
                         if dxy_chg is not None:
                             if is_bullish and dxy_chg >= 0.25:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Macro DXY Divergence Headwind (+{dxy_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Macro DXY Divergence Headwind (+{dxy_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bullish {clean_sym} vetoed by surging DXY (+{dxy_chg:.2f}%)"
@@ -1049,7 +1065,9 @@ def detect_commodity_breakouts(
                                     continue
                             elif is_bearish and dxy_chg <= -0.25:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Macro DXY Divergence Tailwind ({dxy_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Macro DXY Divergence Tailwind ({dxy_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bearish {clean_sym} vetoed by collapsing DXY ({dxy_chg:.2f}%)"
@@ -1060,7 +1078,9 @@ def detect_commodity_breakouts(
                         if brent_chg is not None:
                             if is_bullish and brent_chg <= -1.2:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Brent Divergence Headwind ({brent_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Brent Divergence Headwind ({brent_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Brent ({brent_chg:.2f}%)"
@@ -1068,7 +1088,9 @@ def detect_commodity_breakouts(
                                     continue
                             elif is_bearish and brent_chg >= 1.2:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Brent Divergence Tailwind (+{brent_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Brent Divergence Tailwind (+{brent_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Brent (+{brent_chg:.2f}%)"
@@ -1079,7 +1101,9 @@ def detect_commodity_breakouts(
                         if ng_chg is not None:
                             if is_bullish and ng_chg <= -2.0:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Henry Hub Divergence Headwind ({ng_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Henry Hub Divergence Headwind ({ng_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Henry Hub NatGas ({ng_chg:.2f}%)"
@@ -1087,7 +1111,9 @@ def detect_commodity_breakouts(
                                     continue
                             elif is_bearish and ng_chg >= 2.0:
                                 if has_confirmed_breakout or rvol >= 1.5:
-                                    c_macro_tags.append(f"Henry Hub Divergence Tailwind (+{ng_chg:.2f}%)")
+                                    c_macro_tags.append(
+                                        f"Henry Hub Divergence Tailwind (+{ng_chg:.2f}%)"
+                                    )
                                 else:
                                     logger.debug(
                                         f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Henry Hub NatGas (+{ng_chg:.2f}%)"
@@ -1823,7 +1849,12 @@ def detect_commodity_breakouts(
             and opt_recommendation
             and not is_synthetic_options
             and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
-            and (is_golden_hours or is_active_mcx_session or rvol >= 1.5 or os.environ.get("CHANAKYA_TESTING") == "1")
+            and (
+                is_golden_hours
+                or is_active_mcx_session
+                or rvol >= 1.5
+                or os.environ.get("CHANAKYA_TESTING") == "1"
+            )
         )
 
         if should_use_option_primary:
@@ -2144,14 +2175,10 @@ def detect_commodity_breakouts(
                         # Confirms UTAD bull trap reversal!
                         if is_utad_bear:
                             conf_boost = min(22, conf_boost + 5)
-                            smc_tags.append(
-                                "Institutional CVD Absorption (Bull Trap Confirmed)"
-                            )
+                            smc_tags.append("Institutional CVD Absorption (Bull Trap Confirmed)")
                         else:
                             conf_boost = max(0, conf_boost - 8)
-                            smc_tags.append(
-                                f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})"
-                            )
+                            smc_tags.append(f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})")
         except Exception as e_of:
             logger.debug(
                 f"[CommodityDetector] Order flow divergence evaluation error for {clean_sym}: {e_of}"

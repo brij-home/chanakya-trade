@@ -62,7 +62,24 @@ export default function PayoffSimulatorCard({
   const { call } = useAPI()
   const { getTicker } = useRealtimeMarket()
   const [symbol, setSymbol] = useState(initialSymbol)
-  const resolvedLotSize = resolveInstrument(symbol)?.lotSize || (symbol === 'BANKNIFTY' ? 15 : symbol === 'SENSEX' ? 10 : 25)
+  const [serverLotSize, setServerLotSize] = useState(null)
+  const resolvedLotSize = Number(initialLegs?.[0]?.lot_size || resolveInstrument(symbol)?.lotSize || serverLotSize || 1)
+  useEffect(() => {
+    if (resolveInstrument(symbol)?.lotSize || initialLegs?.[0]?.lot_size) return
+    let cancelled = false
+    const cleanSym = String(symbol || '').replace(/^(NSE:|BSE:|NFO:|BFO:|MCX:)/i, '').trim().toUpperCase()
+    if (!cleanSym) return
+    call(`/api/risk/size/${encodeURIComponent(cleanSym)}?is_fno=true`, null, 'GET')
+      .then((res) => {
+        if (cancelled) return
+        const lot = Number(res?.data?.lot_size || 0)
+        if (lot > 0) setServerLotSize(lot)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [symbol])
   const liveTick = getTicker(symbol)
   const liveSpot = liveTick?.ltp != null && liveTick.ltp > 0 ? Number(liveTick.ltp) : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null)
   const resolvedSpot = Number(initialSpot || liveSpot || 0)
@@ -201,7 +218,7 @@ export default function PayoffSimulatorCard({
     const s = Math.round(spotPrice / 50) * 50
     setLegs((prev) => [
       ...prev,
-      { action: 'BUY', option_type: 'CE', strike: s, premium: 50, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'CE', strike: s, premium: 50, lots: 1, lot_size: resolvedLotSize },
     ])
   }
 

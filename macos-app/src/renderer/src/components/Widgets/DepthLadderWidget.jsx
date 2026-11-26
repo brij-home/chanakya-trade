@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { getBaseUrl } from '../../store/chatStore'
+import { getBaseUrl, useChatStore } from '../../store/chatStore'
 
 /**
  * DepthLadderWidget — Institutional DOM (Depth of Market) Ladder Widget
@@ -43,31 +43,41 @@ export default function DepthLadderWidget({
     return stripped
   }, [symbol])
 
+  const sidecarPort = useChatStore((s) => s.port)
+  const abortControllerRef = useRef(null)
+
   const fetchDepth = useCallback(async () => {
     if (!cleanSymbol) return
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    const controller = new AbortController()
+    abortControllerRef.current = controller
     try {
-      const baseUrl = getBaseUrl ? getBaseUrl() : 'http://127.0.0.1:8765'
+      const baseUrl = getBaseUrl(sidecarPort)
       const res = await fetch(`${baseUrl}/api/market/order-book/${encodeURIComponent(cleanSymbol)}`, {
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       })
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: Depth feed unavailable`)
       }
       const json = await res.json()
-      if (isMountedRef.current && json && json.data) {
+      if (isMountedRef.current && !controller.signal.aborted && json && json.data) {
         setData(json.data)
         setError(null)
       }
     } catch (err) {
+      if (err?.name === 'AbortError') return
       if (isMountedRef.current) {
         setError(err.message || 'Depth feed error')
       }
     } finally {
-      if (isMountedRef.current) {
+      if (isMountedRef.current && !controller.signal.aborted) {
         setLoading(false)
       }
     }
-  }, [cleanSymbol])
+  }, [cleanSymbol, sidecarPort])
 
   useEffect(() => {
     isMountedRef.current = true
@@ -77,7 +87,7 @@ export default function DepthLadderWidget({
     // 1. Attempt sub-100ms real-time SSE stream with polling fallback
     let eventSource = null
     let pollInterval = null
-    const baseUrl = getBaseUrl ? getBaseUrl() : 'http://127.0.0.1:8765'
+    const baseUrl = getBaseUrl(sidecarPort)
 
     if (typeof EventSource !== 'undefined' && cleanSymbol) {
       try {
@@ -116,10 +126,14 @@ export default function DepthLadderWidget({
 
     return () => {
       isMountedRef.current = false
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+        abortControllerRef.current = null
+      }
       if (eventSource) eventSource.close()
       if (pollInterval) clearInterval(pollInterval)
     }
-  }, [cleanSymbol, fetchDepth, refreshIntervalMs])
+  }, [cleanSymbol, sidecarPort, fetchDepth, refreshIntervalMs])
 
   // Extract levels and compute wall thresholds
   const {

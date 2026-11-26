@@ -250,12 +250,24 @@ def _init_orders_db():
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN slice_index INTEGER")
         if "total_slices" not in existing_cols:
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN total_slices INTEGER")
+        if "protection_status" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN protection_status TEXT")
+        if "protected_quantity" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE orders_ledger ADD COLUMN protected_quantity INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders_ledger(status)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_orders_parent ON orders_ledger(parent_order_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_account_status ON orders_ledger(account_id, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_broker_id ON orders_ledger(broker_order_id)"
         )
         conn.execute(
             """
@@ -3520,6 +3532,431 @@ def get_internal_ledger_snapshot(account_id: str) -> Optional[dict[str, Any]]:
         }
 
 
+_BROKER_ORDER_STATUS_MAP: dict[str, str] = {
+    "COMPLETE": "FILLED",
+    "FILLED": "FILLED",
+    "TRADED": "FILLED",
+    "OPEN": "OPEN",
+    "PENDING": "OPEN",
+    "TRANSIT": "OPEN",
+    "PARTIAL": "PARTIALLY_FILLED",
+    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+    "CANCELLED": "CANCELLED",
+    "CANCELED": "CANCELLED",
+    "REJECTED": "REJECTED",
+    "EXPIRED": "EXPIRED",
+    "1": "CANCELLED",
+    "2": "FILLED",
+    "4": "OPEN",
+    "5": "REJECTED",
+    "6": "OPEN",
+    "7": "EXPIRED",
+}
+
+_FYERS_STREAM_BIND_LOCK = threading.Lock()
+_FYERS_STREAM_BOUND = False
+
+
+def apply_fyers_stream_order_update(message: Any) -> dict[str, Any]:
+    """Reconcile an incoming Fyers OrderSocket OnOrders payload against orders_ledger."""
+    if not isinstance(message, dict):
+        return {"updated": False, "reason": "INVALID_PAYLOAD"}
+    payload = message.get("orders") if isinstance(message.get("orders"), dict) else message
+    broker_order_id = str(payload.get("id") or payload.get("orderId") or "").strip()
+    local_tag = str(payload.get("orderTag") or "").strip()
+    raw_status = str(payload.get("status") or "").upper().strip()
+    mapped_status = _BROKER_ORDER_STATUS_MAP.get(raw_status)
+    if not broker_order_id and not local_tag:
+        return {"updated": False, "reason": "NO_ORDER_IDENTIFIER"}
+    if not mapped_status:
+        return {"updated": False, "reason": f"UNMAPPED_STATUS:{raw_status}"}
+
+    filled_qty = int(float(payload.get("filledQty") or payload.get("filled_quantity") or 0) or 0)
+    avg_px = float(payload.get("tradedPrice") or payload.get("average_price") or 0.0)
+    msg_account = str(
+        payload.get("clientId") or payload.get("fyId") or payload.get("account_id") or ""
+    ).strip()
+
+    _init_orders_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    audit_order_id: Optional[str] = None
+    audit_broker_id: Optional[str] = None
+    unreg_symbol: Optional[str] = None
+
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = None
+            if broker_order_id:
+                row = conn.execute(
+                    "SELECT * FROM orders_ledger WHERE broker_order_id = ? LIMIT 1",
+                    (broker_order_id,),
+                ).fetchone()
+            if row is None and local_tag:
+                row = conn.execute(
+                    "SELECT * FROM orders_ledger WHERE order_id = ? AND status IN ('SUBMITTING', 'UNKNOWN_FREEZE', 'OPEN', 'PARTIALLY_FILLED') LIMIT 1",
+                    (local_tag,),
+                ).fetchone()
+            if row is None:
+                conn.rollback()
+                return {"updated": False, "reason": "ORDER_NOT_IN_LEDGER"}
+
+            row_account = str(row["account_id"] or "").strip()
+            if row_account and msg_account and row_account.upper() != msg_account.upper():
+                conn.rollback()
+                logger.warning(
+                    "[order_lifecycle] Ignoring OrderSocket update due to account mismatch: row=%s msg=%s",
+                    row_account,
+                    msg_account,
+                )
+                return {"updated": False, "reason": "ACCOUNT_MISMATCH"}
+
+            conn.execute(
+                """
+                UPDATE orders_ledger
+                SET status = ?,
+                    broker_order_id = COALESCE(broker_order_id, ?),
+                    filled_quantity = MAX(filled_quantity, ?),
+                    average_fill_price = COALESCE(?, average_fill_price),
+                    last_sync_at = ?,
+                    updated_at = ?
+                WHERE order_id = ?
+                """,
+                (
+                    mapped_status,
+                    broker_order_id or None,
+                    filled_qty,
+                    avg_px if avg_px > 0 else None,
+                    now_iso,
+                    now_iso,
+                    row["order_id"],
+                ),
+            )
+            if row["parent_order_id"]:
+                _reconcile_parent_order_in_conn(conn, str(row["parent_order_id"]), now_iso)
+            conn.commit()
+            audit_order_id = str(row["order_id"])
+            audit_broker_id = broker_order_id or row["broker_order_id"]
+            if mapped_status in ("CANCELLED", "REJECTED", "EXPIRED", "FILLED"):
+                unreg_symbol = str(row["symbol"] or "")
+        except Exception:
+            conn.rollback()
+            raise
+
+    if unreg_symbol:
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager
+
+            FyersTbtManager().unregister_in_flight(unreg_symbol)
+        except Exception as e_unreg:
+            logger.debug(f"[order_lifecycle] TBT unregister note: {e_unreg}")
+
+    if audit_order_id:
+        _record_order_event(
+            audit_order_id,
+            "ORDER_STREAM_UPDATE",
+            broker_name="fyers",
+            broker_order_id=audit_broker_id,
+            payload={
+                "status": mapped_status,
+                "filled_quantity": filled_qty,
+                "average_fill_price": avg_px if avg_px > 0 else None,
+            },
+        )
+    return {
+        "updated": True,
+        "order_id": audit_order_id,
+        "broker_order_id": audit_broker_id,
+        "status": mapped_status,
+        "filled_quantity": filled_qty,
+    }
+
+
+def apply_fyers_stream_trade_fill(message: Any) -> dict[str, Any]:
+    """Ingest an incoming Fyers OrderSocket OnTrades fill into execution_fills idempotently."""
+    if not isinstance(message, dict):
+        return {"recorded": False, "reason": "INVALID_PAYLOAD"}
+    payload = message.get("trades") if isinstance(message.get("trades"), dict) else message
+    broker_order_id = str(payload.get("orderNumber") or payload.get("id") or "").strip()
+    trade_id = str(payload.get("tradeNumber") or payload.get("exchangeOrderNo") or "").strip()
+    traded_qty = int(float(payload.get("tradedQty") or payload.get("qty") or 0) or 0)
+    trade_px = float(payload.get("tradePrice") or payload.get("tradedPrice") or 0.0)
+    if not broker_order_id or not trade_id or traded_qty <= 0 or trade_px <= 0:
+        return {"recorded": False, "reason": "INCOMPLETE_TRADE_PAYLOAD"}
+
+    _init_orders_db()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE broker_order_id = ? LIMIT 1",
+            (broker_order_id,),
+        ).fetchone()
+    if row is None:
+        return {"recorded": False, "reason": "ORDER_NOT_IN_LEDGER"}
+
+    account_id = str(
+        row["account_id"] or payload.get("clientId") or payload.get("fyId") or ""
+    ).strip()
+    if not account_id:
+        return {"recorded": False, "reason": "MISSING_ACCOUNT_ID"}
+
+    raw_ts = (
+        payload.get("orderDateTime")
+        or payload.get("fill_time")
+        or row["last_sync_at"]
+        or row["updated_at"]
+    )
+    if raw_ts:
+        try:
+            dt_fill = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+            if dt_fill.tzinfo is None:
+                from config.constants import IST
+
+                dt_fill = dt_fill.replace(tzinfo=IST).astimezone(timezone.utc)
+            fill_time_str = dt_fill.isoformat()
+        except Exception:
+            fill_time_str = datetime.now(timezone.utc).isoformat()
+    else:
+        fill_time_str = datetime.now(timezone.utc).isoformat()
+
+    raw_side = payload.get("side")
+    side = (
+        "BUY"
+        if str(raw_side).upper() in ("1", "BUY")
+        else ("SELL" if str(raw_side).upper() in ("-1", "SELL") else str(row["side"] or "BUY"))
+    )
+    fill_res = record_execution_fill(
+        account_id=account_id,
+        broker_name="fyers",
+        order_id=str(row["order_id"]),
+        broker_order_id=broker_order_id,
+        broker_trade_id=trade_id,
+        symbol=str(row["symbol"]),
+        exchange=str(row["exchange"] or "NSE"),
+        segment=str(row["segment"] or "EQUITY_INTRADAY"),
+        side=side,
+        quantity=traded_qty,
+        fill_price=trade_px,
+        fill_time=fill_time_str,
+        product=str(row["product"] or "MIS"),
+    )
+    prot_res = reconcile_fill_driven_protection(str(row["order_id"]))
+    return {"recorded": True, "fill": fill_res, "protection": prot_res}
+
+
+def reconcile_fill_driven_protection(order_id: str) -> dict[str, Any]:
+    """Synchronize cumulative verified fills onto orders_ledger and stage fill-driven protection.
+
+    Strictly bases protection size on persisted verified execution_fills (never order qty).
+    Live automatic GTT submission stays blocked per docs/SAFETY_CONTRACTS.md while recording
+    durable partial/full fill protection state and audit lineage.
+    """
+    _init_orders_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE order_id = ? LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return {"status": "NOT_FOUND", "order_id": order_id}
+
+        fills = conn.execute(
+            "SELECT quantity, fill_price FROM execution_fills WHERE order_id = ?",
+            (order_id,),
+        ).fetchall()
+        verified_qty = sum(int(f["quantity"] or 0) for f in fills)
+        weighted_cost = sum(int(f["quantity"] or 0) * float(f["fill_price"] or 0.0) for f in fills)
+        avg_fill_px = (
+            round(weighted_cost / verified_qty, 4)
+            if verified_qty > 0
+            else row["average_fill_price"]
+        )
+
+        auto_gtt = bool(row["auto_gtt_oco"]) if "auto_gtt_oco" in row.keys() else False
+        sl_val = float(row["stop_loss"] or 0.0) if "stop_loss" in row.keys() else 0.0
+        tgt_val = float(row["target"] or 0.0) if "target" in row.keys() else 0.0
+        mode_val = str(row["mode"] or "PAPER").upper()
+        order_qty = int(row["quantity"] or 0)
+        cur_status = str(row["status"] or "")
+        next_status = cur_status
+        if verified_qty > 0 and cur_status in (
+            "SUBMITTING",
+            "OPEN",
+            "PARTIALLY_FILLED",
+            "SUBMITTED_PAPER",
+        ):
+            if order_qty > 0 and verified_qty >= order_qty:
+                next_status = "FILLED_PAPER" if mode_val in ("PAPER", "SIMULATE") else "FILLED"
+            else:
+                next_status = "PARTIALLY_FILLED"
+
+        prev_prot_qty = (
+            int(row["protected_quantity"] or 0) if "protected_quantity" in row.keys() else 0
+        )
+
+        if not auto_gtt or sl_val <= 0 or verified_qty <= 0:
+            conn.execute(
+                """
+                UPDATE orders_ledger
+                SET status = ?,
+                    filled_quantity = MAX(filled_quantity, ?),
+                    average_fill_price = COALESCE(?, average_fill_price),
+                    updated_at = ?
+                WHERE order_id = ?
+                """,
+                (next_status, verified_qty, avg_fill_px, now_iso, order_id),
+            )
+            if row["parent_order_id"]:
+                _reconcile_parent_order_in_conn(conn, str(row["parent_order_id"]), now_iso)
+            conn.commit()
+            return {
+                "status": "SKIPPED",
+                "order_status": next_status,
+                "order_id": order_id,
+                "verified_filled_qty": verified_qty,
+                "average_fill_price": avg_fill_px,
+            }
+
+        gtt_id = row["gtt_order_id"] if "gtt_order_id" in row.keys() else None
+        if mode_val in ("PAPER", "SIMULATE"):
+            prot_status = (
+                "ACTIVE"
+                if verified_qty >= int(row["quantity"] or verified_qty)
+                else "PARTIAL_ACTIVE"
+            )
+            if verified_qty != prev_prot_qty:
+                try:
+                    from brokers.base import GTTLeg, GTTRequest
+                    from engine.paper import PaperBroker
+
+                    paper_broker = PaperBroker()
+                    if gtt_id and hasattr(paper_broker, "cancel_gtt"):
+                        try:
+                            paper_broker.cancel_gtt(str(gtt_id))
+                        except Exception as e_c_gtt:
+                            logger.debug(
+                                f"[order_lifecycle] Paper GTT replace cancel note: {e_c_gtt}"
+                            )
+                    exit_side = "SELL" if str(row["side"]).upper() == "BUY" else "BUY"
+                    leg1 = GTTLeg(price=sl_val, trigger_price=sl_val, quantity=verified_qty)
+                    leg2 = (
+                        GTTLeg(price=tgt_val, trigger_price=tgt_val, quantity=verified_qty)
+                        if tgt_val > 0
+                        else None
+                    )
+                    gtt_res = paper_broker.place_gtt(
+                        GTTRequest(
+                            symbol=str(row["symbol"]),
+                            exchange=str(row["exchange"] or "NSE"),
+                            transaction_type=exit_side,
+                            trigger_type="OCO" if leg2 else "SINGLE",
+                            product=str(row["product"] or "MIS"),
+                            leg1=leg1,
+                            leg2=leg2,
+                        )
+                    )
+                    if getattr(gtt_res, "gtt_id", None):
+                        gtt_id = gtt_res.gtt_id
+                except Exception as e_gtt:
+                    logger.debug(f"[order_lifecycle] Paper fill GTT staging note: {e_gtt}")
+                    prot_status = "DEGRADED"
+        else:
+            # SAFETY_CONTRACTS: Live automatic protective GTT submission remains blocked
+            prot_status = "BLOCKED_LIVE_SAFETY"
+
+        conn.execute(
+            """
+            UPDATE orders_ledger
+            SET status = ?,
+                filled_quantity = MAX(filled_quantity, ?),
+                average_fill_price = COALESCE(?, average_fill_price),
+                protection_status = ?,
+                protected_quantity = ?,
+                gtt_order_id = COALESCE(?, gtt_order_id),
+                updated_at = ?
+            WHERE order_id = ?
+            """,
+            (
+                next_status,
+                verified_qty,
+                avg_fill_px,
+                prot_status,
+                verified_qty,
+                gtt_id,
+                now_iso,
+                order_id,
+            ),
+        )
+        if row["parent_order_id"]:
+            _reconcile_parent_order_in_conn(conn, str(row["parent_order_id"]), now_iso)
+        conn.commit()
+
+    _record_order_event(
+        order_id,
+        "FILL_DRIVEN_PROTECTION_SYNC",
+        broker_name="fyers",
+        broker_order_id=row["broker_order_id"],
+        payload={
+            "verified_filled_qty": verified_qty,
+            "protection_status": prot_status,
+            "protected_quantity": verified_qty,
+            "stop_loss": sl_val,
+            "target": tgt_val if tgt_val > 0 else None,
+        },
+    )
+    return {
+        "status": prot_status,
+        "order_id": order_id,
+        "verified_filled_qty": verified_qty,
+        "protected_quantity": verified_qty,
+        "gtt_order_id": gtt_id,
+    }
+
+
+def bind_fyers_order_stream() -> bool:
+    """Attach idempotent order and fill reconciliation callbacks to fyers_order_stream."""
+    global _FYERS_STREAM_BOUND
+    with _FYERS_STREAM_BIND_LOCK:
+        if _FYERS_STREAM_BOUND:
+            return True
+        from market.fyers_order_stream import fyers_order_stream
+
+        fyers_order_stream.on_order(apply_fyers_stream_order_update)
+        fyers_order_stream.on_trade(apply_fyers_stream_trade_fill)
+        _FYERS_STREAM_BOUND = True
+        return True
+
+
+def recover_stale_inflight_orders(account_id: Optional[str] = None) -> dict[str, Any]:
+    """Reconcile broker orders and report remaining SUBMITTING / UNKNOWN_FREEZE intents."""
+    sync_report = sync_execution_orders()
+    clean_acct = account_id.strip() if isinstance(account_id, str) and account_id.strip() else None
+    _init_orders_db()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        if clean_acct:
+            rows = conn.execute(
+                "SELECT order_id, status FROM orders_ledger WHERE account_id = ? AND status IN ('SUBMITTING', 'UNKNOWN_FREEZE')",
+                (clean_acct,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT order_id, status FROM orders_ledger WHERE status IN ('SUBMITTING', 'UNKNOWN_FREEZE')"
+            ).fetchall()
+    remaining_submitting = [r["order_id"] for r in rows if r["status"] == "SUBMITTING"]
+    remaining_frozen = [r["order_id"] for r in rows if r["status"] == "UNKNOWN_FREEZE"]
+    return {
+        "account_id": clean_acct,
+        "resolved_via_sync": int(sync_report.get("ledger_orders_updated", 0)),
+        "remaining_submitting": remaining_submitting,
+        "remaining_unknown_freeze": remaining_frozen,
+        "unknown_broker_orders": int(sync_report.get("unknown_broker_orders", 0)),
+    }
+
+
 def sync_execution_orders() -> dict[str, Any]:
     """Poll the selected execution broker and reconcile known order states.
 
@@ -3537,27 +3974,9 @@ def sync_execution_orders() -> dict[str, Any]:
     }
     changed = 0
     unknown_broker_orders = 0
-    status_map = {
-        "COMPLETE": "FILLED",
-        "FILLED": "FILLED",
-        "TRADED": "FILLED",
-        "OPEN": "OPEN",
-        "PENDING": "OPEN",
-        "TRANSIT": "OPEN",
-        "PARTIAL": "PARTIALLY_FILLED",
-        "PARTIALLY_FILLED": "PARTIALLY_FILLED",
-        "CANCELLED": "CANCELLED",
-        "CANCELED": "CANCELLED",
-        "REJECTED": "REJECTED",
-        "EXPIRED": "EXPIRED",
-        "1": "CANCELLED",
-        "2": "FILLED",
-        "4": "OPEN",
-        "5": "REJECTED",
-        "6": "OPEN",
-        "7": "EXPIRED",
-    }
+    status_map = _BROKER_ORDER_STATUS_MAP
     events_to_record: list[tuple[str, str, int]] = []
+    now_sync_iso = datetime.now(timezone.utc).isoformat()
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         known_rows = conn.execute(
@@ -3591,15 +4010,18 @@ def sync_execution_orders() -> dict[str, Any]:
                         f"[order_lifecycle] sync execution ingestion failed for {row['order_id']}: {e_sync_ingest}"
                     )
 
-            if new_status and new_status != row["status"]:
+            effective_status = new_status or str(row["status"])
+            if (new_status and new_status != row["status"]) or (
+                b_filled_qty > int(row["filled_quantity"] or 0)
+            ):
                 conn.execute(
                     """
                     UPDATE orders_ledger
-                    SET status = ?, filled_quantity = ?, average_fill_price = ?, last_sync_at = ?, updated_at = ?
+                    SET status = ?, filled_quantity = MAX(filled_quantity, ?), average_fill_price = COALESCE(?, average_fill_price), last_sync_at = ?, updated_at = ?
                     WHERE order_id = ?
                     """,
                     (
-                        new_status,
+                        effective_status,
                         b_filled_qty,
                         b_avg_price if b_avg_price > 0 else None,
                         now_sync_iso,
@@ -3607,7 +4029,7 @@ def sync_execution_orders() -> dict[str, Any]:
                         row["order_id"],
                     ),
                 )
-                if new_status in ("CANCELLED", "REJECTED", "EXPIRED"):
+                if effective_status in ("CANCELLED", "REJECTED", "EXPIRED"):
                     try:
                         from market.fyers_tbt_manager import FyersTbtManager
 
@@ -3622,7 +4044,7 @@ def sync_execution_orders() -> dict[str, Any]:
                 events_to_record.append(
                     (
                         str(row["order_id"]),
-                        new_status,
+                        effective_status,
                         int(getattr(broker_order, "filled_quantity", 0) or 0),
                     )
                 )

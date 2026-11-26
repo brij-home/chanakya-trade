@@ -55,7 +55,10 @@ def test_production_scheduler_keeps_both_directions_and_neutral_candidates_reach
         if name.startswith("scan_") and name != "scan_equity_nfo_now":
             setattr(engine, name, Mock(return_value=[]))
     engine._get_cycle_quotes = Mock(return_value={})
+    engine._get_cached_index_ohlcv = Mock(return_value=None)
+    engine._resolve_index_exchange = Mock(return_value="NSE")
     engine._should_run_detector = Mock(return_value=True)
+    monkeypatch.setattr("market.options.get_options_chain", lambda *args, **kwargs: [])
     monkeypatch.setenv("CHANAKYA_TESTING", "0")
     monkeypatch.setenv("DEPLOY_MODE", "live")
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)

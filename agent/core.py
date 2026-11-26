@@ -577,7 +577,10 @@ class OpenAIProvider(LLMProvider):
             if not self._api_keys:
                 self._api_keys = ["not-needed"] if resolved_base else [""]
 
-            self._clients = [_sdk.OpenAI(api_key=k, base_url=resolved_base) for k in self._api_keys]
+            # Bound client HTTP timeout to 10s to ensure stalled network calls don't hang worker threads indefinitely
+            self._clients = [
+                _sdk.OpenAI(api_key=k, base_url=resolved_base, timeout=10.0) for k in self._api_keys
+            ]
             self._client_idx = 0
             self._client_cooldowns: dict[int, float] = {}
             self._pool_lock = threading.Lock()
@@ -2361,7 +2364,12 @@ class GeminiProvider(LLMProvider):
                     "Then run: credentials set GEMINI_API_KEY"
                 )
 
-            self._clients = [genai.Client(api_key=k) for k in self._api_keys]
+            # Bound client HTTP timeout to 10s (10000ms) to ensure stalled network calls
+            # don't exhaust deadline worker slots indefinitely
+            http_opts = {"timeout": 10000}
+            self._clients = [
+                genai.Client(api_key=k, http_options=http_opts) for k in self._api_keys
+            ]
             self._client_idx = 0
             self._client_cooldowns: dict[int, float] = {}
             self._pool_lock = threading.Lock()
@@ -2510,14 +2518,16 @@ class GeminiProvider(LLMProvider):
             config_kwargs["max_output_tokens"] = effective_max_tokens
         thinking_budget = kwargs.get("thinking_budget") or os.environ.get("GEMINI_THINKING_BUDGET")
         if thinking_budget is not None and hasattr(types, "ThinkingConfig"):
-            try:
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    thinking_budget=int(thinking_budget)
-                )
-            except Exception as e_tb:
-                logger.debug(
-                    f"[AgentCore] Failed setting thinking_budget={thinking_budget}: {e_tb}"
-                )
+            # Flash-lite models reject ThinkingConfig with 400 INVALID_ARGUMENT; only apply to thinking-capable models
+            if "lite" not in str(self.model or "").lower():
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_budget=int(thinking_budget)
+                    )
+                except Exception as e_tb:
+                    logger.debug(
+                        f"[AgentCore] Failed setting thinking_budget={thinking_budget}: {e_tb}"
+                    )
         if kwargs.get("response_mime_type"):
             config_kwargs["response_mime_type"] = kwargs.get("response_mime_type")
         if kwargs.get("response_schema"):
@@ -2536,13 +2546,13 @@ class GeminiProvider(LLMProvider):
         chat_session = None
 
         configured_models = [m.strip() for m in active_model_str.split(",") if m.strip()]
-        discovered_live_models = discover_available_gemini_models(
-            api_key=self._api_keys[0] if getattr(self, "_api_keys", None) else None
-        )
-        candidate_models = []
-        for m in configured_models + discovered_live_models:
-            if m not in candidate_models and m:
-                candidate_models.append(m)
+        if configured_models:
+            candidate_models = list(configured_models)
+        else:
+            discovered_live_models = discover_available_gemini_models(
+                api_key=self._api_keys[0] if getattr(self, "_api_keys", None) else None
+            )
+            candidate_models = list(discovered_live_models)
         if not candidate_models:
             candidate_models = [
                 "gemini-3.8-flash",
@@ -3031,8 +3041,6 @@ def get_provider(
     cleared from the keychain and the setup wizard runs automatically so the
     user can pick a working provider without ever seeing a raw traceback.
     """
-    reg = registry or build_registry()
-
     # Remember whether the caller explicitly specified a provider so we know
     # whether to propagate construction failures or silently recover.
     explicit_provider = bool(provider)
@@ -3045,8 +3053,8 @@ def get_provider(
         if auto != PROVIDER_ANTHROPIC or _has_anthropic_key():
             chosen = auto
 
-    # If still anthropic but no key is available, run setup if interactive, else use auto-detect
-    if chosen == PROVIDER_ANTHROPIC and not _has_anthropic_key():
+    # If still empty or anthropic without a key, run setup if interactive, else auto-detect or fail fast
+    if (not chosen or chosen == PROVIDER_ANTHROPIC) and not _has_anthropic_key():
         import sys
 
         if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
@@ -3055,6 +3063,12 @@ def get_provider(
             auto = _auto_detect_provider()
             chosen = auto if auto != PROVIDER_ANTHROPIC else "none"
 
+    if chosen == "none":
+        raise RuntimeError(
+            "No AI provider configured.\n"
+            "Run credentials setup → AI Provider or set GEMINI_API_KEY / OPENAI_API_KEY in .env."
+        )
+
     if model:
         chosen_model = model
     elif chosen == os.environ.get("AI_PROVIDER", "").lower() and os.environ.get("AI_MODEL"):
@@ -3062,13 +3076,9 @@ def get_provider(
     else:
         chosen_model = _default_model(chosen)
 
+    # Build registry & system prompt only after a concrete provider is resolved.
+    reg = registry or build_registry()
     system = build_system_prompt()
-
-    if chosen == "none":
-        raise RuntimeError(
-            "No AI provider configured.\n"
-            "Run credentials setup → AI Provider or set GEMINI_API_KEY / OPENAI_API_KEY in .env."
-        )
 
     dispatch = {
         PROVIDER_ANTHROPIC: AnthropicProvider,
@@ -3303,7 +3313,12 @@ def _auto_detect_provider() -> str:
     from config.credentials import _is_placeholder, get_credential
 
     def _has_key(k: str) -> bool:
-        v = env.get(k) or get_credential(k, required=False)
+        if k in env:
+            v = env.get(k, "")
+        elif os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            v = ""
+        else:
+            v = get_credential(k, required=False)
         return bool(v and v.strip() and not _is_placeholder(v))
 
     # Gemini native key is high-priority institutional multimodal engine
@@ -3338,11 +3353,16 @@ def _auto_detect_provider() -> str:
     if env.get("OLLAMA_BASE_URL") or env.get("OLLAMA_MODEL"):
         return PROVIDER_OLLAMA
 
-    # claude CLI binary — reliable signal of subscription intent
-    import shutil
+    # claude CLI binary — skip filesystem PATH probe under automated test runners
+    if (
+        os.environ.get("CHANAKYA_TESTING") != "1"
+        and "PYTEST_CURRENT_TEST" not in os.environ
+        and os.environ.get("DEPLOY_MODE") != "test"
+    ):
+        import shutil
 
-    if shutil.which("claude") or shutil.which("claude-code"):
-        return PROVIDER_CLAUDE_CLI
+        if shutil.which("claude") or shutil.which("claude-code"):
+            return PROVIDER_CLAUDE_CLI
 
     # Less-reliable ambient signals
     if env.get("OPENAI_SESSION_TOKEN"):
@@ -3933,6 +3953,9 @@ def _build_fallback_fast_providers(
     return fallbacks
 
 
+_fast_provider_cache: tuple[tuple, Any] | None = None
+
+
 def get_fast_provider(
     registry: "ToolRegistry | None" = None,
     deep_provider: "LLMProvider | None" = None,
@@ -3954,8 +3977,22 @@ def get_fast_provider(
     Returns:
         A fast LLMProvider, or deep_provider if fast not configured.
     """
+    global _fast_provider_cache
+
     fast_prov = os.environ.get("AI_FAST_PROVIDER", "")
     fast_model = os.environ.get("AI_FAST_MODEL", "")
+
+    # Fast-path cache when invoked with default arguments
+    if registry is None and deep_provider is None:
+        cache_key = (
+            fast_prov,
+            fast_model,
+            os.environ.get("AI_PROVIDER", ""),
+            os.environ.get("GROQ_MODEL", ""),
+            os.environ.get("GEMINI_MODEL", ""),
+        )
+        if _fast_provider_cache is not None and _fast_provider_cache[0] == cache_key:
+            return _fast_provider_cache[1]
 
     # No fast config → return deep provider (zero cost, zero breaking change)
     if not fast_prov and not fast_model:
@@ -3994,9 +4031,10 @@ def get_fast_provider(
         ):
             fallbacks.append(deep_provider)
 
-        if fallbacks:
-            return CascadingLLMProvider([primary] + fallbacks)
-        return primary
+        result_provider = CascadingLLMProvider([primary] + fallbacks) if fallbacks else primary
+        if registry is None and deep_provider is None:
+            _fast_provider_cache = (cache_key, result_provider)
+        return result_provider
     except Exception:
         # If fast provider fails to build, fall back to deep
         if deep_provider is not None:

@@ -94,15 +94,16 @@ def test_detect_opening_range_breakout_bullish():
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_time = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
 
-    # Spot breaking above ORB High (6060.0) at 6075.0, VWAP at 6030.0, RVOL 1.8x
-    alert = detect_opening_range_breakout(
-        symbol="TRENT",
-        df=df,
-        ltp=6075.0,
-        vwap=6030.0,
-        rvol=1.8,
-        ref_time=ref_time,
-    )
+    # 1. Verify underlying equity spot geometry when routed in cash mode
+    with patch("engine.position_sizer.get_lot_size", return_value=1):
+        alert = detect_opening_range_breakout(
+            symbol="TRENT",
+            df=df,
+            ltp=6075.0,
+            vwap=6030.0,
+            rvol=1.8,
+            ref_time=ref_time,
+        )
 
     assert alert is not None
     assert alert.alert_type == "ORB_BREAKOUT"
@@ -117,21 +118,38 @@ def test_detect_opening_range_breakout_bullish():
     assert alert.no_chase_boundary == 6088.0  # 6060 + 0.35 * 80
     assert alert.confidence >= 80
 
+    # 2. Verify F&O stock resolves option coordinates while preserving spot retest reference
+    fno_alert = detect_opening_range_breakout(
+        symbol="TRENT",
+        df=df,
+        ltp=6075.0,
+        vwap=6030.0,
+        rvol=1.8,
+        ref_time=ref_time,
+    )
+    assert fno_alert is not None
+    assert fno_alert.preferred_vehicle == "NAKED_OPTION"
+    assert fno_alert.contract_symbol is not None
+    assert fno_alert.trigger_level > 0
+    assert fno_alert.target_level > fno_alert.trigger_level > fno_alert.stop_loss
+    assert fno_alert.actionable_plan["retest_entry"] == 6060.0
+
 
 def test_detect_opening_range_breakdown_bearish():
     """Valid bearish breakdown post-09:30 triggers ORB_BREAKDOWN with midpoint SL and asymmetric targets."""
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_time = datetime.datetime(2026, 9, 17, 9, 40, tzinfo=IST)
 
-    # Spot breaking below ORB Low (5980.0) at 5970.0, VWAP at 6010.0, RVOL 1.7x
-    alert = detect_opening_range_breakout(
-        symbol="TRENT",
-        df=df,
-        ltp=5970.0,
-        vwap=6010.0,
-        rvol=1.7,
-        ref_time=ref_time,
-    )
+    # Spot breaking below ORB Low (5980.0) at 5970.0, VWAP at 6010.0, RVOL 1.7x (cash geometry)
+    with patch("engine.position_sizer.get_lot_size", return_value=1):
+        alert = detect_opening_range_breakout(
+            symbol="TRENT",
+            df=df,
+            ltp=5970.0,
+            vwap=6010.0,
+            rvol=1.7,
+            ref_time=ref_time,
+        )
 
     assert alert is not None
     assert alert.alert_type == "ORB_BREAKDOWN"

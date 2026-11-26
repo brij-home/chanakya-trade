@@ -169,7 +169,7 @@ def get_macro_drivers_state() -> dict[str, MacroDriverState]:
                 imp = _get_driver_impulse_level(k, item.change_pct)
                 drivers[k] = MacroDriverState(
                     key=k,
-                    name=item.label,
+                    name=item.name,
                     ltp=item.ltp,
                     change_pct=item.change_pct,
                     impulse_level=imp,

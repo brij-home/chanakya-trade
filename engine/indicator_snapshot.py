@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -42,7 +43,8 @@ PROVENANCE_UNAVAILABLE = "UNAVAILABLE"
 # ── Canonical snapshot TTL ─────────────────────────────────────────────────────
 
 _SNAPSHOT_CACHE_TTL = 15.0  # seconds — matches regime cache refresh interval
-_SNAPSHOT_CACHE: dict[str, tuple[float, "IndicatorSnapshot"]] = {}
+_MAX_SNAPSHOT_CACHE = 512
+_SNAPSHOT_CACHE: OrderedDict[str, tuple[float, "IndicatorSnapshot"]] = OrderedDict()
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
 
 
@@ -274,20 +276,25 @@ def bootstrap_market_matrix_for_symbol(symbol: str, min_bars: int = 15) -> bool:
 
 def bootstrap_all_index_symbols() -> None:
     """
-    Pre-seeds MarketMatrix for all benchmark index symbols from Fyers REST.
-    Called at application startup, non-blocking (spawns background thread per symbol).
+    Pre-seeds MarketMatrix for benchmark index symbols from Fyers REST sequentially
+    inside a single background worker thread to avoid boot-time -360 rate-limit spikes.
     """
-    for sym in _BOOTSTRAP_INDEX_SYMBOLS:
-        t = threading.Thread(
-            target=bootstrap_market_matrix_for_symbol,
-            args=(sym,),
-            kwargs={"min_bars": 20},
-            name=f"bootstrap-{sym}",
-            daemon=True,
-        )
-        t.start()
+
+    def _seq_bootstrap() -> None:
+        for sym in _BOOTSTRAP_INDEX_SYMBOLS:
+            try:
+                bootstrap_market_matrix_for_symbol(sym, min_bars=20)
+            except Exception as e_seq:
+                logger.debug(f"[IndicatorSnapshot] Sequential bootstrap note for {sym}: {e_seq}")
+
+    t = threading.Thread(
+        target=_seq_bootstrap,
+        name="bootstrap-index-seq",
+        daemon=True,
+    )
+    t.start()
     logger.info(
-        f"[IndicatorSnapshot] Bootstrap threads launched for {len(_BOOTSTRAP_INDEX_SYMBOLS)} index symbols"
+        f"[IndicatorSnapshot] Sequential bootstrap worker launched for {len(_BOOTSTRAP_INDEX_SYMBOLS)} index symbols"
     )
 
 
@@ -680,6 +687,9 @@ def get_indicator_snapshot(
     # Cache result
     with _SNAPSHOT_CACHE_LOCK:
         _SNAPSHOT_CACHE[cache_key] = (now_ts, snap)
+        _SNAPSHOT_CACHE.move_to_end(cache_key)
+        while len(_SNAPSHOT_CACHE) > _MAX_SNAPSHOT_CACHE:
+            _SNAPSHOT_CACHE.popitem(last=False)
 
     return snap
 

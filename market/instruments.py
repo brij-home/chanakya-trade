@@ -832,7 +832,9 @@ def is_contract_expired(symbol: str, ref_dt: Optional[datetime] = None) -> bool:
     elif exch in ("CDS", "CURRENCY"):
         close_cutoff = dtime(17, 0)
     else:
-        close_cutoff = dtime(15, 30)
+        from market.rule_schedule import derivative_close
+
+        close_cutoff = derivative_close(today, expiring_index=True)
 
     return current_time >= close_cutoff
 
@@ -1105,10 +1107,17 @@ def get_market_session_state(
         )
 
     # Exchange Specific Timings
-    if exchange in ("NSE", "BSE", "NSE_IFSC"):
+    if exchange in ("NSE", "BSE", "NSE_IFSC", "NFO", "BFO"):
+        from market.rule_schedule import cash_continuous_close, derivative_close
+
         pre_open_start = dtime(9, 0)
         open_time = dtime(9, 15)
-        close_time = dtime(15, 30)
+        close_time = (
+            derivative_close(ist_now.date())
+            if exchange in ("NFO", "BFO")
+            else cash_continuous_close(ist_now.date(), cas_eligible=False)
+        )
+        close_ist_str = close_time.strftime("%H:%M:%S IST")
         post_close_end = dtime(16, 0)
 
         if current_t < pre_open_start:
@@ -1119,7 +1128,7 @@ def get_market_session_state(
                 as_of_ist=as_of_str,
                 current_time_ist=formatted_time,
                 session_open_ist="09:15:00 IST",
-                session_close_ist="15:30:00 IST",
+                session_close_ist=close_ist_str,
                 reason="Pre-market hours (opens 09:15 IST)",
             )
         elif pre_open_start <= current_t < open_time:
@@ -1130,7 +1139,7 @@ def get_market_session_state(
                 as_of_ist=as_of_str,
                 current_time_ist=formatted_time,
                 session_open_ist="09:15:00 IST",
-                session_close_ist="15:30:00 IST",
+                session_close_ist=close_ist_str,
                 reason="Exchange pre-open order matching session",
             )
         elif open_time <= current_t <= close_time:
@@ -1141,7 +1150,7 @@ def get_market_session_state(
                 as_of_ist=as_of_str,
                 current_time_ist=formatted_time,
                 session_open_ist="09:15:00 IST",
-                session_close_ist="15:30:00 IST",
+                session_close_ist=close_ist_str,
             )
         elif close_time < current_t <= post_close_end:
             return MarketSessionState(
@@ -1151,7 +1160,7 @@ def get_market_session_state(
                 as_of_ist=as_of_str,
                 current_time_ist=formatted_time,
                 session_open_ist="09:15:00 IST",
-                session_close_ist="15:30:00 IST",
+                session_close_ist=close_ist_str,
                 reason="Post-closing session",
             )
         else:
@@ -1162,7 +1171,7 @@ def get_market_session_state(
                 as_of_ist=as_of_str,
                 current_time_ist=formatted_time,
                 session_open_ist="09:15:00 IST",
-                session_close_ist="15:30:00 IST",
+                session_close_ist=close_ist_str,
                 reason="Market closed for the day",
             )
 
@@ -1230,14 +1239,20 @@ def get_market_session_state(
 
 
 @lru_cache(maxsize=1024)
-def get_fno_lot_size(symbol: str) -> int:
+def get_fno_lot_size(symbol: str, expiry_date: Optional[date] = None) -> int:
     """
     Return the canonical institutional F&O contract lot size for a symbol.
-    Queries the centralized STANDARD_LOT_SIZES exchange master (SSOT).
+    Applies effective-dated contract revisions (e.g. SENSEX 20 -> 25 for Jan 25, 2027+ expiries)
+    on top of the centralized STANDARD_LOT_SIZES master (SSOT).
     Falls back to 1 for equities without F&O contracts.
     """
     clean = canonical_symbol(symbol)
-    return STANDARD_LOT_SIZES.get(clean, 1)
+    base_lot = STANDARD_LOT_SIZES.get(clean, 1)
+    if expiry_date is not None:
+        from market.rule_schedule import effective_lot_size
+
+        return effective_lot_size(clean, expiry_date=expiry_date, default_lot=base_lot)
+    return base_lot
 
 
 @lru_cache(maxsize=2048)

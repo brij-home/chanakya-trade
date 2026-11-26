@@ -374,7 +374,8 @@ def evaluate_execution_gate(
         if clusters:
             c = clusters[0]
             tact_score += 10
-            catalysts.append(f"Institutional Confluence: {c.description} (mid ₹{c.midpoint:.2f})")
+            desc = getattr(c, "summary", "") or getattr(c, "cluster_type", "Cluster")
+            catalysts.append(f"Institutional Confluence: {desc} (mid ₹{c.midpoint:.2f})")
     except Exception as e_suppressed:
         logger.debug(f"[execution_gate] Non-fatal confluence check: {e_suppressed}")
 
@@ -399,14 +400,14 @@ def evaluate_execution_gate(
     try:
         from analysis.chart_patterns import detect_chart_patterns
 
-        chart_pats = detect_chart_patterns(df, symbol=symbol)
+        chart_pats = detect_chart_patterns(df, ltp=ltp)
         for cp in chart_pats:
-            if (trade_bias == "LONG" and cp.direction == "BULLISH") or (
-                trade_bias == "SHORT" and cp.direction == "BEARISH"
+            if (trade_bias == "LONG" and cp.bias == "BULLISH") or (
+                trade_bias == "SHORT" and cp.bias == "BEARISH"
             ):
                 strat_score += 10
                 catalysts.append(
-                    f"Chart Pattern: {cp.pattern_type} (Target ₹{cp.measured_target:.2f})"
+                    f"Chart Pattern: {cp.name} ({cp.pattern_type}, Target ₹{cp.measured_target:.2f})"
                 )
                 break
     except Exception as e_suppressed:

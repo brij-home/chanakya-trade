@@ -96,6 +96,7 @@ class OrderFlowSnapshot:
     recommendation: str
     vpin: float = 0.50
     toxicity_regime: str = "MODERATE_TOXICITY"
+    multi_layer_obi: Dict[str, Any] = field(default_factory=dict)
     cvd_series: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -118,6 +119,9 @@ class OrderFlowSnapshot:
             "absorption_detected": self.absorption_detected,
             "conviction_score": self.conviction_score,
             "recommendation": self.recommendation,
+            "vpin": round(float(self.vpin), 4),
+            "toxicity_regime": self.toxicity_regime,
+            "multi_layer_obi": self.multi_layer_obi,
             "cvd_series": self.cvd_series,
         }
 
@@ -157,14 +161,18 @@ def compute_vpin(
     closes = df_bars[col_c].astype(float).values
     volumes = df_bars[col_v].astype(float).values
 
-    # 1. Price Changes & Standard Deviation
+    # 1. Causal Price Changes & Expanding/Rolling Standard Deviation (zero look-ahead)
     delta_p = np.diff(closes, prepend=closes[0])
-    sigma_dp = float(np.std(delta_p))
-    if sigma_dp <= 1e-6:
-        sigma_dp = 1.0
+    dp_series = pd.Series(delta_p, dtype=float)
+    rolling_std_arr = dp_series.expanding(min_periods=2).std(ddof=0).to_numpy(dtype=float)
+    bootstrap_std = np.maximum(np.abs(delta_p) * 0.5, 1.0)
+    sigma_dp_arr = np.maximum(
+        np.where(np.isnan(rolling_std_arr), bootstrap_std, rolling_std_arr),
+        1e-6,
+    )
 
-    # 2. Bulk Volume Classification (BVC) using Standard Normal CDF
-    z = delta_p / sigma_dp
+    # 2. Causal Bulk Volume Classification (BVC) using Standard Normal CDF
+    z = delta_p / sigma_dp_arr
     frac_buy = np.array([0.5 * (1.0 + math.erf(float(val) / math.sqrt(2.0))) for val in z])
     buy_vol = volumes * frac_buy
     sell_vol = volumes * (1.0 - frac_buy)
@@ -183,11 +191,14 @@ def compute_vpin(
         )
 
     n_buckets = max(5, min(num_buckets, 50))
-    v_bucket = (
-        float(volume_per_bucket)
-        if volume_per_bucket and volume_per_bucket > 0
-        else (total_vol / n_buckets)
-    )
+    if volume_per_bucket and volume_per_bucket > 0:
+        v_bucket = float(volume_per_bucket)
+    else:
+        # Causal bucket size calibrated solely from prefix baseline (never using tail total)
+        prefix_bars = max(2, min(len(volumes), max(3, len(volumes) // 2)))
+        prefix_mean_vol = float(np.mean(volumes[:prefix_bars]))
+        bars_per_bucket = max(1.0, len(volumes) / float(n_buckets))
+        v_bucket = prefix_mean_vol * bars_per_bucket
     if v_bucket <= 0:
         v_bucket = 1000.0
 
@@ -282,6 +293,7 @@ def analyze_order_flow(
     spread = 0.0
     spread_pct = 0.0
     imbalance = 0.0
+    layer_obi: Dict[str, Any] = {}
 
     # 2. Check live streaming BisectDepthBook in RAM first (sub-millisecond streaming depth)
     try:
@@ -304,6 +316,10 @@ def analyze_order_flow(
             spread = live_book.spread
             spread_pct = (spread / live_book.best_bid) * 100.0 if live_book.best_bid > 0 else 0.0
             imbalance = live_book.obi(5)
+            if hasattr(live_book, "multi_layer_obi"):
+                layer_obi = live_book.multi_layer_obi()
+                if layer_obi.get("weighted_micro_price"):
+                    micro_price = float(layer_obi["weighted_micro_price"])
             if live_book.rolling_tick_vwap > 0:
                 ltp = live_book.rolling_tick_vwap
     except Exception as e_mem:
@@ -502,5 +518,6 @@ def analyze_order_flow(
         absorption_detected=absorption_detected,
         conviction_score=conviction,
         recommendation=recommendation,
+        multi_layer_obi=layer_obi,
         cvd_series=cvd_series,
     )

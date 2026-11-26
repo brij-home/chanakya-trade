@@ -646,8 +646,9 @@ def run_eod_alert_postmortems(
     }
 
     if not force:
-        # Require that today is an official trading day and post-market (after 15:30 IST)
+        # Require that today is an official trading day and post-market (after derivative close)
         from market.calendar import is_trading_day
+        from market.rule_schedule import derivative_close
 
         if not is_trading_day(now_ist.date(), exchange="NSE"):
             report["status"] = "SKIPPED_WEEKEND_OR_HOLIDAY"
@@ -658,10 +659,12 @@ def run_eod_alert_postmortems(
             logger.info("[AlertPostMortem] %s", report["reason"])
             return report
 
-        hhmm = now_ist.hour * 100 + now_ist.minute
-        if hhmm < 1530:
+        deriv_close_t = derivative_close(now_ist.date())
+        if now_ist.time() < deriv_close_t:
             report["status"] = "SKIPPED_MARKET_OPEN"
-            report["reason"] = "Market is still open (pre-15:30 IST). Use force=True to override."
+            report["reason"] = (
+                f"Market is still open (pre-{deriv_close_t.strftime('%H:%M')} IST). Use force=True to override."
+            )
             logger.info("[AlertPostMortem] %s", report["reason"])
             return report
 

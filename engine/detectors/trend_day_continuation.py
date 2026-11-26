@@ -22,9 +22,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -38,10 +37,7 @@ from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.detectors.trend_day_continuation")
 
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def _calculate_5m_atr(df: Any, period: int = 14) -> float:
@@ -102,8 +98,11 @@ def detect_trend_day_pullback(
     is_test_env = bool(os.getenv("CHANAKYA_TESTING") == "1" or os.getenv("PYTEST_CURRENT_TEST"))
     now_time = now_dt.time()
 
-    # Time Window: Active from 09:35 to 15:15 IST (seamless handoff from opening drive to morning/afternoon continuation)
-    if not is_test_env and not (dtime(9, 35) <= now_time <= dtime(15, 15)):
+    # Time Window: Active from 09:35 to canonical derivative entry cutoff
+    from market.rule_schedule import intraday_entry_cutoff
+
+    _tdc_cutoff = intraday_entry_cutoff(now_dt.date(), is_derivative=True)
+    if not is_test_env and not (dtime(9, 35) <= now_time <= _tdc_cutoff):
         return None
 
     clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
@@ -158,19 +157,78 @@ def detect_trend_day_pullback(
 
     atr_5m = _calculate_5m_atr(df_5m)
 
-    # ── Directional Trend Alignment ─────────────────────────────────────
+    # ── Multi-Timeframe 15m EMAs and Daily Structural Levels ───────────
+    ema_50_15m = 0.0
+    ema_20_15m = 0.0
+    if len(closes) >= 15:
+        try:
+            span_50 = min(150, max(20, len(closes)))
+            span_20 = min(60, max(10, len(closes) // 2))
+            ema_50_15m = float(closes.ewm(span=span_50, adjust=False).mean().iloc[-1])
+            ema_20_15m = float(closes.ewm(span=span_20, adjust=False).mean().iloc[-1])
+        except Exception as e_ema:
+            logger.debug(
+                f"[TrendContinuation] MTF EMA computation skipped for {clean_sym}: {e_ema}"
+            )
+    daily_s1 = 0.0
+    daily_r1 = 0.0
+    cpr_pivot = 0.0
+    pdl_val = 0.0
+    pdh_val = 0.0
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        dl_obj = get_daily_levels(clean_sym)
+        if dl_obj:
+            pdl_val = float(dl_obj.pdl or 0.0)
+            pdh_val = float(dl_obj.pdh or 0.0)
+            if dl_obj.classic_pivots:
+                daily_s1 = float(dl_obj.classic_pivots.get("s1", 0.0) or 0.0)
+                daily_r1 = float(dl_obj.classic_pivots.get("r1", 0.0) or 0.0)
+            if dl_obj.cpr:
+                cpr_pivot = float(dl_obj.cpr.get("pivot", 0.0) or 0.0)
+    except Exception as e_dl:
+        logger.debug(f"[TrendContinuation] Daily levels lookup skipped for {clean_sym}: {e_dl}")
+
+    # Fallback to prev_close for classic pivots if not already populated
+    if daily_s1 == 0.0 and prev_close and prev_close > 0 and len(df_5m) >= 1:
+        try:
+            d_high = float(highs.max())
+            d_low = float(lows.min())
+            d_close = float(prev_close)
+            pp = (d_high + d_low + d_close) / 3.0
+            daily_s1 = round(2.0 * pp - d_high, 2)
+            daily_r1 = round(2.0 * pp - d_low, 2)
+            cpr_pivot = round(pp, 2)
+        except Exception as e_piv:
+            logger.debug(f"[TrendContinuation] Pivot fallback failed for {clean_sym}: {e_piv}")
     is_bull_trend = (
-        val_ema9 > val_ema20
-        and val_ema20 >= prev_ema20
-        and cur_c >= val_vwap * 0.998
-        and closes.iloc[-4:].mean() >= val_ema20 * 0.998
-    )
+        (
+            val_ema9 > val_ema20
+            and val_ema20 >= prev_ema20
+            and closes.iloc[-4:].mean() >= val_ema20 * 0.998
+        )
+        or (
+            ema_20_15m > 0
+            and ema_50_15m > 0
+            and ema_20_15m > ema_50_15m
+            and cur_c >= ema_50_15m * 0.998
+        )
+    ) and (val_vwap == 0 or cur_c >= val_vwap * 0.998)
+
     is_bear_trend = (
-        val_ema9 < val_ema20
-        and val_ema20 <= prev_ema20
-        and cur_c <= val_vwap * 1.002
-        and closes.iloc[-4:].mean() <= val_ema20 * 1.002
-    )
+        (
+            val_ema9 < val_ema20
+            and val_ema20 <= prev_ema20
+            and closes.iloc[-4:].mean() <= val_ema20 * 1.002
+        )
+        or (
+            ema_20_15m > 0
+            and ema_50_15m > 0
+            and ema_20_15m < ema_50_15m
+            and cur_c <= ema_50_15m * 1.002
+        )
+    ) and (val_vwap == 0 or cur_c <= val_vwap * 1.002)
 
     if not (is_bull_trend or is_bear_trend):
         return None
@@ -178,23 +236,51 @@ def detect_trend_day_pullback(
     # ── Pullback & Rejection Geometry ──────────────────────────────────
     is_bull_pullback = False
     is_bear_pullback = False
+    support_reason = "20-EMA"
+    resistance_reason = "20-EMA"
 
     if is_bull_trend:
-        # Bullish: Low of recent 2 candles dipped into 9 EMA, 20 EMA, or VWAP (within 0.35%)
-        tested_support = (
-            min(cur_l, prev_l) <= val_ema9 * 1.0025
-            or min(cur_l, prev_l) <= val_ema20 * 1.0035
-            or min(cur_l, prev_l) <= val_vwap * 1.0035
+        # Bullish: Low of recent 2 candles dipped into 9 EMA, 20 EMA, VWAP, 15m 50-EMA, Daily R1, or PDH
+        tested_support = False
+        if min(cur_l, prev_l) <= val_ema9 * 1.0025:
+            tested_support = True
+            support_reason = "9-EMA"
+        elif min(cur_l, prev_l) <= val_ema20 * 1.0035:
+            tested_support = True
+            support_reason = "20-EMA"
+        elif min(cur_l, prev_l) <= val_vwap * 1.0035:
+            tested_support = True
+            support_reason = "VWAP"
+        elif ema_50_15m > 0 and min(cur_l, prev_l) <= ema_50_15m * 1.0035:
+            tested_support = True
+            support_reason = "15m 50-EMA"
+        elif daily_r1 > 0 and min(cur_l, prev_l) <= daily_r1 * 1.0040:
+            tested_support = True
+            support_reason = "Daily R1 Pivot"
+        elif pdh_val > 0 and min(cur_l, prev_l) <= pdh_val * 1.0040:
+            tested_support = True
+            support_reason = "Prior Day High"
+        elif cpr_pivot > 0 and min(cur_l, prev_l) <= cpr_pivot * 1.0035:
+            tested_support = True
+            support_reason = "CPR Pivot"
+
+        held_support = (
+            (cur_c >= val_ema20 * 0.998 and ltp >= val_ema20 * 0.998)
+            or (ema_50_15m > 0 and cur_c >= ema_50_15m * 0.998 and ltp >= ema_50_15m * 0.998)
+            or (daily_r1 > 0 and cur_c >= daily_r1 * 0.998 and ltp >= daily_r1 * 0.998)
+            or (pdh_val > 0 and cur_c >= pdh_val * 0.998 and ltp >= pdh_val * 0.998)
+            or (cpr_pivot > 0 and cur_c >= cpr_pivot * 0.998 and ltp >= cpr_pivot * 0.998)
         )
-        held_support = cur_c >= val_ema20 * 0.998 and ltp >= val_ema20 * 0.998
 
         # Bullish Rejection: Lower wick >= 35% of bar or green reversal close > prev_h
         bar_rng = max(0.01, cur_h - cur_l)
         lower_wick = min(cur_o, cur_c) - cur_l
+        lower_wick_ratio = lower_wick / bar_rng
         has_rejection = (
-            (lower_wick / bar_rng >= 0.35)
+            (lower_wick_ratio >= 0.35)
             or (cur_c > prev_h)
-            or (cur_c > cur_o and cur_c >= val_ema9)
+            or (cur_c > cur_o and cur_c >= min(val_ema9, val_ema20))
+            or (lower_wick_ratio >= 0.18 and cur_c > cur_o and cur_c > cur_l)
         )
 
         # Pullback volume dry-up: volume on the dip bar was below or near normal (< 1.25x SMA)
@@ -204,21 +290,47 @@ def detect_trend_day_pullback(
             is_bull_pullback = True
 
     elif is_bear_trend:
-        # Bearish: High of recent 2 candles retraced into 9 EMA, 20 EMA, or VWAP (within 0.35%)
-        tested_resistance = (
-            max(cur_h, prev_h) >= val_ema9 * 0.9975
-            or max(cur_h, prev_h) >= val_ema20 * 0.9965
-            or max(cur_h, prev_h) >= val_vwap * 0.9965
+        # Bearish: High of recent 2 candles retraced into 9 EMA, 20 EMA, VWAP, 15m 50-EMA, Daily S1, or PDL
+        tested_resistance = False
+        if max(cur_h, prev_h) >= val_ema9 * 0.9975:
+            tested_resistance = True
+            resistance_reason = "9-EMA"
+        elif max(cur_h, prev_h) >= val_ema20 * 0.9965:
+            tested_resistance = True
+            resistance_reason = "20-EMA"
+        elif max(cur_h, prev_h) >= val_vwap * 0.9965:
+            tested_resistance = True
+            resistance_reason = "VWAP"
+        elif ema_50_15m > 0 and max(cur_h, prev_h) >= ema_50_15m * 0.9965:
+            tested_resistance = True
+            resistance_reason = "15m 50-EMA"
+        elif daily_s1 > 0 and max(cur_h, prev_h) >= daily_s1 * 0.9960:
+            tested_resistance = True
+            resistance_reason = "Daily S1 Pivot"
+        elif pdl_val > 0 and max(cur_h, prev_h) >= pdl_val * 0.9960:
+            tested_resistance = True
+            resistance_reason = "Prior Day Low"
+        elif cpr_pivot > 0 and max(cur_h, prev_h) >= cpr_pivot * 0.9965:
+            tested_resistance = True
+            resistance_reason = "CPR Pivot"
+
+        held_resistance = (
+            (cur_c <= val_ema20 * 1.002 and ltp <= val_ema20 * 1.002)
+            or (ema_50_15m > 0 and cur_c <= ema_50_15m * 1.002 and ltp <= ema_50_15m * 1.002)
+            or (daily_s1 > 0 and cur_c <= daily_s1 * 1.002 and ltp <= daily_s1 * 1.002)
+            or (pdl_val > 0 and cur_c <= pdl_val * 1.002 and ltp <= pdl_val * 1.002)
+            or (cpr_pivot > 0 and cur_c <= cpr_pivot * 1.002 and ltp <= cpr_pivot * 1.002)
         )
-        held_resistance = cur_c <= val_ema20 * 1.002 and ltp <= val_ema20 * 1.002
 
         # Bearish Rejection: Upper wick >= 35% of bar or red breakdown close < prev_l
         bar_rng = max(0.01, cur_h - cur_l)
         upper_wick = cur_h - max(cur_o, cur_c)
+        upper_wick_ratio = upper_wick / bar_rng
         has_rejection = (
-            (upper_wick / bar_rng >= 0.35)
+            (upper_wick_ratio >= 0.35)
             or (cur_c < prev_l)
-            or (cur_c < cur_o and cur_c <= val_ema9)
+            or (cur_c < cur_o and cur_c <= max(val_ema9, val_ema20))
+            or (upper_wick_ratio >= 0.18 and cur_c < cur_o and cur_c < cur_h)
         )
 
         # Retracement volume dry-up
@@ -309,6 +421,44 @@ def detect_trend_day_pullback(
         except Exception as e_pol:
             logger.debug(f"[TrendContinuation] Index polarization check notice: {e_pol}")
 
+    # ── Multi-Pillar Structural Location & Confluence (OB / Fib OTE / FVG / Sweep) ──
+    struct_loc = None
+    try:
+        from analysis.market_structure import evaluate_structural_location
+
+        struct_loc = evaluate_structural_location(
+            df_5m,
+            spot=ltp,
+            direction=direction,
+            vwap=val_vwap,
+            pdh=pdh_val,
+            pdl=pdl_val,
+            rvol_val=float(rvol_val or 1.0),
+        )
+        # Cross-asset Constituent Lead-Lag alignment for major indices (NIFTY / BANKNIFTY)
+        if is_index and clean_sym in ("NIFTY", "BANKNIFTY"):
+            try:
+                from engine.feature_bus import compute_constituent_lead_lag
+
+                ll = compute_constituent_lead_lag(clean_sym)
+                if ll.get("status") == "AVAILABLE":
+                    lb = ll.get("lead_bias", "NEUTRAL")
+                    w_imp = float(ll.get("weighted_impulse_pct", 0.0) or 0.0)
+                    if is_bull_pullback and lb == "BEARISH_LEAD" and w_imp <= -0.35:
+                        logger.info(
+                            f"[TrendContinuation] Suppressed {clean_sym} BULLISH pullback: opposing constituent basket {lb} ({w_imp:+.2f}%)."
+                        )
+                        return None
+                    if is_bear_pullback and lb == "BULLISH_LEAD" and w_imp >= 0.35:
+                        logger.info(
+                            f"[TrendContinuation] Suppressed {clean_sym} BEARISH pullback: opposing constituent basket {lb} ({w_imp:+.2f}%)."
+                        )
+                        return None
+            except Exception as e_ll:
+                logger.debug(f"[TrendContinuation] Constituent lead-lag check skipped: {e_ll}")
+    except Exception as e_loc:
+        logger.debug(f"[TrendContinuation] Structural location evaluation skipped: {e_loc}")
+
     # ── Central Pivot Range (CPR) & Camarilla Levels Gate ─────────────
     cpr_data: dict = {}
     is_narrow_cpr = False
@@ -373,17 +523,23 @@ def detect_trend_day_pullback(
             if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
                 obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
                 if is_bear_pullback and (
-                    obi_50_val >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed")
+                    obi_50_val >= 0.20
+                    or tbt_depth.get("fortress_bid_wall_confirmed")
+                    or tbt_depth.get("fleeing_ask_wall_detected")
+                    or "ASK_SPOOF" in str(tbt_depth.get("spoof_trap_warning") or "")
                 ):
                     logger.info(
-                        f"[TrendContinuation] Suppressed Bearish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Bid Wall on {fut_sym}."
+                        f"[TrendContinuation] Suppressed Bearish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Bid Wall / Ask Spoof on {fut_sym}."
                     )
                     return None
                 elif is_bull_pullback and (
-                    obi_50_val <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed")
+                    obi_50_val <= -0.20
+                    or tbt_depth.get("fortress_ask_wall_confirmed")
+                    or tbt_depth.get("fleeing_bid_wall_detected")
+                    or "BID_SPOOF" in str(tbt_depth.get("spoof_trap_warning") or "")
                 ):
                     logger.info(
-                        f"[TrendContinuation] Suppressed Bullish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Ask Wall on {fut_sym}."
+                        f"[TrendContinuation] Suppressed Bullish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Ask Wall / Bid Spoof on {fut_sym}."
                     )
                     return None
         except Exception as e_tbt:
@@ -505,13 +661,31 @@ def detect_trend_day_pullback(
             dmi_res = evaluate_triple_dmi(df_5m, is_intraday=True)
             if dmi_res:
                 dmi_verdict = dmi_res.verdict
+                if is_bull_pullback and dmi_verdict in (
+                    "TRIPLE_BEARISH_CONFIRMED",
+                    "BEARISH_ESTABLISHED",
+                ):
+                    logger.info(
+                        f"[TrendContinuation] Vetoed Bullish Pullback on {clean_sym}: Triple-DMI={dmi_verdict} opposes direction."
+                    )
+                    return None
+                if is_bear_pullback and dmi_verdict in (
+                    "TRIPLE_BULLISH_CONFIRMED",
+                    "BULLISH_ESTABLISHED",
+                ):
+                    logger.info(
+                        f"[TrendContinuation] Vetoed Bearish Pullback on {clean_sym}: Triple-DMI={dmi_verdict} opposes direction."
+                    )
+                    return None
                 if is_bull_pullback and (
-                    dmi_res.verdict == "TRIPLE_DMI_BULLISH_CONFIRMED" or dmi_res.plus_di >= 22.0
+                    dmi_verdict in ("TRIPLE_BULLISH_CONFIRMED", "BULLISH_ESTABLISHED")
+                    or dmi_res.plus_di >= 22.0
                 ):
                     confidence_score += 5
                     has_flow = True
                 elif is_bear_pullback and (
-                    dmi_res.verdict == "TRIPLE_DMI_BEARISH_CONFIRMED" or dmi_res.minus_di >= 22.0
+                    dmi_verdict in ("TRIPLE_BEARISH_CONFIRMED", "BEARISH_ESTABLISHED")
+                    or dmi_res.minus_di >= 22.0
                 ):
                     confidence_score += 5
                     has_flow = True
@@ -519,6 +693,16 @@ def detect_trend_day_pullback(
             obv_res = analyse_obv(df_5m, is_intraday=True)
             if obv_res:
                 obv_div = obv_res.divergence
+                if is_bull_pullback and obv_res.divergence == "BEARISH_DIVERGENCE":
+                    logger.info(
+                        f"[TrendContinuation] Vetoed Bullish Pullback on {clean_sym}: opposing OBV BEARISH_DIVERGENCE."
+                    )
+                    return None
+                if is_bear_pullback and obv_res.divergence == "BULLISH_DIVERGENCE":
+                    logger.info(
+                        f"[TrendContinuation] Vetoed Bearish Pullback on {clean_sym}: opposing OBV BULLISH_DIVERGENCE."
+                    )
+                    return None
                 if is_bull_pullback and (
                     obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
                     or obv_res.obv_slope_5bar > 0
@@ -531,6 +715,53 @@ def detect_trend_day_pullback(
                 ):
                     confidence_score += 4
                     has_flow = True
+
+            # Opposing SMC Wall & Wide-CPR Single-EMA Guard (eliminates low-edge EMA-only bounces)
+            if not is_test_env and struct_loc is not None:
+                if struct_loc.has_opposing_wall and not (has_flow and rvol_val >= 1.6):
+                    logger.info(
+                        f"[TrendContinuation] Suppressed {clean_sym} {direction}: {struct_loc.opposing_wall_reason}"
+                    )
+                    return None
+                is_pure_ema_only = (support_reason if is_bull_pullback else resistance_reason) in (
+                    "9-EMA",
+                    "20-EMA",
+                )
+                if (
+                    is_wide_cpr
+                    and is_pure_ema_only
+                    and not struct_loc.has_strong_location
+                    and rvol_val < 1.35
+                ):
+                    logger.info(
+                        f"[TrendContinuation] Suppressed {clean_sym} {direction}: Wide CPR EMA-only pullback without OB/Fib/Sweep confluence (rvol={rvol_val:.2f})."
+                    )
+                    return None
+
+            # Reject weak/choppy low-edge pullbacks lacking flow confirmation (cuts -6% churn)
+            if (
+                not has_flow
+                and dmi_verdict in (None, "NEUTRAL", "WEAK_OR_CHOPPY")
+                and alpha_quality_score < 82.0
+            ):
+                logger.info(
+                    f"[TrendContinuation] Suppressed low-edge pullback on {clean_sym}: "
+                    f"dmi={dmi_verdict}, has_flow={has_flow}, aqs={alpha_quality_score:.1f} < 82.0"
+                )
+                return None
+
+            # Midday Chop Window (11:30 - 13:15 IST): Require stronger RVOL + trend/flow confluence
+            if (
+                not is_test_env
+                and dtime(11, 30) <= now_time <= dtime(13, 15)
+                and not is_narrow_cpr
+                and (rvol_val < 1.35 or (not has_flow and alpha_quality_score < 85.0))
+            ):
+                logger.info(
+                    f"[TrendContinuation] Suppressed midday-chop pullback on {clean_sym}: "
+                    f"rvol={rvol_val:.2f}, has_flow={has_flow}, aqs={alpha_quality_score:.1f}"
+                )
+                return None
         except Exception as e_flow:
             logger.debug(f"[TrendContinuation] Flow analysis skipped: {e_flow}")
 
@@ -539,7 +770,11 @@ def detect_trend_day_pullback(
     pref_vehicle = "SPREAD_ONLY" if is_afternoon else "NAKED_OPTION"
 
     # ── Option Resolution via Unified VIX-Aware Resolver ──────────────
+    from engine.position_sizer import get_lot_size
     from engine.option_resolver import resolve_option_contract
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_index or (stock_lot_size > 1)
 
     resolved_opt = resolve_option_contract(
         symbol=clean_sym,
@@ -547,7 +782,7 @@ def detect_trend_day_pullback(
         direction=direction,
         underlying_sl=sl_price,
         underlying_target=t1_price,
-        prefer_options=is_index,
+        prefer_options=should_prefer_opt,
     )
 
     has_opt = resolved_opt is not None and resolved_opt.entry_premium > 0
@@ -655,29 +890,57 @@ def detect_trend_day_pullback(
         variant=variant_str,
     )
 
+    retest_label = support_reason if is_bull_pullback else resistance_reason
+    loc_tags = list(struct_loc.location_tags) if struct_loc and struct_loc.location_tags else []
+    anchor_tag = f"{retest_label.upper().replace(' ', '_')}_{'SUPPORT' if is_bull_pullback else 'RESISTANCE'}"
+    pb_signals: list[str] = [anchor_tag]
+    for lt in loc_tags:
+        if lt not in pb_signals:
+            pb_signals.append(lt)
+    pb_signals.append(f"VOL_DRYUP_{pullback_vol_ratio:.2f}X")
+    if is_bull_pullback:
+        pb_signals.append("BULL_WICK_REJECTION")
+    else:
+        pb_signals.append("BEAR_WICK_REJECTION")
+    confluence_pillars = [
+        p
+        for p, ok in (
+            (
+                "LOCATION",
+                bool(struct_loc and struct_loc.is_valid_location) or retest_label not in ("9-EMA",),
+            ),
+            ("TRIGGER", True),
+            ("FLOW", bool(has_flow or rvol_val >= 1.25)),
+        )
+        if ok
+    ]
+    if is_wide_cpr and not (struct_loc and struct_loc.has_strong_location):
+        confidence_score = min(confidence_score, 84)
+    elif struct_loc and struct_loc.has_strong_location:
+        confidence_score = min(98, confidence_score + 3)
     if has_opt and opt_strike:
         opt_action = f"{format_strike(opt_strike)} {opt_type} Buy"
         headline = (
-            f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: 20-EMA Support Retest (Spot ₹{ltp:,.1f})"
+            f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: {retest_label} Support Retest (Spot ₹{ltp:,.1f})"
             if is_bull_pullback
-            else f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: 20-EMA Resistance Reject (Spot ₹{ltp:,.1f})"
+            else f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: {retest_label} Resistance Reject (Spot ₹{ltp:,.1f})"
         )
         summary = (
-            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support."
+            f"Institutional shallow pullback into {retest_label} on {clean_sym}. Low-volume retest holds support."
             if is_bull_pullback
-            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance."
+            else f"Institutional shallow bounce into {retest_label} on {clean_sym}. Low-volume retest rejected at resistance."
         )
     else:
         eq_action = "Long" if is_bull_pullback else "Short"
         headline = (
-            f"🎯 [TREND PULLBACK] {clean_sym} {eq_action}: 20-EMA Support Retest @ ₹{ltp:,.1f} (T1: ₹{t1_price:,.1f})"
+            f"🎯 [TREND PULLBACK] {clean_sym} {eq_action}: {retest_label} Support Retest @ ₹{ltp:,.1f} (T1: ₹{t1_price:,.1f})"
             if is_bull_pullback
-            else f"🎯 [TREND PULLBACK] {clean_sym} {eq_action}: 20-EMA Resistance Reject @ ₹{ltp:,.1f} (T1: ₹{t1_price:,.1f})"
+            else f"🎯 [TREND PULLBACK] {clean_sym} {eq_action}: {retest_label} Resistance Reject @ ₹{ltp:,.1f} (T1: ₹{t1_price:,.1f})"
         )
         summary = (
-            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support."
+            f"Institutional shallow pullback into {retest_label} on {clean_sym}. Low-volume retest holds support."
             if is_bull_pullback
-            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance."
+            else f"Institutional shallow bounce into {retest_label} on {clean_sym}. Low-volume retest rejected at resistance."
         )
 
     alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if has_opt else segment)
@@ -777,6 +1040,11 @@ def detect_trend_day_pullback(
             "vsa_signal": vsa_sig,
             "dmi_triple_verdict": dmi_verdict,
             "obv_regime": obv_div,
+            "signals": pb_signals,
+            "structural_location": loc_tags,
+            "fib_retracement_pct": struct_loc.fib_retracement_pct if struct_loc else None,
+            "nearest_ob_zone": struct_loc.nearest_ob_zone if struct_loc else None,
+            "confluence_pillars": confluence_pillars,
             "fractal_blueprint": fractal_dict,
         },
         preferred_vehicle=pref_vehicle,

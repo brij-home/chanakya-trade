@@ -371,7 +371,10 @@ def get_0dte_intraday_phase(
         }
 
     # Market hours check
-    if now_time < dtime(9, 15) or now_time >= dtime(15, 30):
+    from market.rule_schedule import derivative_close
+
+    _close_t = derivative_close(now_date, expiring_index=True)
+    if now_time < dtime(9, 15) or now_time >= _close_t:
         return {
             "symbol": clean_sym,
             "is_0dte": True,
@@ -687,7 +690,19 @@ def build_defined_risk_hedge_plan(
         adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     elif is_banknifty:
         step = 100.0
-        width = spread_width or (300.0 if is_chop_regime else (500.0 if is_explosive else 400.0))
+        _dte_mult = 1.0
+        if expiry_date:
+            try:
+                _dte_val = (
+                    datetime.strptime(str(expiry_date)[:10], "%Y-%m-%d").date()
+                    - (now_dt or datetime.now(IST)).date()
+                ).days
+                if _dte_val >= 14:
+                    _dte_mult = 1.6
+            except Exception:
+                _dte_mult = 1.0
+        base_bnf_w = 300.0 if is_chop_regime else (500.0 if is_explosive else 400.0)
+        width = spread_width or round((base_bnf_w * _dte_mult) / step) * step
         regime_label = (
             "CHOP / RANGE DEFENSE"
             if is_chop_regime
@@ -884,7 +899,7 @@ def build_defined_risk_hedge_plan(
         dte = 7
         try:
             exp_meta = get_expiry_metadata(expiry_date, None, clean_sym, None)
-            if exp_meta and "dte" in exp_meta:
+            if exp_meta and exp_meta.get("dte") is not None:
                 dte = max(0, int(exp_meta["dte"]))
         except Exception as e_suppressed:
             logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")

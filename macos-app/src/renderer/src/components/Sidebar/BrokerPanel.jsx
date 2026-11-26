@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useChatStore } from '../../store/chatStore'
+import { useChatStore, DEFAULT_SIDECAR_PORT } from '../../store/chatStore'
 
 const BROKERS = [
   {
@@ -10,7 +10,7 @@ const BROKERS = [
     loginPath: '/fyers/login',
     portalUrl: 'https://myapi.fyers.in',
     portalLabel: 'myapi.fyers.in',
-    redirectUrl: 'http://127.0.0.1:8765/fyers/callback',
+    redirectUrl: `http://127.0.0.1:${DEFAULT_SIDECAR_PORT}/fyers/callback`,
     keys: [
       { env: 'FYERS_APP_ID', label: 'App ID', placeholder: 'XXXX-100', secret: false },
       { env: 'FYERS_SECRET_KEY', label: 'Secret Key', placeholder: 'Secret key', secret: true },
@@ -39,7 +39,7 @@ const BROKERS = [
     loginPath: '/zerodha/login',
     portalUrl: 'https://developers.kite.trade',
     portalLabel: 'developers.kite.trade',
-    redirectUrl: 'http://localhost:8765/zerodha/callback',
+    redirectUrl: `http://localhost:${DEFAULT_SIDECAR_PORT}/zerodha/callback`,
     keys: [
       { env: 'KITE_API_KEY', label: 'API Key', placeholder: 'API key', secret: false },
       { env: 'KITE_API_SECRET', label: 'API Secret', placeholder: 'API secret', secret: true },

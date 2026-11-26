@@ -358,6 +358,269 @@ def build_policy_context_from_alert(alert: Any) -> SignalPolicyEvaluationContext
     )
 
 
+def evaluate_three_pillar_confluence(
+    alert: Any,
+    ctx: SignalPolicyEvaluationContext,
+) -> tuple[bool, list[str], str]:
+    """
+    Universal 3-Pillar Confluence Floor (>= 2 of 3 independent pillars required):
+      - LOCATION: OB, Fib OTE, FVG, Sweep, PDH/PDL, VAH/VAL/POC, VWAP, CPR, Pivot, S1/R1, GEX Wall.
+      - TRIGGER:  Breakout, Breakdown, Reclaim, Rejection, CHoCH, Sweep, Expansion, Thrust, Coiling.
+      - FLOW:     RVOL >= 1.25, Vol/OI >= 1.2, OBV, VSA, AVWAP, OBI-50, Writer Panic, Triple-DMI.
+    Neutral range strategies and sparse synthetic test fixtures lacking signal telemetry bypass gracefully.
+    """
+    dir_u = str(getattr(alert, "direction", "") or ctx.direction or "").upper()
+    atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+    if dir_u == "NEUTRAL" or atype_u in (
+        "DEFINED_RISK_NEUTRAL",
+        "IRON_CONDOR",
+        "CREDIT_SPREAD",
+        "SHORT_STRADDLE",
+        "SHORT_STRANGLE",
+        "CIRCUIT_WARNING",
+    ):
+        return (
+            True,
+            ["NEUTRAL_DEFINED_RISK"],
+            "Neutral / system alert exempt from directional 3-pillar floor",
+        )
+
+    metrics = getattr(alert, "metrics", None)
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    explicit_pillars = metrics.get("confluence_pillars")
+    if isinstance(explicit_pillars, (list, tuple)) and len(explicit_pillars) >= 2:
+        return True, [str(p) for p in explicit_pillars], "Explicit multi-pillar confluence attached"
+
+    sigs = [str(s).upper() for s in (metrics.get("signals") or []) if s]
+    loc_tags = [str(s).upper() for s in (metrics.get("structural_location") or []) if s]
+    vp_tags = [str(s).upper() for s in (metrics.get("volume_profile_tags") or []) if s]
+    text_blob = (
+        f"{getattr(alert, 'headline', '') or ''} {getattr(alert, 'summary', '') or ''}".upper()
+    )
+
+    has_loc = bool(
+        loc_tags
+        or vp_tags
+        or metrics.get("nearest_ob_zone")
+        or metrics.get("fib_retracement_pct") is not None
+        or metrics.get("cpr_type") in ("NARROW", "AVERAGE")
+        or metrics.get("gex_call_wall")
+        or metrics.get("gex_put_wall")
+        or any(
+            k in tok
+            for tok in sigs
+            for k in (
+                "OB",
+                "FIB",
+                "OTE",
+                "FVG",
+                "SWEEP",
+                "PDH",
+                "PDL",
+                "VWAP",
+                "VAH",
+                "VAL",
+                "POC",
+                "CAMARILLA",
+                "PIVOT",
+                "CPR",
+                "DAY_HIGH",
+                "DAY_LOW",
+                "SUPPORT",
+                "RESISTANCE",
+            )
+        )
+        or any(
+            k in text_blob
+            for k in (
+                "ORDER BLOCK",
+                "FIB",
+                "OTE",
+                "VWAP",
+                "PDH",
+                "PDL",
+                "CAMARILLA",
+                "RESISTANCE",
+                "SUPPORT",
+                "VALUE AREA",
+                "NECKLINE",
+                "OPENING RANGE",
+                "PULLBACK",
+            )
+        )
+    )
+
+    has_trig = bool(
+        str(getattr(alert, "stage", "") or "").upper()
+        in ("TRAILING_UPDATE", "T0_5_ACHIEVED", "T1_ACHIEVED")
+        or metrics.get("trigger_confirmed")
+        or any(
+            k in tok
+            for tok in sigs
+            for k in (
+                "BREAKOUT",
+                "BREAKDOWN",
+                "RECLAIM",
+                "REJECTION",
+                "CHOCH",
+                "SWEEP",
+                "RETEST",
+                "THRUST",
+                "IGNIT",
+                "EXPANSION",
+                "REVERSAL",
+                "FLOOR",
+                "CEIL",
+                "ABSORPTION",
+                "OPENING_DRIVE",
+                "WRITER_PANIC",
+                "MOMENTUM",
+            )
+        )
+        or any(
+            k in text_blob
+            for k in (
+                "BREAKOUT",
+                "BREAKDOWN",
+                "RECLAIM",
+                "REJECTION",
+                "REVERSAL",
+                "SWEEP",
+                "RETEST",
+                "IGNITED",
+                "CROSS",
+                "SURGE",
+                "COILING",
+            )
+        )
+    )
+
+    rvol_val = float(ctx.feature_snapshot.get("rvol") or metrics.get("rvol") or 0.0)
+    voi_val = float(metrics.get("vol_oi_ratio") or getattr(alert, "vol_oi_ratio", 0.0) or 0.0)
+    has_flow = bool(
+        rvol_val >= 1.25
+        or voi_val >= 1.2
+        or metrics.get("has_flow")
+        or metrics.get("is_volume_dryup")
+        or metrics.get("obi_50") is not None
+        or (
+            metrics.get("obv_divergence")
+            and str(metrics.get("obv_divergence")).upper() not in ("NONE", "NEUTRAL")
+        )
+        or (
+            metrics.get("vsa_signal")
+            and str(metrics.get("vsa_signal")).upper() not in ("NONE", "NEUTRAL")
+        )
+        or (
+            metrics.get("dmi_triple_verdict")
+            and str(metrics.get("dmi_triple_verdict")).upper()
+            not in ("NONE", "NEUTRAL", "WEAK_OR_CHOPPY")
+        )
+        or (
+            metrics.get("avwap_bias")
+            and str(metrics.get("avwap_bias")).upper() not in ("NONE", "NEUTRAL")
+        )
+        or any(
+            k in tok
+            for tok in sigs
+            for k in ("OI_UNWIND", "WRITER_PANIC", "VOL_OI", "SHORT_COVERING", "LONG_UNWINDING")
+        )
+    )
+
+    pillars = [
+        p for p, ok in (("LOCATION", has_loc), ("TRIGGER", has_trig), ("FLOW", has_flow)) if ok
+    ]
+
+    # Single-indicator guard: if signal/indicator telemetry is attached and fewer than 2 pillars pass, reject.
+    has_indicator_markers = bool(
+        sigs
+        or metrics.get("dmi_triple_verdict")
+        or metrics.get("vsa_signal")
+        or metrics.get("obv_divergence")
+        or metrics.get("avwap_bias")
+        or metrics.get("obi_50") is not None
+        or metrics.get("structural_location") is not None
+        or metrics.get("volume_profile_tags") is not None
+    )
+    if len(pillars) < 2 and has_indicator_markers:
+        return (
+            False,
+            pillars,
+            f"Insufficient confluence ({len(pillars)}/3 pillars: {pillars or ['NONE']}; require >=2 of Location + Trigger + Flow)",
+        )
+    return True, pillars, f"Confluence passed ({len(pillars)}/3 pillars: {pillars})"
+
+
+def evaluate_expected_move_runway(
+    alert: Any,
+    ctx: SignalPolicyEvaluationContext,
+) -> tuple[bool, dict[str, Any], str]:
+    """
+    Checks remaining intraday Expected Move:
+      EM_remaining = max(ADR_5d, ATM_straddle * 0.85) - (day_high - day_low).
+    Vetoes non-catalyst intraday continuation setups whose Target 1 distance exceeds
+    available expected-move runway when < 25% of expected move remains.
+    """
+    metrics = getattr(alert, "metrics", None)
+    metrics = metrics if isinstance(metrics, dict) else {}
+    horizon = str(getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+    if horizon != "INTRADAY":
+        return True, {}, "Non-intraday horizon exempt"
+
+    spot = float(
+        getattr(alert, "underlying_spot", None)
+        or metrics.get("underlying_spot")
+        or metrics.get("spot")
+        or ctx.feature_snapshot.get("ltp")
+        or 0.0
+    )
+    adr_5d = float(metrics.get("adr_5d") or metrics.get("adr") or 0.0)
+    straddle_prem = float(
+        metrics.get("atm_straddle_premium") or metrics.get("straddle_prem") or 0.0
+    )
+    expected_move = max(adr_5d, straddle_prem * 0.85)
+    day_high = float(metrics.get("day_high") or 0.0)
+    day_low = float(metrics.get("day_low") or 0.0)
+    spot_t1 = float(
+        metrics.get("spot_target_1")
+        or metrics.get("underlying_target")
+        or (
+            0.0
+            if getattr(alert, "option_type", None) in ("CE", "PE")
+            else getattr(alert, "target_level", 0.0) or 0.0
+        )
+    )
+
+    if expected_move <= 0 or day_high <= day_low or spot <= 0 or spot_t1 <= 0:
+        return True, {}, "Expected move inputs not populated"
+
+    used_range = max(0.0, day_high - day_low)
+    em_remaining = max(0.0, expected_move - used_range)
+    em_rem_pct = (em_remaining / expected_move) * 100.0
+    spot_t1_dist = abs(spot_t1 - spot)
+    em_info = {
+        "expected_move": round(expected_move, 2),
+        "used_range": round(used_range, 2),
+        "em_remaining": round(em_remaining, 2),
+        "em_remaining_pct": round(em_rem_pct, 1),
+        "spot_t1_dist": round(spot_t1_dist, 2),
+    }
+
+    is_catalyst = bool(metrics.get("is_extreme_catalyst") or metrics.get("is_writer_panic"))
+    if (
+        not is_catalyst
+        and em_rem_pct < 25.0
+        and spot_t1_dist > max(em_remaining * 1.15, expected_move * 0.20)
+    ):
+        return (
+            False,
+            em_info,
+            f"Expected Move exhausted: only {em_rem_pct:.1f}% remaining (₹{em_remaining:.1f} left vs T1 distance ₹{spot_t1_dist:.1f})",
+        )
+    return True, em_info, f"Expected Move runway OK ({em_rem_pct:.1f}% remaining)"
+
+
 def evaluate_candidate_policy(
     ctx: Any = None,
     alert: Any = None,
@@ -650,6 +913,140 @@ def evaluate_candidate_policy(
             is_safety_gate=False,
         )
     )
+
+    # B0a. Universal 3-Pillar Confluence Floor & Expected-Move Runway Gate
+    conf_ok, conf_pillars, conf_reason = evaluate_three_pillar_confluence(alert, ctx)
+    if not conf_ok:
+        blocking = GateVerdict(
+            gate_name="CONFLUENCE_3_PILLAR_GATE",
+            category="CONTEXT",
+            status="REJECT",
+            reason=conf_reason,
+            evidence={"pillars": conf_pillars},
+            is_safety_gate=False,
+            veto_code=PolicyVetoCode.QUALITY_GATE_VETO.value,
+        )
+        gate_verdicts.append(blocking)
+        latency = (time.perf_counter() - t0) * 1000.0
+        return _build_result(
+            "REJECT",
+            "SHADOW_ONLY",
+            "REJECTED",
+            "VETOED",
+            gate_verdicts,
+            blocking,
+            ctx,
+            now_str,
+            latency,
+            cache_key,
+        )
+    cal_evidence: dict[str, Any] = {}
+    try:
+        from engine.confidence_calibrator import calibrate_alert_confidence
+
+        cal_res = calibrate_alert_confidence(alert, pillars=conf_pillars, as_of=now_dt)
+        cal_evidence = cal_res.to_dict()
+    except Exception as e_cal:
+        logger.debug(f"[SignalPolicy] Confidence calibration diagnostic skipped: {e_cal}")
+
+    gate_verdicts.append(
+        GateVerdict(
+            gate_name="CONFLUENCE_3_PILLAR_GATE",
+            category="CONTEXT",
+            status="ACCEPT",
+            reason=conf_reason,
+            evidence={"pillars": conf_pillars, "calibration": cal_evidence},
+            is_safety_gate=False,
+        )
+    )
+
+    em_ok, em_info, em_reason = evaluate_expected_move_runway(alert, ctx)
+    if not em_ok:
+        blocking = GateVerdict(
+            gate_name="EXPECTED_MOVE_RUNWAY_GATE",
+            category="CONTEXT",
+            status="REJECT",
+            reason=em_reason,
+            evidence=em_info,
+            is_safety_gate=False,
+            veto_code=PolicyVetoCode.QUALITY_GATE_VETO.value,
+        )
+        gate_verdicts.append(blocking)
+        latency = (time.perf_counter() - t0) * 1000.0
+        return _build_result(
+            "REJECT",
+            "SHADOW_ONLY",
+            "REJECTED",
+            "VETOED",
+            gate_verdicts,
+            blocking,
+            ctx,
+            now_str,
+            latency,
+            cache_key,
+        )
+    gate_verdicts.append(
+        GateVerdict(
+            gate_name="EXPECTED_MOVE_RUNWAY_GATE",
+            category="CONTEXT",
+            status="ACCEPT",
+            reason=em_reason,
+            evidence=em_info,
+            is_safety_gate=False,
+        )
+    )
+
+    # B0b. Post-Dec 7, 2026 CAS Dispersion Spread Guard (15:25-15:45 IST derivatives)
+    if not is_comm_or_crypto:
+        try:
+            from market.rule_schedule import is_cas_derivative_dispersion_window
+
+            is_deriv_alert = getattr(alert, "option_type", None) in (
+                "CE",
+                "PE",
+            ) or ctx.instrument_type in ("OPTION", "SPREAD")
+            if is_deriv_alert and is_cas_derivative_dispersion_window(now_dt):
+                bas_pct = getattr(alert, "bid_ask_spread_pct", None)
+                if bas_pct is None and isinstance(getattr(alert, "metrics", None), dict):
+                    bas_pct = (alert.metrics.get("liquidity") or {}).get("bid_ask_spread_pct")
+                if bas_pct is None or float(bas_pct) > 2.5:
+                    blocking = GateVerdict(
+                        gate_name="CAS_SPREAD_DISPERSION_GATE",
+                        category="SAFETY",
+                        status="REJECT",
+                        reason=(
+                            f"CAS-window (15:25-15:45 IST) derivative spread dispersion guard: "
+                            f"spread={bas_pct}% (require live <= 2.5%)"
+                        ),
+                        evidence={"bid_ask_spread_pct": bas_pct, "timestamp": now_str},
+                        is_safety_gate=True,
+                        veto_code=PolicyVetoCode.QUALITY_GATE_VETO.value,
+                    )
+                    gate_verdicts.append(blocking)
+                    latency = (time.perf_counter() - t0) * 1000.0
+                    return _build_result(
+                        "REJECT",
+                        "VETOED",
+                        "REJECTED",
+                        "VETOED",
+                        gate_verdicts,
+                        blocking,
+                        ctx,
+                        now_str,
+                        latency,
+                        cache_key,
+                    )
+                gate_verdicts.append(
+                    GateVerdict(
+                        gate_name="CAS_SPREAD_DISPERSION_GATE",
+                        category="SAFETY",
+                        status="ACCEPT",
+                        reason=f"CAS derivative spread verified ({float(bas_pct):.2f}% <= 2.5%)",
+                        is_safety_gate=True,
+                    )
+                )
+        except Exception as e_cas:
+            logger.debug(f"[SignalPolicy] CAS spread dispersion guard check skipped: {e_cas}")
 
     # ─────────────────────────────────────────────────────────────────────────
 

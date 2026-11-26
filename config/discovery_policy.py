@@ -54,8 +54,8 @@ def _get_persisted_profile() -> Union[str, None]:
             prof = data.get("profile")
             if prof in _PROFILES:
                 return prof
-    except Exception:
-        pass
+    except Exception as e_read:
+        logger.debug(f"[discovery_policy] Could not load persisted profile: {e_read}")
     return None
 
 
@@ -75,8 +75,8 @@ def _persist_profile(prof: str) -> None:
         p = app_data_path("discovery_profile.json")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"profile": prof}), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_write:
+        logger.debug(f"[discovery_policy] Could not persist discovery profile: {e_write}")
 
 
 def get_discovery_policy() -> DiscoveryPolicy:

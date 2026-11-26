@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
 
+from config.constants import IST
 from engine.alert_identity import (
     generate_alert_id,
     canonical_alert_symbol,
@@ -37,11 +37,6 @@ from engine.alert_identity import (
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.afternoon_thrust")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _calculate_5m_atr(df: Any, period: int = 14) -> float:
@@ -115,8 +110,11 @@ def detect_afternoon_thrust(
 
     curr_t = now_dt.time()
     if not ignore_time_gate:
-        # Afternoon thrust active from 13:15 IST (post midday-lull) to 15:15 IST
-        if curr_t < dtime(13, 15) or curr_t > dtime(15, 15):
+        from market.rule_schedule import intraday_entry_cutoff
+
+        _at_cutoff = intraday_entry_cutoff(now_dt.date(), is_derivative=True)
+        # Afternoon thrust active from 13:15 IST (post midday-lull) to canonical derivative entry cutoff
+        if curr_t < dtime(13, 15) or curr_t > _at_cutoff:
             return None
 
     col_o = "open" if "open" in df_5m.columns else "Open"
@@ -228,6 +226,38 @@ def detect_afternoon_thrust(
 
     direction = "BULLISH" if is_bull_thrust else "BEARISH"
 
+    # ── ROC Stalling Anti-Trap Filter ───────────────────────
+    roc_metric = None
+    try:
+        from engine.index_velocity import calculate_roc_momentum
+
+        roc_metric = calculate_roc_momentum(df_today, symbol=clean_sym)
+        if not ignore_time_gate and roc_metric:
+            if (
+                direction == "BEARISH"
+                and roc_metric.is_decelerating_down
+                and roc_metric.roc_1 >= 0.04
+                and roc_metric.roc_3bar > -0.05
+                and last_close > last_open
+            ):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bearish flush on {clean_sym}: 5m ROC STALLING_AT_BOTTOM ({roc_metric.summary})"
+                )
+                return None
+            if (
+                direction == "BULLISH"
+                and roc_metric.is_decelerating_up
+                and roc_metric.roc_1 <= -0.04
+                and roc_metric.roc_3bar < 0.05
+                and last_close < last_open
+            ):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bullish thrust on {clean_sym}: 5m ROC STALLING_AT_TOP ({roc_metric.summary})"
+                )
+                return None
+    except Exception as e_roc:
+        logger.debug(f"[AfternoonThrust] ROC check non-fatal exception: {e_roc}")
+
     # ── Institutional Daily Levels: CPR Overhead & Camarilla Guard ──
     cpr_gate = None
     try:
@@ -240,6 +270,11 @@ def detect_afternoon_thrust(
         if cpr_gate.is_vetoed:
             logger.debug(
                 f"[AfternoonThrust] Suppressed {'bullish thrust' if direction == 'BULLISH' else 'bearish flush'} on {clean_sym}: {cpr_gate.veto_reason}"
+            )
+            return None
+        if cpr_gate.is_wide and not is_tight_coil and rvol_val < 1.25:
+            logger.debug(
+                f"[AfternoonThrust] Suppressed {direction.lower()} on {clean_sym}: Wide CPR requires RVOL >= 1.25x or tight midday coil (RVOL={rvol_val:.2f}x)"
             )
             return None
 
@@ -469,13 +504,19 @@ def detect_afternoon_thrust(
     confidence_score = min(96, confidence_score)
 
     # Option resolution via Unified VIX-Aware Resolver
+    from engine.position_sizer import get_lot_size
     from engine.option_resolver import resolve_option_contract
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_index or (stock_lot_size > 1)
 
     # Institutional Gamma Asymmetry: For explosive afternoon breakouts (IGNITED or strong volume surge),
     # prioritize HIGH_GAMMA_ASYMMETRY (OTM+1 in the high-gamma sweet spot) to maximize percentage torque
     # and provide defined-risk multi-bagger asymmetry.
     target_tier = (
-        "HIGH_GAMMA_ASYMMETRY" if (is_index and (stage == "IGNITED" or rvol_val >= 1.8)) else "ATM"
+        "HIGH_GAMMA_ASYMMETRY"
+        if (should_prefer_opt and (stage == "IGNITED" or rvol_val >= 1.8))
+        else "ATM"
     )
 
     resolved_opt = resolve_option_contract(
@@ -484,7 +525,7 @@ def detect_afternoon_thrust(
         direction=direction,
         underlying_sl=sl_price,
         underlying_target=t1_price,
-        prefer_options=is_index,
+        prefer_options=should_prefer_opt,
         strike_tier=target_tier,
     )
 
@@ -578,11 +619,23 @@ def detect_afternoon_thrust(
             act_plan["hedged_spread"] = resolved_opt.spread_details
             act_plan["strategy_type"] = resolved_opt.strategy_type
 
-    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz > 1 else "EQUITY")
+    alert_seg = (
+        "FNO_INDEX"
+        if is_index
+        else ("FNO_STOCK" if (has_opt or lot_sz > 1 or stock_lot_size > 1) else "EQUITY")
+    )
     phase_slot = get_session_phase_slot(now_dt)
+
+    at_signals = ["AFTERNOON_THRUST", "VWAP_BREAKOUT" if is_bull_thrust else "VWAP_BREAKDOWN"]
+    if is_tight_coil:
+        at_signals.append("TIGHT_MIDDAY_COIL")
+    if has_flow:
+        at_signals.append("INSTITUTIONAL_FLOW_ALIGNED")
 
     metrics_dict: dict[str, Any] = {
         "setup": "AFTERNOON_THRUST",
+        "signals": at_signals,
+        "roc_momentum": roc_metric.to_dict() if roc_metric else None,
         "thrust_direction": direction,
         "session_phase": phase_slot,
         "cpr": cpr_gate.cpr_data if cpr_gate else {},
@@ -631,7 +684,9 @@ def detect_afternoon_thrust(
         alert_type="AFTERNOON_THRUST",
         stage=stage,
         symbol=clean_sym,
-        exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else ("NFO" if is_index else "NSE"),
+        exchange="BFO"
+        if clean_sym in ("SENSEX", "BANKEX")
+        else ("NFO" if (is_index or has_opt) else "NSE"),
         direction=direction,
         headline=headline,
         summary=summary,

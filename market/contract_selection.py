@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, date
 import logging
 import math
+import threading
 from typing import Any, Mapping
 
 from config.constants import IST
@@ -173,13 +174,47 @@ def validate_master_contract_row(
     return ActiveContractResolution(contract=contract, is_valid=True, row=row)
 
 
+_UNDERLYING_BUCKET_CACHE: dict[int, dict[str, list[tuple[str, Any]]]] = {}
+_UNDERLYING_BUCKET_LOCK = threading.Lock()
+
+
+def _get_underlying_records_index(records: Mapping[str, Any]) -> dict[str, list[tuple[str, Any]]]:
+    rec_id = id(records)
+    with _UNDERLYING_BUCKET_LOCK:
+        if rec_id in _UNDERLYING_BUCKET_CACHE:
+            return _UNDERLYING_BUCKET_CACHE[rec_id]
+
+    idx: dict[str, list[tuple[str, Any]]] = {}
+    for key, row in records.items():
+        raw_und = row.get("underSym") or row.get("exSymbol")
+        if raw_und:
+            clean = canonical_symbol(str(raw_und))
+            idx.setdefault(clean, []).append((key, row))
+
+    with _UNDERLYING_BUCKET_LOCK:
+        if len(_UNDERLYING_BUCKET_CACHE) > 8:
+            _UNDERLYING_BUCKET_CACHE.clear()
+        _UNDERLYING_BUCKET_CACHE[rec_id] = idx
+    return idx
+
+
 def contracts_from_master(
     records: Mapping[str, Any], underlying: str, *, exchange: str, as_of: datetime
 ) -> list[ListedContract]:
     """Read exact rows, excluding malformed, suspended, mismatched or expired contracts."""
     clean = canonical_symbol(underlying)
+    if isinstance(records, dict):
+        rec_idx = _get_underlying_records_index(records)
+        target_items = rec_idx.get(clean, [])
+    else:
+        target_items = [
+            (k, v)
+            for k, v in records.items()
+            if canonical_symbol(str(v.get("underSym") or v.get("exSymbol") or "")) == clean
+        ]
+
     result = []
-    for key, row in records.items():
+    for key, row in target_items:
         res = validate_master_contract_row(
             row,
             key=key,

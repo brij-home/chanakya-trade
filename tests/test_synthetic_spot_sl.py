@@ -14,6 +14,8 @@ Verifies:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from config.constants import IST
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import evaluate_alert_invalidation
 from engine.synthetic_sl import (
@@ -21,6 +23,8 @@ from engine.synthetic_sl import (
     extract_underlying_symbol,
     extract_spot_invalidation_anchor,
 )
+
+_NON_0DTE_EXPIRY = (datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d")
 
 
 def test_extract_underlying_symbol_and_anchor():
@@ -87,7 +91,7 @@ def test_freak_wick_shielding_bullish():
         strike=55000.0,
         option_type="CE",
         contract_symbol="BANKNIFTY26OCT55000CE",
-        expiry_date="2026-11-26",
+        expiry_date=_NON_0DTE_EXPIRY,
         ltp=250.0,  # Entry was around 250
         trigger_level=250.0,
         stop_loss=200.0,  # Nominal SL = 200
@@ -166,7 +170,7 @@ def test_freak_wick_shielding_bearish_put():
         strike=24800.0,
         option_type="PE",
         contract_symbol="NIFTY26OCT24800PE",
-        expiry_date="2026-11-26",
+        expiry_date=_NON_0DTE_EXPIRY,
         ltp=110.0,
         trigger_level=110.0,
         stop_loss=85.0,
@@ -203,7 +207,7 @@ def test_catastrophic_drawdown_protection():
         strike=12800.0,
         option_type="CE",
         contract_symbol="MIDCPNIFTY26OCT12800CE",
-        expiry_date="2026-11-26",
+        expiry_date=_NON_0DTE_EXPIRY,
         ltp=100.0,
         trigger_level=100.0,
         stop_loss=75.0,
@@ -240,7 +244,7 @@ def test_evaluate_alert_invalidation_integration_with_synthetic_sl(monkeypatch):
         strike=56000.0,
         option_type="CE",
         contract_symbol="BANKNIFTY26OCT56000CE",
-        expiry_date="2026-11-26",
+        expiry_date=_NON_0DTE_EXPIRY,
         ltp=200.0,
         trigger_level=200.0,
         stop_loss=160.0,

@@ -51,9 +51,25 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 from pathlib import Path
+
+# ── Force IPv4 — SEBI requires registered static IP for API calls ──
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in ("::1",):
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+    try:
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    except socket.gaierror:
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_getaddrinfo
 
 logger = logging.getLogger("chanakya.web.api")
 
@@ -85,32 +101,47 @@ from contextlib import asynccontextmanager
 async def _background_cache_warmer():
     """Background task to pre-warm quotes, OHLCV, and RRG matrix in memory for lightning fast UI response."""
 
-    def _warm_sync():
+    def _warm_sync(force_boot: bool = False):
         try:
+            from config.discovery_policy import get_discovery_policy
+            from market.calendar import is_market_open
             from market.quotes import get_quote
             from market.history import get_ohlcv
             from analysis.sector_rotation import get_sector_rrg_matrix
 
-            # 1. Warm top index & mover quotes in parallel
+            policy = get_discovery_policy()
+            mkt_active = (
+                is_market_open("NSE")
+                or is_market_open("BSE")
+                or is_market_open("NFO")
+                or is_market_open("MCX")
+            )
+            if not force_boot and not mkt_active:
+                try:
+                    from engine.memory_guard import trim_memory_if_needed
+
+                    trim_memory_if_needed()
+                except Exception as e_mem:
+                    logger.debug(f"[web.api] Off-market memory trim check error: {e_mem}")
+                return
+
+            # 1. Warm core index benchmarks & top liquid F&O index constituents only (scope-respecting)
+            warm_syms = [
+                "NSE:NIFTY 50",
+                "NSE:NIFTY BANK",
+                "NSE:INDIA VIX",
+                "BSE:SENSEX",
+                "NSE:RELIANCE",
+                "NSE:HDFCBANK",
+                "NSE:ICICIBANK",
+                "NSE:INFY",
+                "NSE:TCS",
+            ]
             try:
-                get_quote(
-                    [
-                        "NSE:NIFTY 50",
-                        "NSE:NIFTY BANK",
-                        "NSE:INDIA VIX",
-                        "BSE:SENSEX",
-                        "NSE:RELIANCE",
-                        "NSE:TCS",
-                        "NSE:INFY",
-                        "NSE:HDFCBANK",
-                        "NSE:ICICIBANK",
-                        "NSE:COFORGE",
-                        "NSE:TRENT",
-                        "NSE:HCLTECH",
-                        "NSE:DIVISLAB",
-                        "NSE:TECHM",
-                    ]
-                )
+                # Prefer WebSocket cache first; only fall back to REST if cache is cold
+                ws_quotes = get_quote(warm_syms, ws_only=True) or {}
+                if len(ws_quotes) < 3:
+                    get_quote(warm_syms)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 2. Warm OHLCV for benchmark indices (2-year lookback)
@@ -127,13 +158,12 @@ async def _background_cache_warmer():
                 get_directional_sector_constituents()
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-            # 4. Warm options chain for key index benchmarks via OptionsChainManager
+            # 4. Pre-warm Universe Depth Radar snapshot (OptionsChainManager already manages chain loop)
             try:
-                from market.oc_manager import get_oc_manager
+                from market.universe_depth_radar import get_universe_depth_radar_snapshot
 
-                ocm = get_oc_manager()
-                for sym in ("NIFTY", "BANKNIFTY"):
-                    ocm.refresh_symbol(sym)
+                seg_target = "FNO" if policy.fno_only else "ALL"
+                get_universe_depth_radar_snapshot(segment=seg_target, limit=80, allow_rest=False)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 5. Check memory headroom and trim in-memory caches if approaching limits
@@ -147,12 +177,36 @@ async def _background_cache_warmer():
             logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
-        await asyncio.sleep(5)
-        await asyncio.to_thread(_warm_sync)
+        # Stagger initial cache warmer past live streams and pre-market sync to prevent boot burst
+        await asyncio.sleep(25)
+        await asyncio.to_thread(_warm_sync, True)
 
+        _tick = 0
         while True:
-            await asyncio.sleep(300)
-            await asyncio.to_thread(_warm_sync)
+            await asyncio.sleep(60)
+            _tick += 1
+            # Lightweight 60s memory trim + large-WAL checkpoint check
+            try:
+                from engine.memory_guard import trim_memory_if_needed
+
+                await asyncio.to_thread(trim_memory_if_needed, False)
+            except Exception as e_mem:
+                logger.debug(f"[web.api] Periodic memory trim check note: {e_mem}")
+            if _tick % 5 == 0:
+                await asyncio.to_thread(_warm_sync, False)
+                # Checkpoint eod_bars.db WAL if idle log exceeds 64 MB
+                try:
+                    _wal = Path("data/eod_bars.db-wal")
+                    if _wal.exists() and _wal.stat().st_size > 67_108_864:
+                        import sqlite3 as _sqlite3
+
+                        def _ckpt():
+                            with _sqlite3.connect("data/eod_bars.db", timeout=5.0) as _c:
+                                _c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
+                        await asyncio.to_thread(_ckpt)
+                except Exception as e_wal:
+                    logger.debug(f"[web.api] Periodic WAL checkpoint note: {e_wal}")
     except asyncio.CancelledError as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     except Exception as e_suppressed:
@@ -273,10 +327,9 @@ async def _background_broker_health_sentinel():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
-    # Windows OS Foreground Priority Protection:
-    # Set backend sidecar to BELOW_NORMAL_PRIORITY_CLASS so user's Office, browser,
-    # video conferencing, and UI never experience micro-stutters or competition.
-    if sys.platform == "win32":
+    # Windows OS Priority: keep normal scheduling unless CHANAKYA_LOW_PRIORITY=1 is explicitly opted in,
+    # and expand asyncio's default ThreadPoolExecutor so slow background syncs do not starve API routes.
+    if sys.platform == "win32" and os.environ.get("CHANAKYA_LOW_PRIORITY") == "1":
         try:
             import ctypes
 
@@ -285,10 +338,22 @@ async def lifespan(app: FastAPI):
                 0x00004000,  # BELOW_NORMAL_PRIORITY_CLASS
             )
             logger.info(
-                "[web.api] Background process priority set to BELOW_NORMAL (Foreground office & browser protected)"
+                "[web.api] Background process priority set to BELOW_NORMAL (CHANAKYA_LOW_PRIORITY=1)"
             )
         except Exception as e_pri:
             logger.debug(f"[web.api] Priority class configuration note: {e_pri}")
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(
+                max_workers=min(16, max(8, (os.cpu_count() or 4) * 2)),
+                thread_name_prefix="chanakya-bg",
+            )
+        )
+    except Exception as e_exec:
+        logger.debug(f"[web.api] Custom executor setup note: {e_exec}")
     if os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test"):
         get_csrf_secret()
 
@@ -385,8 +450,8 @@ async def lifespan(app: FastAPI):
         get_outbox_worker().stop()
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-    maintenance_task.cancel()
-    staleness_task.cancel()
+    if _price_poll_task is not None and not _price_poll_task.done():
+        _price_poll_task.cancel()
     try:
         from engine.data_sync_scheduler import data_sync_scheduler
 
@@ -1507,6 +1572,11 @@ async def get_system_diagnostics():
     )
 
 
+from concurrent.futures import ThreadPoolExecutor as _HealthHubPool
+
+_HEALTH_HUB_EXECUTOR = _HealthHubPool(max_workers=12, thread_name_prefix="health-hub")
+
+
 @app.get("/api/system/health-hub", tags=["Observability", "Operations"])
 async def get_system_health_hub(
     priority: Optional[str] = None,
@@ -1540,41 +1610,121 @@ async def get_system_health_hub(
     from market.fyers_tbt_manager import fyers_tbt_manager
     from engine.code_provenance import get_code_provenance
 
+    import functools
     import time
 
     _t_hh = time.time()
     logger.info("[HealthHub] Starting health-hub data aggregation")
 
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
-    ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
-    logger.info(f"[HealthHub] cb/ws/rg collected in {time.time() - _t_hh:.3f}s")
-    tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
-    logger.info(f"[HealthHub] tbt collected in {time.time() - _t_hh:.3f}s")
+
     from engine.market_dynamics_governor import get_market_dynamics_governor
 
-    market_dynamics_diag = await asyncio.to_thread(get_market_dynamics_governor().get_diagnostics)
-    logger.info(f"[HealthHub] market_dynamics collected in {time.time() - _t_hh:.3f}s")
-    broker_statuses = await asyncio.to_thread(_compute_status)
-    logger.info(f"[HealthHub] broker_statuses collected in {time.time() - _t_hh:.3f}s")
+    loop = asyncio.get_running_loop()
+    _hh_timings: dict[str, float] = {}
+
+    def _timed_run(label: str, fn, *args, **kwargs):
+        _ts = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _hh_timings[label] = time.perf_counter() - _ts
+
+    (
+        ws_diag,
+        tbt_diag,
+        market_dynamics_diag,
+        broker_statuses,
+        code_prov,
+        storage_bd,
+    ) = await asyncio.gather(
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "ws_diag",
+            get_ws_subscription_manager().get_diagnostics,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "tbt_diag",
+            fyers_tbt_manager.get_active_slots_status,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "market_dynamics",
+            get_market_dynamics_governor().get_diagnostics,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "broker_status",
+            _compute_status,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "code_provenance",
+            functools.partial(get_code_provenance, force_refresh=False, stale_ok=True),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "storage_breakdown",
+            functools.partial(get_storage_breakdown, stale_ok=True),
+        ),
+    )
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
     telem_summary = get_telemetry_summary()
-    code_prov = await asyncio.to_thread(get_code_provenance, force_refresh=False)
     code_prov_dict = code_prov.to_dict()
     since_ts = code_prov.boot_timestamp if since_boot else None
 
-    incident_counts = get_incident_counts(since_timestamp=since_ts)
-    active_counts = get_incident_counts(window_minutes=15, since_timestamp=since_ts)
-    incidents = get_prioritized_incidents(
-        limit=limit, priority=priority, component=component, since_timestamp=since_ts
+    mem_status_obj = _timed_run("memory_status", get_memory_status)
+    incident_counts, active_counts, incidents = await asyncio.gather(
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "incident_counts",
+            functools.partial(get_incident_counts, since_timestamp=since_ts),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "active_counts",
+            functools.partial(get_incident_counts, window_minutes=15, since_timestamp=since_ts),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "incidents",
+            functools.partial(
+                get_prioritized_incidents,
+                limit=limit,
+                priority=priority,
+                component=component,
+                since_timestamp=since_ts,
+            ),
+        ),
     )
-    mem_status = get_memory_status().to_dict()
-    storage_bd = await asyncio.to_thread(get_storage_breakdown)
+    _hh_elapsed = time.time() - _t_hh
+    if _hh_elapsed >= 2.0:
+        slow_parts = {k: round(v, 3) for k, v in _hh_timings.items() if v >= 0.5}
+        logger.warning(
+            f"[HealthHub] Slow diagnostics aggregation: {_hh_elapsed:.2f}s (subtasks={slow_parts})"
+        )
+    mem_status = mem_status_obj.to_dict()
 
     from market.streaming import market_streams
-    from brokers.session import get_registered_brokers, get_broker_role
+    from brokers.session import (
+        get_registered_brokers,
+        get_broker_role,
+        get_data_broker_key,
+        get_execution_broker_key,
+    )
     from market.flattrade_rate_gate import get_flattrade_rate_gate
 
     all_brks = get_registered_brokers()
@@ -1588,7 +1738,7 @@ async def get_system_health_hub(
 
     flattrade_diag = {
         "configured": _has_flattrade(),
-        "authenticated": _flattrade_auth(),
+        "authenticated": bool((broker_statuses.get("flattrade") or {}).get("authenticated", False)),
         "role": get_broker_role("flattrade"),
         "user_id": getattr(flat_brk, "user_id", "") if flat_brk else "",
         "account_id": getattr(flat_brk, "account_id", "") if flat_brk else "",
@@ -1652,6 +1802,26 @@ async def get_system_health_hub(
 
     from starlette.responses import Response
 
+    _primary_data_key = get_data_broker_key()
+    _exec_brk_key = get_execution_broker_key()
+    _fyers_cb_state = cb_diag.get("state", "CLOSED")
+    _ft_ready = bool(flattrade_diag.get("authenticated"))
+    _tbt_active_total = (
+        int(tbt_diag.get("active_total", 0) or 0) if isinstance(tbt_diag, dict) else 0
+    )
+    broker_failover = {
+        "primary_data_broker": _primary_data_key,
+        "execution_broker": _exec_brk_key,
+        "fyers_circuit_state": _fyers_cb_state,
+        "flattrade_standby_ready": _ft_ready,
+        "failover_active": bool(
+            (_fyers_cb_state == "OPEN" and _ft_ready) or _primary_data_key == "flattrade"
+        ),
+        "active_depth_tier": (
+            "50-DEPTH" if (_tbt_active_total > 0 and _fyers_cb_state != "OPEN") else "5-DEPTH"
+        ),
+    }
+
     payload = {
         "overall_status": overall_status,
         "incident_counts": incident_counts,
@@ -1659,6 +1829,7 @@ async def get_system_health_hub(
         "circuit_breaker": cb_diag,
         "rate_gate": rate_gate_diag,
         "tbt": tbt_diag,
+        "broker_failover": broker_failover,
         "market_dynamics": market_dynamics_diag,
         "websocket": ws_diag,
         "brokers": broker_statuses,
@@ -4927,8 +5098,9 @@ async def get_coiling_squeezes():
     try:
         import json
         from pathlib import Path
+        from config.paths import app_data_path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             repo_cal = (
                 Path(__file__).resolve().parent.parent
@@ -4965,8 +5137,9 @@ async def get_calibration_metrics():
     try:
         import json
         from pathlib import Path
+        from config.paths import app_data_path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             repo_cal = (
                 Path(__file__).resolve().parent.parent
@@ -5140,15 +5313,20 @@ async def stream_prices(symbols: str = ""):
 
 
 @app.get("/stream/alerts", tags=["SSE"])
-async def stream_alerts():
+async def stream_alerts(request: _Request):
     """
-    SSE stream of triggered alerts.
+    SSE stream of triggered alerts with monotonic Last-Event-ID replay support.
 
     Event format:
+        id: <seq>
         data: {"alert_id": "...", "symbol": "INFY", "message": "RSI > 70", "ts": "..."}
     """
+    raw_last_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
+    last_id: Optional[int] = None
+    if raw_last_id and raw_last_id.strip().isdigit():
+        last_id = int(raw_last_id.strip())
     return StreamingResponse(
-        _event_bus.subscribe("alert"),
+        _event_bus.subscribe("alert", last_event_id=last_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

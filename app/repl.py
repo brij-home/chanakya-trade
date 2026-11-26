@@ -982,9 +982,9 @@ def _handle_memory_command(args: list[str]) -> None:
         from rich.prompt import Prompt
 
         if Prompt.ask("[bold]Confirm[/bold]", default="no") == "yes":
-            from pathlib import Path
+            from config.paths import app_data_path
 
-            p = Path.home() / ".trading_platform" / "trade_memory.json"
+            p = app_data_path("trade_memory.json")
             if p.exists():
                 p.unlink()
             trade_memory._records = []

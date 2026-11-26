@@ -24,23 +24,18 @@ Captures explosive trend-continuation moves when counter-trend participants
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from config.constants import IST
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.pullback_level_resolver import resolve_pullback_entry
 from engine.option_resolver import is_index_symbol
 
 logger = logging.getLogger("chanakya.detectors.liquidity_inversion")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def detect_liquidity_inversion(
@@ -185,15 +180,29 @@ def detect_liquidity_inversion(
             "opt_t2": plan.opt_t2,
         },
     )
+    has_opt = bool(plan.opt_symbol)
     alert.actionable_plan = {
         "entry_type": "PULLBACK_LIMIT_ZONE",
-        "entry_range": f"₹{plan.entry_zone_min:,.1f} - ₹{plan.entry_zone_max:,.1f}",
-        "entry_mid": plan.entry_zone_mid,
-        "stop_loss": plan.stop_loss,
-        "risk_pts": plan.risk_pts,
-        "target_1": plan.target_1,
-        "target_2": plan.target_2,
+        "entry_range": (
+            f"₹{plan.opt_entry_limit * 0.98:,.2f} - ₹{plan.opt_entry_limit * 1.02:,.2f}"
+            if has_opt and plan.opt_entry_limit
+            else f"₹{plan.entry_zone_min:,.1f} - ₹{plan.entry_zone_max:,.1f}"
+        ),
+        "entry_mid": plan.opt_entry_limit
+        if has_opt and plan.opt_entry_limit
+        else plan.entry_zone_mid,
+        "stop_loss": plan.opt_sl if has_opt and plan.opt_sl else plan.stop_loss,
+        "risk_pts": (
+            round(abs(plan.opt_entry_limit - plan.opt_sl), 2)
+            if has_opt and plan.opt_entry_limit and plan.opt_sl
+            else plan.risk_pts
+        ),
+        "target_1": plan.opt_t1 if has_opt and plan.opt_t1 else plan.target_1,
+        "target_2": plan.opt_t2 if has_opt and plan.opt_t2 else plan.target_2,
         "target_3": plan.target_3,
+        "underlying_spot": f"₹{ltp:,.1f}",
+        "spot_stop_loss": plan.stop_loss,
+        "spot_target_1": plan.target_1,
         "rr_t1": f"+{plan.rr_t1}R",
         "rr_t2": f"+{plan.rr_t2}R",
         "no_chase": plan.no_chase_price,

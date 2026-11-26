@@ -15,7 +15,6 @@ import json
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -41,7 +40,9 @@ from .base import (
     UserProfile,
 )
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "zerodha.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("zerodha.json")
 
 
 class ZerodhaAPI(BrokerAPI):

@@ -319,3 +319,99 @@ def test_fyers_headless_auto_login_success_clears_backoff():
         assert mock_inv.called
 
     _reset_auth_backoff()
+
+
+def test_fyers_sdk_minus_99_bad_request_does_not_invalidate_token(tmp_path, monkeypatch):
+    """Verify SDK catch-all -99 'Bad request' (DNS/ConnectionError) preserves token and records transport failure."""
+    from brokers.fyers import _is_fyers_transport_error
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+    assert _is_fyers_auth_error({"s": "error", "code": -99, "message": "Bad request"}) is False
+    assert _is_fyers_transport_error({"s": "error", "code": -99, "message": "Bad request"}) is True
+    assert (
+        _is_fyers_transport_error({"s": "error", "code": -99, "message": "Token is expired"})
+        is False
+    )
+    assert (
+        _is_fyers_transport_error(
+            {"s": "error", "code": -99, "message": "Please provide less than 5000 symbols"}
+        )
+        is False
+    )
+
+    fake_token = tmp_path / "fyers.json"
+    fake_token.write_text('{"access_token": "valid_token_abc", "timestamp": 9999999999}')
+    monkeypatch.setattr("brokers.fyers.TOKEN_FILE", fake_token)
+
+    api = FyersAPI(app_id="TEST-100", secret_key="secret")
+    api._access_token = "valid_token_abc"
+    api._token_ts = time.time()
+
+    mock_sdk = MagicMock()
+    mock_sdk.get_profile.return_value = {"s": "error", "code": -99, "message": "Bad request"}
+    api._fyers = mock_sdk
+
+    cb = get_fyers_circuit_breaker()
+    cb.record_success()
+
+    with patch.object(api, "_handle_auth_failure") as mock_reauth:
+        with pytest.raises(PermissionError, match="Bad request"):
+            api.get_profile()
+        mock_reauth.assert_not_called()
+
+    assert api._access_token == "valid_token_abc"
+    assert fake_token.exists()
+    assert len(cb._failure_timestamps) == 1
+
+
+def test_fyers_complete_login_profile_minus_360_triggers_backoff_and_preserves_trip(
+    tmp_path, monkeypatch
+):
+    """Verify -360 rate limit on get_profile during complete_login enforces cooldown and suppresses repeat attempts."""
+    from brokers.fyers import _get_auth_backoff_remaining, _reset_auth_backoff
+    from market.fyers_circuit_breaker import CircuitState, get_fyers_circuit_breaker
+
+    _reset_auth_backoff()
+    fake_token = tmp_path / "fyers.json"
+    monkeypatch.setattr("brokers.fyers.TOKEN_FILE", fake_token)
+
+    api = FyersAPI(
+        app_id="TEST-100",
+        secret_key="secret",
+        fy_id="FAK999",
+        totp_secret="BASE32SECRET",
+        pin="1234",
+    )
+    api._access_token = ""
+    api._token_ts = 0.0
+
+    mock_sdk = MagicMock()
+    mock_sdk.get_profile.return_value = {
+        "s": "error",
+        "code": -360,
+        "message": "You've reached your API request limit. Please retry after the applicable rate-limit window resets.",
+    }
+
+    cb = get_fyers_circuit_breaker()
+    cb.record_success()
+
+    try:
+        with (
+            patch.object(api, "_auto_login_totp", return_value="fresh_token_456") as mock_totp,
+            patch.object(api, "_get_fyers", return_value=mock_sdk),
+        ):
+            with pytest.raises(PermissionError, match="API request limit"):
+                api.complete_login()
+
+            assert mock_totp.call_count == 1
+            assert cb.state == CircuitState.OPEN
+            assert _get_auth_backoff_remaining() >= 59.0
+
+            # Subsequent complete_login call MUST fail immediately on active backoff without hitting TOTP or get_profile again
+            with pytest.raises(RuntimeError, match="cooldown"):
+                api.complete_login()
+            assert mock_totp.call_count == 1
+            assert mock_sdk.get_profile.call_count == 1
+    finally:
+        cb.record_auth_success()
+        _reset_auth_backoff()

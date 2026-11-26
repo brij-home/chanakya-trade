@@ -119,8 +119,10 @@ def test_strike_optimizer_high_iv_mandates_debit_spread():
     assert high_iv_plan.max_loss is not None and high_iv_plan.max_loss > 0
 
 
-def test_underlying_strike_steps():
+def test_underlying_strike_steps(monkeypatch):
     """Verify correct strike step sizes across Indian indices and stock price tiers."""
+    monkeypatch.setattr("market.symbol_master._get_underlying_strikes_index", lambda *a, **k: {})
+    monkeypatch.setattr("market.symbol_master._STRIKE_STEP_CACHE", {})
     assert get_underlying_strike_step("NIFTY", 24500.0) == 50.0
     assert get_underlying_strike_step("BANKNIFTY", 52000.0) == 100.0
     assert get_underlying_strike_step("MIDCPNIFTY", 12500.0) == 25.0

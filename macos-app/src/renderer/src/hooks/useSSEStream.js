@@ -40,6 +40,7 @@ export function useSSEStream(url, options = {}) {
   const esRef = useRef(null)
   const retryMsRef = useRef(MIN_RETRY_MS)
   const retryTimerRef = useRef(null)
+  const listenerCleanupRef = useRef([])
   const mountedRef = useRef(true)
   const onMessageRef = useRef(onMessage)
   const onOpenRef = useRef(onOpen)
@@ -58,6 +59,12 @@ export function useSSEStream(url, options = {}) {
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
+    }
+    if (listenerCleanupRef.current.length > 0) {
+      for (const remove of listenerCleanupRef.current) {
+        try { remove() } catch {}
+      }
+      listenerCleanupRef.current = []
     }
     if (esRef.current) {
       try { esRef.current.close() } catch {}
@@ -99,7 +106,10 @@ export function useSSEStream(url, options = {}) {
       }
 
       if (eventTypes && Array.isArray(eventTypes)) {
-        eventTypes.forEach((type) => es.addEventListener(type, handleMessage))
+        listenerCleanupRef.current = eventTypes.map((type) => {
+          es.addEventListener(type, handleMessage)
+          return () => es.removeEventListener(type, handleMessage)
+        })
       } else {
         es.onmessage = handleMessage
       }
@@ -108,9 +118,7 @@ export function useSSEStream(url, options = {}) {
         if (!mountedRef.current) return
         setConnectionState('reconnecting')
         onErrorRef.current?.(event)
-        // Close the errored connection before retrying
-        try { es.close() } catch {}
-        esRef.current = null
+        cleanup()
         // Schedule exponential backoff retry
         retryTimerRef.current = setTimeout(() => {
           if (!mountedRef.current) return
@@ -121,6 +129,7 @@ export function useSSEStream(url, options = {}) {
     } catch {
       if (mountedRef.current) {
         setConnectionState('error')
+        cleanup()
         retryTimerRef.current = setTimeout(() => {
           if (!mountedRef.current) return
           retryMsRef.current = Math.min(retryMsRef.current * 2, MAX_RETRY_MS)

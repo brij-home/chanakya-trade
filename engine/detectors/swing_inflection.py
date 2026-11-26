@@ -89,13 +89,25 @@ def _format_swing_inflection_alert(
     # 1. Actionable Levels & Risk Management (Invariant 12)
     entry_p = float(setup.entry_price or setup.ltp)
     ltp_val = float(setup.ltp or entry_p)
+    is_extended = bool(getattr(setup, "is_extended", False))
+    pb_limit = float(getattr(setup, "pullback_limit_entry", 0.0) or 0.0)
 
     trigger_lvl = entry_p
-    if setup.timing_state in ("COILING_IMMINENT", "PULLBACK_RETEST"):
+    if is_extended and pb_limit > 0:
+        trigger_lvl = min(pb_limit, entry_p) if entry_p > 0 else pb_limit
+    elif setup.timing_state == "COILING_IMMINENT":
         if setup.vcp_pivot_price > 0 and setup.vcp_pivot_price > ltp_val:
             trigger_lvl = setup.vcp_pivot_price
         elif trigger_lvl <= ltp_val:
             trigger_lvl = round(ltp_val * 1.008, 1)
+    elif setup.timing_state == "PULLBACK_RETEST":
+        # Retest / pullback entries stay at or below LTP (never push limit above chased price)
+        if pb_limit > 0:
+            trigger_lvl = min(ltp_val, pb_limit)
+        elif setup.vcp_pivot_price > 0 and setup.vcp_pivot_price <= ltp_val:
+            trigger_lvl = setup.vcp_pivot_price
+        else:
+            trigger_lvl = min(ltp_val, entry_p)
 
     entry_anchor = trigger_lvl
     sl = float(setup.stop_loss)
@@ -136,13 +148,17 @@ def _format_swing_inflection_alert(
     e_max = round(entry_anchor * 1.012, 1)
     entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
 
-    # Strict No-Chase Boundary (+2.5% max extension above anchor)
-    no_chase_val = round(entry_anchor * 1.025, 1)
+    # Strict No-Chase Boundary (+2.5% max extension above structural anchor, never chased LTP)
+    setup_nc = float(getattr(setup, "no_chase_boundary", 0.0) or 0.0)
+    no_chase_val = round(setup_nc, 1) if setup_nc > 0 else round(entry_anchor * 1.025, 1)
 
     # 2. Timing State & Interception Pipeline Stage
     is_weekend = now_dt.weekday() in (5, 6)
     is_opening_auction = now_dt.hour == 9 and now_dt.minute < 25
-    if setup.timing_state == "TRIGGER_NOW" and mkt_open and not is_opening_auction:
+    if is_extended:
+        stage_val = "PRIMED"
+        timing_badge = "⏳ WAIT PULLBACK (NO CHASE)"
+    elif setup.timing_state == "TRIGGER_NOW" and mkt_open and not is_opening_auction:
         stage_val = "IGNITED"
         timing_badge = "🔥 BREAKOUT IGNITED"
     elif setup.timing_state == "TRIGGER_NOW":
@@ -181,6 +197,15 @@ def _format_swing_inflection_alert(
         when_to_buy = f"Enter inside zone {entry_rg} when volume expands (RVOL >= 1.5x)."
 
     when_to_wait = f"DO NOT CHASE if spot exceeds ₹{no_chase_val:,.1f} (+2.5% above pivot)."
+    if is_extended:
+        when_to_buy = (
+            f"WAIT FOR PULLBACK: Place limit buy in retest zone {entry_rg} "
+            f"(do NOT market-chase extended LTP ₹{ltp_val:,.1f})."
+        )
+        when_to_wait = (
+            f"OVEREXTENDED (LTP ₹{ltp_val:,.1f} > No-Chase ₹{no_chase_val:,.1f}). "
+            f"Wait strictly for pullback toward ₹{trigger_lvl:,.1f}."
+        )
 
     # 4. Institutional Headline & Decisive Summary
     headline = (
@@ -291,13 +316,18 @@ def _format_swing_inflection_alert(
             "atr": round(atr_val, 2),
             "atr_14": round(atr_val, 2),
             "min_noise_sl_pts": round(min_sl_floor, 2),
+            "is_extended": is_extended,
+            "extension_status": getattr(setup, "extension_status", "AT_PIVOT"),
+            "pullback_limit_entry": pb_limit or round(trigger_lvl, 2),
+            "dist_ema20_atr": float(getattr(setup, "dist_ema20_atr", 0.0) or 0.0),
+            "avwap_anchor": float(getattr(setup, "avwap_anchor", 0.0) or 0.0),
         },
         actionable_plan={
             "action": "BUY",
             "segment": "EQUITY",
             "entry_range": entry_rg,
-            "recommended_entry": entry_p,
-            "trigger_level": entry_p,
+            "recommended_entry": round(entry_anchor, 2),
+            "trigger_level": round(trigger_lvl, 2),
             "stop_loss": f"₹{sl:,.1f}",
             "invalidation_stop": sl,
             "target": f"₹{tgt1:,.1f}",
@@ -306,8 +336,11 @@ def _format_swing_inflection_alert(
             "runner_target": f"₹{tgt_moon:,.1f}",
             "risk_reward": f"1:{rr_ratio:.1f}",
             "no_chase_boundary": no_chase_val,
+            "is_extended": is_extended,
+            "extension_status": getattr(setup, "extension_status", "AT_PIVOT"),
+            "pullback_limit_entry": pb_limit or round(trigger_lvl, 2),
             "execution_style": "LIMIT_ON_PULLBACK"
-            if setup.timing_state == "PULLBACK_RETEST"
+            if (is_extended or setup.timing_state == "PULLBACK_RETEST")
             else "BREAKOUT_STOP",
             "when_to_buy": when_to_buy,
             "when_to_wait": when_to_wait,
@@ -407,4 +440,263 @@ def detect_swing_inflection_setups(
     logger.info(
         f"[SwingInflectionDetector] Identified {len(alerts)} qualified swing setups from universe '{universe}'."
     )
+    return alerts
+
+
+def detect_bearish_fno_swing_setups(
+    universe: str = "fno_universe",
+    min_score: int = 70,
+    top_n: int = 15,
+    min_turnover_cr: float = 1.0,
+    session_dt: Optional[datetime] = None,
+    use_local_cache: bool = True,
+    exchange: str = "NSE",
+    symbols_override: Optional[list[str]] = None,
+    ohlcv_map: Optional[dict[str, object]] = None,
+) -> list[AutoAlert]:
+    """Scan F&O stocks for symmetric bearish swing setups (Stage 3->4 / failed 20-EMA rally).
+
+    Applies `evaluate_anti_fomo_entry(..., direction="BEARISH")` so already-dumped
+    stocks wait for a bounce toward broken support / 20-EMA instead of shorting in the hole.
+    """
+    import numpy as np
+    from analysis.pullback_engine import evaluate_anti_fomo_entry
+    from analysis.technical import atr as calc_atr
+    from analysis.technical import ema as calc_ema
+    from analysis.universe import THEMATIC_PRESETS
+    from market.calendar import get_latest_trading_day, is_market_open
+
+    now_dt = session_dt or datetime.now(IST)
+    now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    session_date = get_latest_trading_day(now_dt, exchange=exchange)
+    mkt_open = is_market_open(exchange, ref_dt=now_dt)
+
+    if symbols_override is not None:
+        raw_syms = [canonical_alert_symbol(s) for s in symbols_override if s]
+    else:
+        preset_key = "fno_universe" if universe in ("fno", "fno_universe") else universe
+        raw_syms = list(THEMATIC_PRESETS.get(preset_key, {}).get("symbols", []) or [])
+
+    if not raw_syms:
+        return []
+
+    fetcher = None
+    if ohlcv_map is None:
+        try:
+            from market.historical_cache import load_cached_daily_ohlcv
+
+            fetcher = load_cached_daily_ohlcv if use_local_cache else None
+        except Exception:
+            fetcher = None
+        if fetcher is None:
+            try:
+                from market.quotes import get_historical_ohlcv
+
+                fetcher = get_historical_ohlcv
+            except Exception:
+                fetcher = None
+
+    is_test = (
+        (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+    provenance_env = "TEST" if is_test else ("LIVE" if mkt_open else "EOD_SCAN")
+    mkt_status = "LIVE" if mkt_open else "SESSION_CLOSED"
+
+    alerts: list[AutoAlert] = []
+    for raw_sym in raw_syms:
+        clean_sym = canonical_alert_symbol(raw_sym)
+        if not clean_sym:
+            continue
+        df = None
+        if ohlcv_map is not None:
+            df = ohlcv_map[clean_sym] if clean_sym in ohlcv_map else ohlcv_map.get(raw_sym)
+        if df is None and fetcher is not None:
+            try:
+                df = fetcher(clean_sym)
+            except Exception:
+                df = None
+        if df is None or len(df) < 55:
+            continue
+
+        try:
+            close_s = df["close"].astype(float)
+            high_s = df["high"].astype(float) if "high" in df.columns else close_s
+            low_s = df["low"].astype(float) if "low" in df.columns else close_s
+            vol_s = df["volume"].astype(float) if "volume" in df.columns else None
+
+            ltp = float(close_s.iloc[-1])
+            if ltp <= 0:
+                continue
+
+            if vol_s is not None and len(vol_s) >= 20:
+                avg_val_cr = float(np.mean((close_s.tail(20) * vol_s.tail(20)).values)) / 1e7
+                if avg_val_cr < min_turnover_cr:
+                    continue
+            else:
+                avg_val_cr = min_turnover_cr
+
+            ema20_s = calc_ema(close_s, 20)
+            ema20_val = float(ema20_s.iloc[-1])
+            sma50_val = float(close_s.rolling(50).mean().iloc[-1])
+            atr_val = (
+                float(calc_atr(df, period=14).iloc[-1])
+                if {"high", "low", "close"}.issubset(df.columns)
+                else ltp * 0.025
+            )
+            if np.isnan(atr_val) or atr_val <= 0:
+                atr_val = max(0.5, ltp * 0.025)
+
+            # Structural Stage 3->4 / failed bounce bearish conditions:
+            # Price below 50-SMA, 20-EMA below 50-SMA (or falling), lower-high / support breakdown
+            prior_support = float(low_s.iloc[-30:-5].min())
+            recent_high = float(high_s.tail(15).max())
+            prior_high = float(high_s.iloc[-45:-15].max())
+            below_50sma = ltp < sma50_val
+            below_20ema = ltp < ema20_val
+            ema_bear_cross = ema20_val < sma50_val
+            lower_highs = recent_high < prior_high
+            broke_support = ltp <= prior_support * 1.005
+
+            if not (
+                below_50sma and (below_20ema or ema_bear_cross) and (broke_support or lower_highs)
+            ):
+                continue
+
+            # Downside volume expansion check
+            rvol_bear = 1.0
+            if vol_s is not None and len(vol_s) >= 20:
+                avg_v20 = max(1.0, float(vol_s.iloc[-21:-1].mean()))
+                rvol_bear = round(float(vol_s.iloc[-1]) / avg_v20, 2)
+
+            score = 62
+            reasons = ["📉 Stage 3→4 Breakdown (Price < 50-SMA)"]
+            if ema_bear_cross:
+                score += 8
+                reasons.append("🔻 20-EMA < 50-SMA Bearish Alignment")
+            if broke_support:
+                score += 10
+                reasons.append(f"🪓 Broken Multi-Week Support ₹{prior_support:,.1f}")
+            if lower_highs:
+                score += 6
+                reasons.append("📐 Lower-High Distribution Structure")
+            if rvol_bear >= 1.3 and ltp < float(close_s.iloc[-2]):
+                score += 8
+                reasons.append(f"📊 Distribution Volume Expansion ({rvol_bear:.1f}x RVOL)")
+            if score < min_score:
+                continue
+
+            # Anchor bearish pivot to broken support or 20-EMA (whichever is closer to current structure)
+            bear_anchor = prior_support if broke_support else ema20_val
+            anti_fomo = evaluate_anti_fomo_entry(
+                df,
+                ltp,
+                pivot_price=bear_anchor,
+                direction="BEARISH",
+                symbol=clean_sym,
+            )
+
+            entry_p = anti_fomo.pullback_limit_entry if anti_fomo.is_extended else round(ltp, 2)
+            sl_buffer = max(1.0, 1.35 * atr_val)
+            sl = round(max(entry_p, ltp, ema20_val) + sl_buffer, 2)
+            risk_pts = max(sl_buffer, round(sl - entry_p, 2))
+            tgt1 = round(max(0.5, entry_p - (2.0 * risk_pts)), 2)
+            tgt2 = round(max(0.5, entry_p - (3.5 * risk_pts)), 2)
+
+            if anti_fomo.is_extended:
+                stage_val = "PRIMED"
+                timing_badge = "⏳ WAIT BOUNCE PULLBACK (NO CHASE SHORT)"
+                variant_slug = "wait"
+            else:
+                stage_val = "IGNITED" if mkt_open else "ACTIONABLE"
+                timing_badge = "🔻 BEARISH SWING BREAKDOWN"
+                variant_slug = "trig"
+
+            alert_id = generate_alert_id(
+                clean_sym,
+                "fno-bearish-swing",
+                session_date=session_date,
+                variant=variant_slug,
+            )
+            e_low = round(entry_p * 0.992, 1)
+            e_high = round(min(sl - 0.1, entry_p * 1.005), 1)
+            entry_rg = f"₹{e_low:,.1f} – ₹{e_high:,.1f}"
+
+            alerts.append(
+                AutoAlert(
+                    alert_id=alert_id,
+                    alert_type="FNO_BEARISH_SWING",
+                    stage=stage_val,
+                    symbol=clean_sym,
+                    exchange=exchange,
+                    direction="BEARISH",
+                    headline=f"🔻 {clean_sym} [F&O Bearish Swing] {timing_badge} (Conviction {score}/100)",
+                    summary=" | ".join(reasons),
+                    ltp=round(ltp, 2),
+                    trigger_level=round(entry_p, 2),
+                    target_level=tgt1,
+                    stop_loss=sl,
+                    initial_stop_loss=sl,
+                    underlying_spot=round(ltp, 2),
+                    segment="EQUITY",
+                    confidence=min(99, score),
+                    time_horizon="SWING_MID",
+                    eta_label="1–3 Weeks (Bearish Swing)",
+                    ttl_seconds=86400 * 14,
+                    no_chase_boundary=anti_fomo.no_chase_boundary,
+                    setup_style="FNO_BEARISH_SWING",
+                    created_at=now_iso,
+                    is_live=not is_test,
+                    environment=provenance_env,
+                    market_status=mkt_status,
+                    metrics={
+                        "inflection_score": min(99, score),
+                        "primary_archetype": "FNO_BEARISH_SWING",
+                        "rvol_20d": rvol_bear,
+                        "turnover_20d_cr": round(avg_val_cr, 2),
+                        "atr_14": round(atr_val, 2),
+                        "is_extended": anti_fomo.is_extended,
+                        "extension_status": anti_fomo.extension_status,
+                        "pullback_limit_entry": anti_fomo.pullback_limit_entry,
+                        "dist_ema20_atr": anti_fomo.dist_ema20_atr,
+                        "avwap_anchor": anti_fomo.avwap_anchor,
+                        "confluence_factors": reasons,
+                    },
+                    actionable_plan={
+                        "action": "SELL / BUY PUT",
+                        "segment": "EQUITY",
+                        "entry_range": entry_rg,
+                        "recommended_entry": round(entry_p, 2),
+                        "trigger_level": round(entry_p, 2),
+                        "stop_loss": f"₹{sl:,.1f}",
+                        "invalidation_stop": sl,
+                        "target": f"₹{tgt1:,.1f}",
+                        "target_1": f"₹{tgt1:,.1f}",
+                        "target_2": f"₹{tgt2:,.1f}",
+                        "risk_reward": "1:2.0",
+                        "no_chase_boundary": anti_fomo.no_chase_boundary,
+                        "is_extended": anti_fomo.is_extended,
+                        "extension_status": anti_fomo.extension_status,
+                        "pullback_limit_entry": anti_fomo.pullback_limit_entry,
+                        "execution_style": "LIMIT_ON_PULLBACK"
+                        if anti_fomo.is_extended
+                        else "BREAKDOWN_ENTRY",
+                        "when_to_buy": (
+                            f"WAIT FOR BOUNCE PULLBACK near {entry_rg} before buying PUTs."
+                            if anti_fomo.is_extended
+                            else f"Short/Buy PUT on breakdown inside {entry_rg} with RVOL >= 1.3x."
+                        ),
+                        "when_to_wait": (
+                            f"DO NOT CHASE SHORT below ₹{anti_fomo.no_chase_boundary:,.1f} (-2.5% past anchor)."
+                        ),
+                    },
+                )
+            )
+            if len(alerts) >= top_n:
+                break
+        except Exception as exc:
+            logger.debug(f"[SwingInflectionDetector] Bearish F&O scan skipped {clean_sym}: {exc}")
+
+    alerts.sort(key=lambda a: a.confidence, reverse=True)
     return alerts

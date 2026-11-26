@@ -140,6 +140,14 @@ class InflectionSetup:
     catalyst_badges: list[str] = field(default_factory=list)
     institutional_catalysts: dict[str, Any] = field(default_factory=dict)
 
+    # Anti-FOMO Structural Entry Anchoring
+    is_extended: bool = False
+    extension_status: str = "AT_PIVOT"
+    no_chase_boundary: float = 0.0
+    pullback_limit_entry: float = 0.0
+    dist_ema20_atr: float = 0.0
+    avwap_anchor: float = 0.0
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -724,17 +732,62 @@ def evaluate_single_stock_inflection(
     # Swing setups must enforce at least 1.25x ATR stop-loss buffer to eliminate sub-ATR noise whipsaws
     min_sl_buffer = max(1.0, 1.25 * atr)
 
-    if timing_state == "TRIGGER_NOW":
+    from analysis.pullback_engine import check_base_quality_and_supply, evaluate_anti_fomo_entry
+
+    anti_fomo = evaluate_anti_fomo_entry(
+        df,
+        ltp,
+        pivot_price=vcp_pivot if (is_vcp and vcp_pivot > 0) else 0.0,
+        direction="BULLISH",
+        symbol=clean_sym,
+    )
+
+    if anti_fomo.is_extended:
+        timing_state = "PULLBACK_RETEST"
+        timing_label = (
+            f"⏳ OVEREXTENDED ({anti_fomo.dist_ema20_atr:.1f}x ATR from 20EMA) "
+            f"— WAIT PULLBACK ₹{anti_fomo.pullback_limit_entry:,.2f}"
+        )
+        entry_price = round(anti_fomo.pullback_limit_entry, 2)
+        stop_loss = round(max(0.1, entry_price - min_sl_buffer), 2)
+    elif timing_state == "TRIGGER_NOW":
         entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - min_sl_buffer), 2)
+        stop_loss = round(max(0.1, entry_price - min_sl_buffer), 2)
     elif is_vcp and vcp_pivot > 0:
-        entry_price = round(vcp_pivot, 2)
-        stop_loss = round(max(0.1, vcp_pivot - min_sl_buffer), 2)
+        entry_price = round(
+            min(vcp_pivot, anti_fomo.pullback_limit_entry)
+            if (timing_state == "PULLBACK_RETEST" and anti_fomo.pullback_limit_entry > 0)
+            else vcp_pivot,
+            2,
+        )
+        stop_loss = round(max(0.1, entry_price - min_sl_buffer), 2)
     else:
-        entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - min_sl_buffer), 2)
+        entry_price = round(
+            anti_fomo.recommended_entry if anti_fomo.recommended_entry > 0 else ltp,
+            2,
+        )
+        stop_loss = round(max(0.1, entry_price - min_sl_buffer), 2)
 
     risk_per_share = max(0.5, entry_price - stop_loss)
+
+    base_q = check_base_quality_and_supply(
+        df,
+        entry_price,
+        risk_per_share,
+        pivot_price=vcp_pivot,
+    )
+    if base_q.get("is_tight_flag"):
+        score = min(99, score + 4)
+        confluence_factors.append("🧲 3-Weeks-Tight / Tight Flag Base Contraction")
+    if base_q.get("has_pocket_pivot"):
+        score = min(99, score + 4)
+        confluence_factors.append("💎 Pocket Pivot Institutional Accumulation")
+    if not base_q.get("has_clear_runway", True) and base_q.get("overhead_supply_r") is not None:
+        score = max(10, score - 6)
+        confluence_factors.append(
+            f"⚠️ Overhead Supply at ₹{base_q['nearest_overhead_resistance']:,.2f} ({base_q['overhead_supply_r']:.1f}R runway)"
+        )
+
     target_1 = round(entry_price + (2.0 * risk_per_share), 2)
     target_2 = round(entry_price + (3.5 * risk_per_share), 2)
     target_moonshot = round(entry_price + (6.5 * risk_per_share), 2)
@@ -743,6 +796,14 @@ def evaluate_single_stock_inflection(
     ticket = {
         "action": "LONG (BUY)",
         "entry_price": entry_price,
+        "pullback_limit_entry": anti_fomo.pullback_limit_entry,
+        "no_chase_boundary": anti_fomo.no_chase_boundary,
+        "is_extended": anti_fomo.is_extended,
+        "extension_status": anti_fomo.extension_status,
+        "dist_ema20_atr": anti_fomo.dist_ema20_atr,
+        "avwap_anchor": anti_fomo.avwap_anchor,
+        "has_clear_runway": base_q.get("has_clear_runway", True),
+        "overhead_supply_r": base_q.get("overhead_supply_r"),
         "stop_loss": stop_loss,
         "target_1": target_1,
         "target_2": target_2,
@@ -869,6 +930,8 @@ def evaluate_single_stock_inflection(
     # Executive Action Verdict
     if is_uc_locked:
         exec_verdict = "🔒 CIRCUIT LOCKED"
+    elif anti_fomo.is_extended:
+        exec_verdict = "⏳ WAIT FOR PULLBACK (NO CHASE)"
     elif score >= 75 and timing_state == "TRIGGER_NOW" and forensic_safe:
         exec_verdict = "🔥 STRONG BUY"
     elif timing_state == "COILING_IMMINENT":
@@ -942,6 +1005,12 @@ def evaluate_single_stock_inflection(
         eta_label=eta_label,
         catalyst_badges=catalyst_badges,
         institutional_catalysts=inst_report.to_dict(),
+        is_extended=anti_fomo.is_extended,
+        extension_status=anti_fomo.extension_status,
+        no_chase_boundary=anti_fomo.no_chase_boundary,
+        pullback_limit_entry=anti_fomo.pullback_limit_entry,
+        dist_ema20_atr=anti_fomo.dist_ema20_atr,
+        avwap_anchor=anti_fomo.avwap_anchor,
     )
 
 

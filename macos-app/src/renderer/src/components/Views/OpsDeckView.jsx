@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
 import { useToastStore } from '../../hooks/useToast'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
 import MultiSelectDropdown from '../Common/MultiSelectDropdown'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 /**
  * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
@@ -137,6 +138,15 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const [showSentinelGuide, setShowSentinelGuide] = useState(false)
   const [showFlattradeWsModal, setShowFlattradeWsModal] = useState(false)
   const [copiedIncKey, setCopiedIncKey] = useState(null)
+  const copyResetTimerRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current)
+      }
+    }
+  }, [])
 
   // ── L2 Universe Depth Radar State ─────────────────────────────────
   const [radarItems, setRadarItems] = useState([])
@@ -202,8 +212,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   useEffect(() => {
     if (activeTab === 'dynamics') {
       fetchMarketDynamics()
-      const timer = setInterval(fetchMarketDynamics, 5000)
-      return () => clearInterval(timer)
+      return createVisibilityInterval(fetchMarketDynamics, 5000)
     }
   }, [activeTab, fetchMarketDynamics])
 
@@ -293,8 +302,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     if (activeTab === 'depth_radar') {
       fetchDepthRadar()
       if (radarAutoRefresh) {
-        const timer = setInterval(fetchDepthRadar, 5000)
-        return () => clearInterval(timer)
+        return createVisibilityInterval(fetchDepthRadar, 5000)
       }
     }
   }, [activeTab, fetchDepthRadar, radarAutoRefresh])
@@ -581,7 +589,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
       }
       navigator.clipboard.writeText(parts.join('\n'))
       setCopiedIncKey(incKey)
-      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      copyResetTimerRef.current = setTimeout(() => setCopiedIncKey(null), 2000)
       if (addToast) {
         addToast({ title: 'Copied to Clipboard', message: 'Incident error details copied.', type: 'info' })
       }
@@ -594,7 +603,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     try {
       navigator.clipboard.writeText(traceback || '')
       setCopiedIncKey(`${incKey}-tb`)
-      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      copyResetTimerRef.current = setTimeout(() => setCopiedIncKey(null), 2000)
       if (addToast) {
         addToast({ title: 'Traceback Copied', message: 'Full traceback copied to clipboard.', type: 'info' })
       }

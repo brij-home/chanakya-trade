@@ -134,6 +134,8 @@ class AlertScrutinyAuditor:
         self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
         self._cache_lock = threading.Lock()
         self._cache_ttl = 180.0  # 180s (3m) in-memory scrutiny cache to prevent rate-limit flooding (Invariant 15)
+        self._fast_provider: Optional[Any] = None
+        self._regime_cache: Optional[tuple[float, str]] = None
 
     # ── Tier 1: Deterministic Mathematical Sanity Gate ───────────────────────
 
@@ -270,12 +272,33 @@ class AlertScrutinyAuditor:
                     or getattr(alert, "derivative_type", "") == "OPT"
                 )
                 if is_opt:
-                    flags["stock_options_quarantined"] = True
-                    return (
-                        False,
-                        f"SEBI Expiry Week Physical Delivery Quarantine: Single-stock option buying for {clean_sym} is frozen to prevent physical settlement delivery risk. Use Futures or Far-Month.",
-                        flags,
+                    from engine.alert_expiry import is_monthly_physical_expiry_week
+
+                    is_routed_next = bool(
+                        (metrics_d or {}).get("is_next_month_routed")
+                        or (metrics_d or {}).get("rollover_series") == "NEXT_MONTH"
+                        or (metrics_d or {}).get("rollover_protected") is True
+                        or (getattr(alert, "actionable_plan", {}) or {}).get("is_next_month_routed")
                     )
+                    exp_date_str = (
+                        getattr(alert, "expiry_date", None)
+                        or (metrics_d or {}).get("expiry")
+                        or (getattr(alert, "actionable_plan", {}) or {}).get("expiry")
+                    )
+                    # Far-Month / Next-Month rollover protected options bypass physical delivery quarantine
+                    in_delivery_risk = False
+                    if exp_date_str:
+                        in_delivery_risk = is_monthly_physical_expiry_week(exp_date_str, clean_sym)
+                    elif not is_routed_next:
+                        in_delivery_risk = True
+
+                    if in_delivery_risk:
+                        flags["stock_options_quarantined"] = True
+                        return (
+                            False,
+                            f"SEBI Expiry Week Physical Delivery Quarantine: Single-stock option buying for {clean_sym} ({exp_date_str or 'current month'}) is frozen to prevent physical settlement delivery risk. Use Futures or Far-Month.",
+                            flags,
+                        )
             metrics_d["dynamic_calibration"] = calib.to_dict()
         except Exception as _e_gov:
             logger.debug(f"[AlertScrutiny] Market dynamics evaluation non-fatal: {_e_gov}")
@@ -286,43 +309,15 @@ class AlertScrutinyAuditor:
             or getattr(alert, "option_type", None)
             or getattr(alert, "strike", None)
         )
-        if atype in (
-            "OPTIONS_MOMENTUM",
-            "OPTION_WRITE",
-            "INDEX_PUT_SETUP",
-            "INDEX_CALL_SETUP",
-        ):
-            if (
-                atype == "OPTIONS_MOMENTUM"
-                and not is_index_sym
-                and ltp >= 500.0
-                and not getattr(alert, "contract_symbol", None)
-                and not getattr(alert, "strike", None)
-            ):
-                is_option_premium_levels = False
-            else:
-                is_option_premium_levels = True
-        elif atype in ("GAMMA_BLAST",) and getattr(alert, "option_type", None):
-            is_option_premium_levels = True
-        elif atype in ("SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN") and getattr(
-            alert, "option_type", None
-        ):
-            if alert.strike and abs(ltp - float(alert.strike)) < (float(alert.strike) * 0.35):
-                is_option_premium_levels = False
-            else:
-                is_option_premium_levels = True
-        elif getattr(alert, "option_premium", None) is not None:
-            # Check if ltp is close to option_premium (within 15% tolerance for intraday movement)
-            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(
-                1.0, float(alert.option_premium) * 0.15
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_option_premium_levels = is_alert_option_premium_level(alert)
+        except Exception:
+            is_option_premium_levels = bool(
+                atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+                or (getattr(alert, "option_type", None) in ("CE", "PE") and ltp < 1000)
             )
-        elif is_index_sym and getattr(alert, "option_type", None) in ("CE", "PE") and ltp < 4000:
-            # Index spot is >= 10,000 pts; an LTP < 4,000 with CE/PE marker is always an option contract
-            is_option_premium_levels = True
-        elif not has_opt_marker:
-            is_option_premium_levels = False
-        else:
-            is_option_premium_levels = False
 
         # Session Runway & Dynamic Cutoff Perimeter Gate
         if not is_test_runner:
@@ -369,12 +364,21 @@ class AlertScrutinyAuditor:
             except Exception as e_runway:
                 logger.debug(f"[AlertScrutiny] Session runway check error: {e_runway}")
 
-        # 2. Geometric Level Coherence
+        # 2. Geometric Level Coherence & Universal Scale Separation
         entry_anchor = float(
             getattr(alert, "trigger_level", None) or getattr(alert, "entry_price", None) or 0.0
         )
         if entry_anchor <= 0.0:
             entry_anchor = ltp
+
+        if is_option_premium_levels and entry_anchor > 0:
+            u_spot = getattr(alert, "underlying_spot", None)
+            if t1 > entry_anchor * 4.0 or (
+                u_spot and abs(t1 - float(u_spot)) / float(u_spot) < 0.35
+            ):
+                # Discard contaminated spot target on option alert and synthesize in option space
+                opt_risk = max(0.5, abs(entry_anchor - sl))
+                t1 = round(entry_anchor + 2.0 * opt_risk, 1)
 
         if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
             # For equity long OR long option premium (Call or Put buyer):
@@ -625,6 +629,14 @@ class AlertScrutinyAuditor:
                 )
                 if entry_anchor >= 80.0:
                     opt_min_floor = max(opt_min_floor, min_idx_opt_floor)
+
+            is_scalp = atype == "INDEX_MICRO_SCALP" or getattr(alert, "time_horizon", "") == "SCALP"
+            if is_scalp:
+                idx_name = underlying_idx or clean_sym
+                scalp_floor = (
+                    18.0 if "SENSEX" in idx_name else (12.0 if "BANKNIFTY" in idx_name else 6.0)
+                )
+                opt_min_floor = min(opt_min_floor, scalp_floor)
 
             if risk_pts < (opt_min_floor * 0.95):  # 5% precision tolerance
                 # If a hedged spread is mandated or attached, spread risk is defined by net debit
@@ -2615,8 +2627,16 @@ class AlertScrutinyAuditor:
                 "SQUEEZE_BREAKOUT",
                 "SQUEEZE_BREAKDOWN",
             )
-            rsi_overbought = 72.0 if is_intraday else 78.0
-            rsi_oversold = 28.0 if is_intraday else 22.0
+            is_momentum_breakout = atype in (
+                "OPTIONS_MOMENTUM",
+                "OPENING_DRIVE_IGNITION",
+                "INTRADAY_BREAKDOWN_SPARK",
+                "INTRADAY_BREAKOUT_SPARK",
+                "INDEX_PUT_SETUP",
+                "INDEX_CALL_SETUP",
+            )
+            rsi_overbought = 82.0 if is_momentum_breakout else (74.0 if is_intraday else 78.0)
+            rsi_oversold = 18.0 if is_momentum_breakout else (24.0 if is_intraday else 22.0)
 
             # Long equity / Call option: reject when RSI exceeds threshold
             if is_call_option and not is_put_option:
@@ -3916,11 +3936,47 @@ class AlertScrutinyAuditor:
             or "ORB" in atype
         )
         if is_intraday_momentum and not is_non_equity_desk:
-            if dtime(15, 5) <= alert_time <= dtime(15, 30):
+            from market.rule_schedule import (
+                cash_continuous_close,
+                derivative_close,
+                intraday_entry_cutoff,
+            )
+
+            _dt_ref = datetime.now(IST)
+            if getattr(alert, "created_at", None):
+                try:
+                    _clean_c = str(alert.created_at).replace(" IST", "").strip()
+                    _dt_ref = datetime.fromisoformat(_clean_c)
+                    if _dt_ref.tzinfo is None:
+                        _dt_ref = _dt_ref.replace(tzinfo=IST)
+                except Exception as e_dt:
+                    logger.debug(f"[AlertScrutiny] Late-session date parse fallback: {e_dt}")
+            _alert_d = _dt_ref.date()
+            _seg_up = str(getattr(alert, "segment", "") or "").upper()
+            _is_deriv_mom = (
+                "FNO" in _seg_up
+                or "NFO" in _seg_up
+                or "BFO" in _seg_up
+                or bool(getattr(alert, "contract_symbol", None))
+            )
+            if _is_deriv_mom:
+                _mom_close = derivative_close(_alert_d)
+            else:
+                _cas_elig = False
+                try:
+                    from market.instruments import is_derivative_eligible
+
+                    _cas_elig = bool(is_derivative_eligible(sym))
+                except Exception:
+                    _cas_elig = False
+                _mom_close = cash_continuous_close(_alert_d, cas_eligible=_cas_elig)
+            _sq_cutoff = intraday_entry_cutoff(_alert_d, is_derivative=_is_deriv_mom)
+            _late_start = dtime(15, 20) if _sq_cutoff >= dtime(15, 30) else dtime(15, 5)
+            if _late_start <= alert_time <= _mom_close:
                 flags["velocity_sustainable"] = False
                 return (
                     False,
-                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:05 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:15 IST) prevents disciplined risk management.",
+                    f"Late-Session Exhaustion Gate: {sym} triggered post-{_late_start.strftime('%H:%M')} IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff ({_sq_cutoff.strftime('%H:%M')} IST) prevents disciplined risk management.",
                     flags,
                 )
 
@@ -5295,28 +5351,39 @@ class AlertScrutinyAuditor:
                 else None
             )
 
-            exhaustion_verdict = evaluate_exhaustion(
-                symbol=eval_sym,
-                direction=direction,
-                ltp=eval_ltp,
-                entry_price=eval_entry,
-                stop_loss=eval_sl,
-                target_1=eval_t1,
-                daily_levels=dl,
-                chain=getattr(alert, "chain", None)
-                or (metrics.get("chain") if isinstance(metrics, dict) else None),
-                vpin=vpin_val,
-                vwap=vwap_val,
-                is_pullback=is_pullback_setup,
-                current_hour=alert_time.hour if alert_time else None,
-                current_minute=alert_time.minute if alert_time else None,
+            is_neutral_strat = direction == "NEUTRAL" or atype in (
+                "DEFINED_RISK_NEUTRAL",
+                "IRON_CONDOR",
+                "CREDIT_SPREAD",
+                "SHORT_STRADDLE",
+                "SHORT_STRANGLE",
             )
+            if not is_neutral_strat:
+                exhaustion_verdict = evaluate_exhaustion(
+                    symbol=eval_sym,
+                    direction=direction,
+                    ltp=eval_ltp,
+                    entry_price=eval_entry,
+                    stop_loss=eval_sl,
+                    target_1=eval_t1,
+                    daily_levels=dl,
+                    chain=getattr(alert, "chain", None)
+                    or (metrics.get("chain") if isinstance(metrics, dict) else None),
+                    vpin=vpin_val,
+                    vwap=vwap_val,
+                    is_pullback=is_pullback_setup,
+                    current_hour=alert_time.hour if alert_time else None,
+                    current_minute=alert_time.minute if alert_time else None,
+                )
 
-            if isinstance(metrics, dict):
-                metrics["exhaustion_radar"] = exhaustion_verdict.to_dict()
+                if isinstance(metrics, dict):
+                    metrics["exhaustion_radar"] = exhaustion_verdict.to_dict()
+            else:
+                exhaustion_verdict = None
 
             if (
-                exhaustion_verdict.is_exhausted
+                exhaustion_verdict is not None
+                and exhaustion_verdict.is_exhausted
                 and exhaustion_verdict.recommended_action == "HARD_VETO"
             ):
                 rvol_val = (
@@ -5344,6 +5411,9 @@ class AlertScrutinyAuditor:
                         and (metrics.get("actionable_plan") or {}).get("hedged_spread")
                     )
                     or getattr(alert, "spread_details", None)
+                    or (getattr(alert, "actionable_plan", {}) or {}).get("instrument_type")
+                    in ("OPTION_SPREAD", "SPREAD")
+                    or "SPREAD" in str(getattr(alert, "headline", "") or "").upper()
                 )
                 # If collision is structural but breakout/thrust is aggressive, or trade is a defined-risk hedged spread, punch through
                 if exhaustion_verdict.trap_type == "CHOKED_HEADROOM" and (
@@ -5741,7 +5811,11 @@ class AlertScrutinyAuditor:
                 logger.debug(f"[Pipeline] Event volatility check non-fatal: {e_ev}")
 
         # 7. 🏛️ CROSS-DESK CALIBRATION & PREDATORY STRIKE CLOCK
-        now_time = datetime.now(IST).time()
+        from market.rule_schedule import intraday_entry_cutoff
+
+        _now_ist_dt = datetime.now(IST)
+        now_time = _now_ist_dt.time()
+        _clk_cutoff = intraday_entry_cutoff(_now_ist_dt.date(), is_derivative=bool(is_fno))
         if dtime(9, 20) <= now_time <= dtime(10, 45):
             strike_zone = "MORNING_EXPANSION_KILL_ZONE"
             is_kz = True
@@ -5757,7 +5831,7 @@ class AlertScrutinyAuditor:
             is_kz = True
             timing_eff = 90
             clock_action = "European session open: Trap inversion & trend resumption inflection."
-        elif dtime(13, 45) <= now_time <= dtime(15, 15):
+        elif dtime(13, 45) <= now_time <= _clk_cutoff:
             is_fno_derivative = is_fno or any(
                 idx in str(getattr(alert, "symbol", "") or "").upper()
                 for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCP", "SENSEX", "BANKEX")
@@ -5869,9 +5943,60 @@ class AlertScrutinyAuditor:
             "event_hedge": event_hedge,
         }
 
+    # ── Speculative LLM Pre-Scrutiny (PRIMED / STALK) ──────────────────────────
+
+    def speculative_pre_scrutinize(
+        self, alert: Any, timeout: float = 3.0
+    ) -> Optional[ScrutinyResult]:
+        """
+        Runs Tier-1 and Tier-2 scrutiny speculatively ahead of time on a PRIMED or STALK alert.
+        Pre-seeds cache under family keys so that subsequent breakout trigger hits cache in 0ms.
+        """
+        try:
+            return self.scrutinize_alert(alert, timeout=timeout)
+        except Exception as exc:
+            logger.debug(f"[AlertScrutiny] Speculative pre-scrutiny failed: {exc}")
+            return None
+
+    def speculative_pre_scrutinize_async(self, alert: Any, timeout: float = 3.0) -> None:
+        """
+        Asynchronously triggers speculative pre-scrutiny in a background thread for a PRIMED alert.
+        Ensures scanner loops are not blocked.
+        """
+        sym = getattr(alert, "symbol", "") or (
+            alert.get("symbol", "") if isinstance(alert, dict) else ""
+        )
+        direction = getattr(alert, "direction", "") or (
+            alert.get("direction", "") if isinstance(alert, dict) else ""
+        )
+        contract = getattr(alert, "contract_symbol", "") or (
+            alert.get("contract_symbol", "") if isinstance(alert, dict) else ""
+        )
+        strike = getattr(alert, "strike", None) or (
+            alert.get("strike", None) if isinstance(alert, dict) else None
+        )
+        from engine.alert_identity import canonical_alert_symbol
+
+        canonical_sym = canonical_alert_symbol(sym)
+        family_key = f"SPEC:{canonical_sym}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+
+        now = time.time()
+        with self._cache_lock:
+            if family_key in self._cache and (now - self._cache[family_key][0]) < self._cache_ttl:
+                return
+
+        def _worker():
+            try:
+                self.speculative_pre_scrutinize(alert, timeout=timeout)
+            except Exception as e:
+                logger.debug(f"[AlertScrutiny] Background speculative pre-scrutiny error: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"SpecPreScrutiny-{canonical_sym}")
+        t.start()
+
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────
 
-    def scrutinize_alert(self, alert: Any, timeout: float = 2.5) -> ScrutinyResult:
+    def scrutinize_alert(self, alert: Any, timeout: float = 4.5) -> ScrutinyResult:
         """
         Runs comprehensive Tier-1 and Tier-2 scrutiny.
         Falls back defensively to deterministic quantitative scrutiny if LLM is unavailable.
@@ -5899,10 +6024,30 @@ class AlertScrutinyAuditor:
 
         canonical_sym = canonical_alert_symbol(sym)
         cache_key = f"{canonical_sym}:{atype}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+        family_key = f"SPEC:{canonical_sym}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+        alert_id_val = str(
+            getattr(alert, "alert_id", "")
+            or (alert.get("alert_id", "") if isinstance(alert, dict) else "")
+        ).strip()
+        alert_id_key = f"ALERT_ID:{alert_id_val}" if alert_id_val else ""
         now = time.time()
         with self._cache_lock:
+            # 1. Exact cache match
             if cache_key in self._cache:
                 ts, cached_res = self._cache[cache_key]
+                if (now - ts) < self._cache_ttl:
+                    return cached_res
+            # 2. Speculative pre-scrutiny family cache match (for PRIMED -> BREAKOUT transition)
+            if family_key in self._cache:
+                ts, cached_res = self._cache[family_key]
+                if (now - ts) < self._cache_ttl:
+                    logger.info(
+                        f"[AlertScrutiny] Instant speculative pre-scrutiny cache hit for {canonical_sym} {atype} ({cached_res.status})"
+                    )
+                    return cached_res
+            # 3. Direct alert_id cache match
+            if alert_id_key and alert_id_key in self._cache:
+                ts, cached_res = self._cache[alert_id_key]
                 if (now - ts) < self._cache_ttl:
                     return cached_res
 
@@ -5912,6 +6057,24 @@ class AlertScrutinyAuditor:
                     cutoff = now - self._cache_ttl
                     self._cache = {k: v for k, v in self._cache.items() if v[0] > cutoff}
                 self._cache[cache_key] = (now, res)
+                stage = str(
+                    getattr(alert, "stage", "")
+                    or (alert.get("stage", "") if isinstance(alert, dict) else "")
+                ).upper()
+                if stage in ("PRIMED", "STALK", "EARLY_WARNING", "COILING") or "_PRIMED" in atype:
+                    self._cache[family_key] = (now, res)
+                    if "_PRIMED" in atype:
+                        self._cache[
+                            f"{canonical_sym}:{atype.replace('_PRIMED', '_BREAKOUT')}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+                        ] = (now, res)
+                        self._cache[
+                            f"{canonical_sym}:{atype.replace('_PRIMED', '_BREAKDOWN')}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+                        ] = (now, res)
+                        self._cache[
+                            f"{canonical_sym}:{atype.replace('_PRIMED', '')}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
+                        ] = (now, res)
+                if alert_id_key:
+                    self._cache[alert_id_key] = (now, res)
             return res
 
         # Step 1: Tier 1 Sanity Gate
@@ -6053,11 +6216,25 @@ class AlertScrutinyAuditor:
         confidence = float(getattr(alert, "confidence", 80.0) or 80.0)
         if confidence < min_score:
             logger.info(
-                f"[AlertScrutiny] Adaptive Regime Gate: {canonical_sym} ({atype}) confidence {confidence:.0f} "
-                f"< adaptive min_score {min_score} (regime: VIX compressed or Nifty ORB-trapped). "
-                f"Falling back to quantitative audit."
+                f"[AlertScrutiny] Adaptive Regime Gate REJECTED: {canonical_sym} ({atype}) "
+                f"confidence {confidence:.0f} < adaptive min_score {min_score}."
             )
-            return _commit_cache(self._generate_quantitative_fallback(alert, flags))
+            return _commit_cache(
+                ScrutinyResult(
+                    status="REJECTED",
+                    score=int(round(confidence)),
+                    logic_confirmation=(
+                        f"Adaptive regime threshold not met ({confidence:.0f} < {min_score})."
+                    ),
+                    trap_risk_warning=(
+                        f"Setup conviction ({confidence:.0f}) is below adaptive threshold ({min_score}) for current VIX/regime."
+                    ),
+                    actionable_guidance="Wait for stronger confirmation or higher-conviction structure.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Confidence {confidence:.0f} < adaptive min_score {min_score}",
+                    auditor_model="ADAPTIVE_REGIME_GATE",
+                )
+            )
 
         # Step 1.6: 4-Stage Zero-Token Pre-LLM Conviction Gate (Invariant 15)
         # Highly confident setups (confidence >= 85) with positive EV are approved quantitatively
@@ -6192,16 +6369,45 @@ class AlertScrutinyAuditor:
         return data
 
     def _execute_fast_llm_scrutiny(
-        self, alert: Any, flags: dict[str, bool], timeout: float = 4.5, min_score: int = 70
+        self, alert: Any, flags: dict[str, bool], timeout: float = 6.0, min_score: int = 70
     ) -> Optional[ScrutinyResult]:
         """Invokes Fast-LLM with defensive timeout and strict JSON parsing."""
+        import sys
+
+        if (
+            self._fast_provider is None
+            and (os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ)
+            and "agent.core" not in sys.modules
+            and not any(
+                os.environ.get(k, "").strip()
+                for k in (
+                    "AI_FAST_PROVIDER",
+                    "AI_FAST_MODEL",
+                    "AI_PROVIDER",
+                    "GEMINI_API_KEY",
+                    "GEMINI_API_KEYS",
+                    "GOOGLE_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "GROQ_API_KEY",
+                    "DEEPSEEK_API_KEY",
+                    "NVIDIA_API_KEY",
+                    "OPENROUTER_API_KEY",
+                )
+            )
+        ):
+            return None
+
         prompt = self._build_scrutiny_prompt(alert)
 
         def _call() -> str:
             # Check fast LLM provider
-            from agent.core import get_fast_provider
+            provider = self._fast_provider
+            if provider is None:
+                from agent.core import get_fast_provider
 
-            provider = get_fast_provider()
+                provider = get_fast_provider()
+                self._fast_provider = provider
             if not provider:
                 return ""
             system_msg = (
@@ -6216,20 +6422,18 @@ class AlertScrutinyAuditor:
                 ],
                 "stream": False,
                 "enable_tools": False,
-                "max_tokens": 350,
+                "max_tokens": 900,
                 "response_mime_type": "application/json",
             }
             pname = ""
             try:
-                pname = str(
-                    provider.provider_name()
-                    if callable(getattr(provider, "provider_name", None))
-                    else ""
-                )
+                pn = getattr(provider, "provider_name", None)
+                pname = str(pn() if callable(pn) else (pn or ""))
             except Exception:
                 pname = ""
-            if "Gemini" in pname:
-                chat_kwargs["thinking_budget"] = 512
+            if "gemini" in pname.lower():
+                # Rapid JSON classification: set thinking budget to 0 for sub-second responses
+                chat_kwargs["thinking_budget"] = 0
             resp = provider.chat(**chat_kwargs)
             return str(resp or "").strip()
 
@@ -6304,6 +6508,19 @@ class AlertScrutinyAuditor:
         opt_type = str(getattr(alert, "option_type", "") or "").upper()
         contract = str(getattr(alert, "contract_symbol", "") or "")
         trade_desc = action if action else ("BUY " + opt_type if opt_type else direction)
+
+        # Scale Separation Invariant: Clamp option target in scrutiny prompt
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt_prem = is_alert_option_premium_level(alert)
+        except Exception:
+            is_opt_prem = bool(opt_type or contract)
+
+        if is_opt_prem and ltp > 0:
+            u_spot = getattr(alert, "underlying_spot", None)
+            if t1 > ltp * 4.0 or (u_spot and abs(t1 - float(u_spot)) / float(u_spot) < 0.35):
+                t1 = round(ltp + 2.0 * max(0.5, abs(ltp - sl)), 1)
 
         risk_pts = abs(ltp - sl)
         reward_pts = abs(t1 - ltp)
@@ -6396,12 +6613,17 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         # 1. Macro & Regime Vector
         regime_ctx = "NORMAL"
         try:
-            from analysis.regime_governor import classify_market_regime
+            now_ts = time.time()
+            if self._regime_cache and (now_ts - self._regime_cache[0]) < 15.0:
+                regime_ctx = self._regime_cache[1]
+            else:
+                from analysis.regime_governor import classify_market_regime
 
-            r_obj = classify_market_regime()
-            regime_ctx = (
-                f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
-            )
+                r_obj = classify_market_regime()
+                regime_ctx = (
+                    f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
+                )
+                self._regime_cache = (now_ts, regime_ctx)
         except Exception as e_suppressed:
             logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -6499,12 +6721,30 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         is_option = bool(opt_type or contract or "OPTIONS" in alert_type or "GAMMA" in alert_type)
         is_option_buy = is_option and ("SELL" not in action and "WRITE" not in action)
 
+        # Scale Separation Invariant: Clamp option target in quantitative fallback
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            if is_alert_option_premium_level(alert):
+                is_option = True
+        except Exception as e_opt_chk:
+            logger.debug(f"[AlertScrutiny] Option scale check skipped: {e_opt_chk}")
+
+        if is_option and ltp > 0:
+            u_spot = getattr(alert, "underlying_spot", None) or (
+                metrics.get("spot") if isinstance(metrics, dict) else None
+            )
+            if t1 > ltp * 4.0 or (u_spot and abs(t1 - float(u_spot)) / float(u_spot) < 0.35):
+                t1 = round(ltp + 2.0 * max(0.5, abs(ltp - sl)), 1)
+
         risk_pts = abs(ltp - sl)
         reward_pts = abs(t1 - ltp)
         rr = reward_pts / risk_pts if risk_pts > 0 else 2.5
 
-        # Base quant score anchored around 80
-        score = 80
+        # Base quant score anchored to actual setup confidence (capped at 80, never inflating <70 setups)
+        raw_conf = getattr(alert, "confidence", None)
+        base_conf = float(raw_conf) if isinstance(raw_conf, (int, float)) and raw_conf > 0 else 75.0
+        score = int(round(min(80.0, base_conf)))
         if rr >= 3.0:
             score += 8
         elif rr >= 2.5:
@@ -7033,6 +7273,11 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
 alert_scrutiny_auditor = AlertScrutinyAuditor()
 
 
-def scrutinize_alert(alert: Any, timeout: float = 2.5) -> ScrutinyResult:
+def scrutinize_alert(alert: Any, timeout: float = 4.5) -> ScrutinyResult:
     """Convenience module function dispatching to global alert_scrutiny_auditor."""
     return alert_scrutiny_auditor.scrutinize_alert(alert, timeout=timeout)
+
+
+def speculative_pre_scrutinize_async(alert: Any, timeout: float = 3.0) -> None:
+    """Convenience module function for async speculative pre-scrutiny."""
+    alert_scrutiny_auditor.speculative_pre_scrutinize_async(alert, timeout=timeout)

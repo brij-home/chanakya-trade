@@ -129,3 +129,45 @@ def test_lru_eviction():
     assert cache.get("key_2") == 2
     assert cache.get("key_3") == 3
     assert cache.get("key_4") == 4
+
+
+def test_get_ohlcv_coalesces_concurrent_live_requests(monkeypatch):
+    """Concurrent get_ohlcv calls without to_date must share one flight_key and broker call."""
+    import time as _t
+    import market.history as mh
+
+    mh._df_memory_cache.clear()
+    calls = 0
+
+    class _SlowBroker:
+        _is_mock = False
+
+        def get_historical_data(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            _t.sleep(0.08)
+            return [
+                {
+                    "date": "2026-11-23 09:15:00",
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "volume": 5000,
+                }
+            ]
+
+    monkeypatch.setattr("brokers.session.get_data_broker", lambda: _SlowBroker())
+    monkeypatch.setattr("brokers.session.get_data_broker_key", lambda: "test_fyers")
+    monkeypatch.setattr(
+        "engine.historical_warehouse.historical_warehouse.has_bars", lambda *a, **kw: False
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [
+            pool.submit(mh.get_ohlcv, "RELIANCE_SF_TEST", "NSE", "15m", days=5) for _ in range(4)
+        ]
+        results = [f.result() for f in futs]
+
+    assert calls == 1
+    assert all(not df.empty for df in results)

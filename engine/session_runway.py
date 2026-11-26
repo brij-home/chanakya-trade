@@ -22,7 +22,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("engine.session_runway")
@@ -60,11 +60,15 @@ def get_current_session_phase(now_dt: Optional[datetime] = None) -> tuple[Sessio
     if now_dt is None:
         now_dt = datetime.now(IST)
 
-    t = now_dt.time()
+    from market.rule_schedule import derivative_close, intraday_squareoff_cutoff
 
-    # Remaining minutes to 15:15 IST
+    t = now_dt.time()
+    d_today = now_dt.date()
+    sq_cutoff = intraday_squareoff_cutoff(d_today, is_derivative=True)
+    deriv_close = derivative_close(d_today)
+
     now_mins = now_dt.hour * 60 + now_dt.minute
-    cutoff_mins = 15 * 60 + 15
+    cutoff_mins = sq_cutoff.hour * 60 + sq_cutoff.minute
     remaining_mins = max(0, cutoff_mins - now_mins)
 
     if t < dtime(9, 15):
@@ -81,9 +85,9 @@ def get_current_session_phase(now_dt: Optional[datetime] = None) -> tuple[Sessio
         return "AFTERNOON_EXPANSION", remaining_mins
     elif dtime(13, 45) <= t < dtime(14, 40):
         return "AFTERNOON_GAMMA_POWER_HOUR", remaining_mins
-    elif dtime(14, 40) <= t < dtime(15, 15):
+    elif dtime(14, 40) <= t < sq_cutoff:
         return "SESSION_RUNWAY_EXHAUSTION", remaining_mins
-    elif dtime(15, 15) <= t <= dtime(15, 30):
+    elif sq_cutoff <= t <= deriv_close:
         return "SQUAREOFF_RECONCILIATION", remaining_mins
     else:
         return "POST_MARKET", 0
@@ -378,6 +382,7 @@ def is_session_runway_sufficient(
     is_0dte: bool = False,
     time_horizon: str = "INTRADAY",
     current_time: Optional[dtime] = None,
+    ref_date: Optional[Any] = None,
 ) -> tuple[bool, str]:
     """
     Lightweight, deterministic perimeter sanity check (<1ms) to verify if an alert
@@ -429,11 +434,18 @@ def is_session_runway_sufficient(
             return False, "SESSION_RUNWAY_EXHAUSTION: Currency pre-market before 09:00 IST"
         return True, "SESSION_RUNWAY_SUFFICIENT: Active Currency session runway"
 
-    # 4. NSE / BSE Domestic Equities & Derivatives (09:15 - 15:30 IST)
-    if current_time >= dtime(15, 15):
+    # 4. NSE / BSE Domestic Equities & Derivatives
+    from market.rule_schedule import intraday_squareoff_cutoff
+
+    _is_deriv = aclass_up in ("FNO", "FNO_INDEX", "FNO_STOCK", "FUT", "OPT", "DERIVATIVES")
+    _eval_date = ref_date if ref_date is not None else datetime.now(IST).date()
+    _sq_cutoff = intraday_squareoff_cutoff(
+        _eval_date, is_derivative=_is_deriv, expiring_index=is_0dte
+    )
+    if current_time >= _sq_cutoff:
         return (
             False,
-            "SESSION_RUNWAY_EXHAUSTION: Market session runway expired (post 15:15 IST square-off)",
+            f"SESSION_RUNWAY_EXHAUSTION: Market session runway expired (post {_sq_cutoff.strftime('%H:%M')} IST square-off)",
         )
 
     if (aclass_up in ("EQUITY", "STOCK") or "THEMATIC" in atype_up) and current_time >= dtime(

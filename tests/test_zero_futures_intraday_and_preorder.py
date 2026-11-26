@@ -265,11 +265,11 @@ def test_opening_range_battle_plan_and_radar_formatting():
         radar_msg = format_opening_range_radar(plan)
 
         assert "OPENING RANGE RADAR (09:18 IST)" in radar_msg
-        assert "BULL TRIGGER:" in radar_msg
-        assert "Above ₹24,980.0" in radar_msg
+        assert "ORH BREACH:" in radar_msg
+        assert "Above <code>₹24,980.0</code>" in radar_msg
         assert "<code>NIFTY 25000 CE</code>" in radar_msg
-        assert "BEAR TRIGGER:" in radar_msg
-        assert "Below ₹24,910.0" in radar_msg
+        assert "ORL BREAKDOWN:" in radar_msg
+        assert "Below <code>₹24,910.0</code>" in radar_msg
         assert "<code>NIFTY 24900 PE</code>" in radar_msg
         assert "FUT" not in radar_msg
 

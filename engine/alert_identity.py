@@ -107,7 +107,7 @@ def generate_alert_id(
 # ── Session Phase Slot ─────────────────────────────────────────────────────
 
 _SLOT_BOUNDARIES = (
-    (dtime(13, 15), "1315"),  # Power Hour + Closing (13:15 – 15:30 IST)
+    (dtime(13, 15), "1315"),  # Power Hour + Closing (13:15 – Market Close IST)
     (dtime(11, 30), "1130"),  # Midday Consolidation (11:30 – 13:14 IST)
 )
 
@@ -123,7 +123,7 @@ def get_session_phase_slot(ref_dt: Optional[datetime] = None) -> str:
     Slots (3 per trading day, 24hr IST notation):
         '0915'  — Opening + Morning     (09:15 – 11:29 IST)
         '1130'  — Midday Consolidation  (11:30 – 13:14 IST)
-        '1315'  — Power Hour + Closing  (13:15 – 15:30 IST)
+        '1315'  — Power Hour + Closing  (13:15 – Market Close IST)
 
     Returns the slot label, e.g. '1315'.
     Invariant compliant: same minute always maps to the same label; no randomness.
@@ -152,3 +152,32 @@ def validate_alert_id(alert_id: str) -> tuple[bool, str]:
         )
 
     return True, "OK"
+
+
+def semantic_cluster_key(
+    symbol: str,
+    *,
+    direction: str = "BULLISH",
+    horizon: str = "INTRADAY",
+    trigger_price: float = 0.0,
+    atr: float = 0.0,
+    session_date: Optional[date] = None,
+) -> str:
+    """Build deterministic cluster identity to coalesce overlapping detectors firing on the same thesis/zone."""
+    clean_sym = canonical_alert_symbol(symbol).upper()
+    dir_up = (direction or "BULLISH").upper()
+    dir_bucket = (
+        "BULL"
+        if dir_up in ("BULLISH", "BUY", "LONG")
+        else ("BEAR" if dir_up in ("BEARISH", "SELL", "SHORT") else "NEUT")
+    )
+    h_up = (horizon or "INTRADAY").upper()
+    h_bucket = "SWING" if any(k in h_up for k in ("SWING", "POSITIONAL", "MULTI")) else "INTRA"
+
+    zone = "0"
+    if trigger_price and trigger_price > 0:
+        band = max(trigger_price * 0.0025, float(atr or 0.0) * 0.75, 0.5)
+        zone = str(int(round(trigger_price / band)))
+
+    d_str = (session_date or datetime.now(IST).date()).strftime("%Y%m%d")
+    return f"cluster:{clean_sym}:{dir_bucket}:{h_bucket}:z{zone}:{d_str}"

@@ -1333,14 +1333,15 @@ def _resolve_monotonic_display_targets(
             if u_spot:
                 try:
                     s_val = float(str(u_spot).replace("₹", "").replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_spot:
+                    logger.debug(
+                        f"[alert_templates] Ignore non-numeric underlying_spot '{u_spot}': {e_spot}"
+                    )
 
             scale_filtered = [
                 c
                 for c in candidates
-                if c <= entry_val * 6.0
-                and (s_val is None or abs(c - s_val) / s_val >= 0.35)
+                if c <= entry_val * 6.0 and (s_val is None or abs(c - s_val) / s_val >= 0.35)
             ]
             if scale_filtered:
                 candidates = scale_filtered
@@ -4322,6 +4323,19 @@ def render_milestone_alert(
             r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
             move_str = f" · 🌙 <b>Session P&L:</b> <b>{sign}{cs}{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
 
+        from market.rule_schedule import intraday_squareoff_cutoff
+
+        _eod_sq_t = intraday_squareoff_cutoff(
+            datetime.now(IST).date(),
+            is_derivative=bool(
+                getattr(d, "is_option", False)
+                or getattr(d, "is_future", False)
+                or str(getattr(d, "exchange", "") or "").upper() in ("NFO", "BFO")
+            ),
+        )
+        _default_eod_reason = (
+            f"Intraday session expired ({_eod_sq_t.strftime('%H:%M')} IST cutoff reached)"
+        )
         return (
             f"🌙 <b>{env_tag} {update_prefix}INTRADAY SESSION CLOSE EXIT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -4329,7 +4343,7 @@ def render_milestone_alert(
             f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> {cs}{d.ltp:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>INTRADAY SESSION CLOSED · SQUARE OFF ALL OPEN RUNNERS</code>\n"
-            f"⏳ <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Intraday session expired (15:15 IST cutoff reached)'}"
+            f"⏳ <b>Reason:</b> {d.invalidation_reason or d.rationale or _default_eod_reason}"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -5222,10 +5236,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in_market=in_market,
         )
 
-    # 0c. Runner Exit / Profit Secured / Breakeven Exit
+    # 0c. Runner Exit / Profit Secured / Breakeven Exit / Trailing Stop Exit
     is_runner_exit = (
-        getattr(alert, "stage", "") in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT")
-        or getattr(alert, "target_status", "") in ("RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED")
+        getattr(alert, "stage", "")
+        in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT", "TRAILING_STOP_EXIT")
+        or getattr(alert, "target_status", "")
+        in ("RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED", "TRAILING_STOP_EXIT")
         or "RUNNER CLOSED" in (getattr(alert, "headline", "") or "").upper()
     )
     if is_runner_exit:
@@ -5629,6 +5645,21 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     ):
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET", in_market=in_market),
+            in_market=in_market,
+        )
+
+    # 4b. Terminal COMPLETED / SUPERSEDED fallback (never fall through to NEW CALL without UPDATE #)
+    if getattr(alert, "stage", "") in ("COMPLETED", "SUPERSEDED"):
+        m_fb = (
+            "PROFIT_SECURED"
+            if (
+                getattr(alert, "achieved_milestones", None)
+                or (getattr(alert, "pnl_pct", 0) or 0) > 0
+            )
+            else "RUNNER_EXIT"
+        )
+        return render_milestone_alert(
+            MilestoneAlertData.from_alert(alert, m_fb, in_market=in_market),
             in_market=in_market,
         )
 
@@ -6141,16 +6172,36 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         friday_warn = actionable_plan.get("friday_weekend_warning")
         warn_str = f"\n• {friday_warn}" if friday_warn else ""
 
-        # Late session clock warning (post 15:15 IST until 15:30 close)
+        # Late session clock warning (between canonical square-off cutoff and segment close)
         now_dt = datetime.now(IST)
         session_clock_warn = ""
-        if (
-            in_market
-            and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")
-            and (now_dt.hour == 15 and 15 <= now_dt.minute < 30)
-        ):
-            mins_left = max(1, 30 - now_dt.minute)
-            session_clock_warn = f"\n• ⚠️ <i>Market closes in {mins_left}m. Intraday MIS closed — Overnight Hold (NRML) or Next-Session Gameplan.</i>"
+        ex_clock = str(getattr(alert, "exchange", "NSE") or "NSE").upper()
+        if in_market and ex_clock in ("NSE", "BSE", "NFO", "BFO"):
+            from market.rule_schedule import (
+                cash_continuous_close,
+                derivative_close,
+                intraday_squareoff_cutoff,
+            )
+
+            is_deriv_clock = bool(ex_clock in ("NFO", "BFO") or exp_date)
+            sq_clock_t = intraday_squareoff_cutoff(now_dt.date(), is_derivative=is_deriv_clock)
+            close_clock_t = (
+                derivative_close(now_dt.date())
+                if is_deriv_clock
+                else cash_continuous_close(now_dt.date(), cas_eligible=False)
+            )
+            if sq_clock_t <= now_dt.time() < close_clock_t:
+                mins_left = max(
+                    1,
+                    int(
+                        (
+                            datetime.combine(now_dt.date(), close_clock_t)
+                            - datetime.combine(now_dt.date(), now_dt.time())
+                        ).total_seconds()
+                        // 60
+                    ),
+                )
+                session_clock_warn = f"\n• ⚠️ <i>Market closes in {mins_left}m. Intraday MIS closed — Overnight Hold (NRML) or Next-Session Gameplan.</i>"
 
         lot_sz = (
             getattr(alert, "lot_size", None)
@@ -6189,16 +6240,52 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 else None
             )
         )
-        if (not max_loss or float(max_loss) <= 0) and entry_val and entry_val > 0 and lot_sz:
+        # Align [Risk: ₹.../lot] with the actual SL distance or spread max loss (never display stale mismatches)
+        if not max_loss or float(max_loss) <= 0:
+            max_loss = None
+        if entry_val and entry_val > 0 and lot_sz:
             try:
                 m_sl_val = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(sl))
                 if m_sl_val:
                     sl_num = float(m_sl_val.group(1).replace(",", ""))
-                    pts_risk = abs(entry_val - sl_num)
-                    if is_option_plan and act.upper().startswith("BUY"):
-                        pts_risk = min(entry_val, pts_risk)
+                    ref_e = (
+                        float(
+                            getattr(alert, "option_premium", None)
+                            or getattr(alert, "ltp", 0)
+                            or entry_val
+                        )
+                        if is_option_plan and entry_val < sl_num * 1.01
+                        else entry_val
+                    )
+                    pts_risk = abs(ref_e - sl_num)
+                    if is_option_plan and act.upper().startswith(("BUY", "EXECUTE")):
+                        pts_risk = min(ref_e, pts_risk)
                     if pts_risk > 0:
-                        max_loss = pts_risk * int(lot_sz)
+                        computed_lot_risk = round(pts_risk * int(lot_sz), 0)
+                        _hp_risk = actionable_plan.get("hedge_plan") or (
+                            alert.metrics.get("hedge_plan")
+                            if isinstance(getattr(alert, "metrics", None), dict)
+                            else None
+                        )
+                        _pref_veh_risk = (
+                            (
+                                _hp_risk.get("preferred_vehicle")
+                                if isinstance(_hp_risk, dict)
+                                else None
+                            )
+                            or actionable_plan.get("preferred_vehicle")
+                            or getattr(alert, "preferred_vehicle", None)
+                        )
+                        if (
+                            _pref_veh_risk == "SPREAD_ONLY"
+                            and isinstance(_hp_risk, dict)
+                            and _hp_risk.get("max_loss")
+                        ):
+                            max_loss = float(_hp_risk["max_loss"])
+                        elif (not max_loss) or abs(float(max_loss) - computed_lot_risk) > max(
+                            500.0, computed_lot_risk * 0.25
+                        ):
+                            max_loss = computed_lot_risk
             except Exception as e_suppressed:
                 logger.debug(
                     f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
@@ -6331,7 +6418,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if isinstance(getattr(alert, "metrics", None), dict)
             else None
         )
-        fric_str = f"\n• <b>Friction:</b> <code>{fric_badge}</code>" if fric_badge else ""
+        fric_str = ""
 
         plan_str = (
             f"{exp_line}"
@@ -6599,8 +6686,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             m_desc = mini_alt.get("description", "")
             m_lot = mini_alt.get("lot_size", "")
             u_sym = str(mini_alt.get("micro_symbol", "")).replace("MCX:", "")
-            u_str = f" / <code>{u_sym}</code> ({mini_alt.get('micro_lot_size', 1)} kg)" if u_sym else ""
-            mini_str = f"\n🔹 <b>Retail Sizing:</b> <code>{m_sym}</code> ({m_desc} · Lot: {m_lot}){u_str}"
+            u_str = (
+                f" / <code>{u_sym}</code> ({mini_alt.get('micro_lot_size', 1)} kg)" if u_sym else ""
+            )
+            mini_str = (
+                f"\n🔹 <b>Retail Sizing:</b> <code>{m_sym}</code> ({m_desc} · Lot: {m_lot}){u_str}"
+            )
 
         if is_opt_first:
             plan_str = (
@@ -7004,12 +7095,39 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             plan_str = f"• <b>Action:</b> {action} @ <code>{entry}</code>\n• <b>T1:</b> <code>{target}</code> | 🛑 <b>SL:</b> <code>{sl}</code>"
 
     # Dual-Blueprint Regime Verdict Tag
+    # Check whether a defined-risk hedge box is present so secondary regime telemetry
+    # (0DTE Phase / IV Skew) doesn't crowd above the Entry / SL / Targets block.
+    _hp_chk = actionable_plan.get("hedge_plan") or (
+        alert.metrics.get("hedge_plan")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    _has_hedge_box = bool(
+        isinstance(_hp_chk, dict)
+        and (
+            _hp_chk.get("legs")
+            or (_hp_chk.get("buy_leg") and _hp_chk.get("sell_leg"))
+            or _hp_chk.get("description")
+            or _hp_chk.get("strategy")
+        )
+    )
+    _pre_action_meta: list[str] = []
+
+    # ── Execution Regime Banner (Market Favors Naked vs Dynamic Spread) ──
+    pref_veh_banner = (
+        (_hp_chk.get("preferred_vehicle") if isinstance(_hp_chk, dict) else None)
+        or actionable_plan.get("preferred_vehicle")
+        or getattr(alert, "preferred_vehicle", None)
+    )
     rv = actionable_plan.get("regime_verdict") or (
         alert.metrics.get("regime_verdict")
         if isinstance(getattr(alert, "metrics", None), dict)
         else None
     )
-    if rv:
+    if pref_veh_banner == "SPREAD_ONLY":
+        verdict_line = "🛡️ <b>EXECUTION REGIME:</b> <code>HEDGED SPREAD MANDATED</code> <i>(Defined Risk / Zero Theta & Gamma Pin Defense)</i>\n"
+        plan_str = (verdict_line + plan_str) if plan_str else verdict_line.strip()
+    elif rv:
         verdict_line = (
             "⚡ <b>EXECUTION REGIME:</b> <code>MARKET FAVORS NAKED</code> <i>(High Gamma Convexity)</i>\n"
             if rv == "MARKET_FAVORS_NAKED"
@@ -7026,8 +7144,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     if isinstance(z_phase, dict) and z_phase.get("is_0dte"):
         phase_name = str(z_phase.get("phase", "")).replace("_", " ")
         t_bias = str(z_phase.get("tactical_bias", ""))
-        phase_line = f"⏱️ <b>0DTE PHASE:</b> <code>{phase_name}</code> <i>({t_bias})</i>\n"
-        plan_str = (phase_line + plan_str) if plan_str else phase_line.strip()
+        phase_line = f"⏱️ <b>0DTE PHASE:</b> <code>{phase_name}</code> <i>({t_bias})</i>"
+        if _has_hedge_box:
+            _pre_action_meta.append(phase_line)
+        else:
+            plan_str = (f"{phase_line}\n" + plan_str) if plan_str else phase_line
 
     # Real-Time Options IV Skew Tag
     iv_sk = actionable_plan.get("iv_skew") or (
@@ -7037,9 +7158,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         sk_regime = str(iv_sk.get("regime", "")).replace("_", " ")
         atm_sk = float(iv_sk.get("atm_skew", 0.0) or 0.0)
         skew_line = (
-            f"📊 <b>IV SKEW:</b> <code>{sk_regime}</code> <i>(Call-Put Skew: {atm_sk:+.1f}%)</i>\n"
+            f"📊 <b>IV SKEW:</b> <code>{sk_regime}</code> <i>(Call-Put Skew: {atm_sk:+.1f}%)</i>"
         )
-        plan_str = (skew_line + plan_str) if plan_str else skew_line.strip()
+        if _has_hedge_box:
+            _pre_action_meta.append(skew_line)
+        else:
+            plan_str = (f"{skew_line}\n" + plan_str) if plan_str else skew_line
 
     hedge_plan = actionable_plan.get("hedge_plan") or (
         alert.metrics.get("hedge_plan")
@@ -7383,27 +7507,27 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         ).strip()
         # Strip duplicate execution directives (e.g. "Enter JSWSTEEL 1210 PE @ ₹32.15.", "Enter ₹1,212.4.")
         clean_summary = re.sub(
-            r"\bEnter\s+[^.!?|]*?@\s*[^.!?|]+[.!?|]?",
+            r"\bEnter\s+(?:[^.!?\n|]|(?<=\d)\.(?=\d))*?@\s*(?:[^.!?\n|]|(?<=\d)\.(?=\d))+(?:\.(?!\d)|[!?|])?",
             "",
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
         clean_summary = re.sub(
-            r"\bEnter\s+[\$₹]?[\d,]+(?:\.\d+)?[.!?|]?",
+            r"\bEnter\s+[\$₹]?[\d,]+(?:\.\d+)?(?:\.(?!\d)|[!?|])?",
             "",
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
-        # Strip duplicate Stop Loss statements (e.g. "Stop loss: ₹30.2.", "SL: ₹30.2.")
+        # Strip duplicate Stop Loss statements (e.g. "Stop loss: ₹30.2.", "SL: ₹265.4 (-6%).")
         clean_summary = re.sub(
-            r"\b(?:Stop\s*loss|Stoploss|SL)\s*:[^.!?|]+[.!?|]?",
+            r"\b(?:Stop\s*loss|Stoploss|SL)\s*:(?:[^.!?\n|]|(?<=\d)\.(?=\d))+(?:\.(?!\d)|[!?|])?",
             "",
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
-        # Strip duplicate Target statements (e.g. "Target 1: ₹39.2.", "Target: ₹39.2.")
+        # Strip duplicate Target statements (e.g. "Target 1: ₹39.2.", "T1: ₹405.8 (+12%).")
         clean_summary = re.sub(
-            r"\b(?:Target\s*\d*|T[123]|Upside\s+target)\s*:[^.!?|]+[.!?|]?",
+            r"\b(?:Target\s*\d*|T[123]|Upside\s+target)\s*:(?:[^.!?\n|]|(?<=\d)\.(?=\d))+(?:\.(?!\d)|[!?|])?",
             "",
             clean_summary,
             flags=re.IGNORECASE,
@@ -7415,13 +7539,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
-        # Strip redundant Entry/SL/Target lists if plan_str already formats them
+        # Strip redundant Entry/SL/Target pipe segments if plan_str already formats them
         clean_summary = re.sub(
-            r"\s*(?:Entry|SL|T1|T2|Target|Risk|Reward|R:R)\s*:[^|]+(?:\||$)",
+            r"(?:\|\s*)?\b(?:Entry|Stop\s*loss|Stoploss|SL|T[123]|Target\s*\d*|Risk|Reward|R:R)\s*:[^|\n]+(?:\||$)",
             "",
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
+        # Strip any orphaned decimal/percentage tail left over from stripped SL/Target segments (e.g. "2 (-6%) · 2 (+12%)")
+        clean_summary = re.sub(
+            r"(?:^|[·|]\s*)\d+\s*\([+-]?\d+(?:\.\d+)?%\)(?=\s*(?:[·|.]|$))",
+            "",
+            clean_summary,
+        ).strip(" .·|")
         # Strip high-conviction inflection / scanner catalyst boilerplate
         clean_summary = re.sub(
             r"[A-Za-z0-9_&]+\s+at\s+high-conviction\s+inflection\s*(?:\([^)]*\)|[^(.]*\))\s*\.?\s*",
@@ -7692,6 +7822,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         has_matching_hl_price = (
             hl_price is not None and opt_cmp is not None and abs(opt_cmp - hl_price) <= 0.25
         )
+        has_opt_cmp_in_plan = bool(plan_str and "(Opt CMP:" in plan_str)
         opt_bar = (
             f" | Opt CMP: <b>₹{opt_cmp:,.2f}</b>"
             if (
@@ -7701,6 +7832,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 and f"₹{opt_cmp:,.2f}" not in clean_hl
                 and not has_matching_hl_price
                 and "@ ₹" not in clean_hl
+                and not has_opt_cmp_in_plan
             )
             else ""
         )
@@ -7881,12 +8013,22 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         if is_crypto:
             eta_val = "24h Rolling"
         else:
+            from market.rule_schedule import intraday_squareoff_cutoff
+
             th_u = str(horizon_val).upper()
             ex_u = str(getattr(alert, "exchange", "") or "NSE").upper()
+            is_deriv_eta = bool(
+                ex_u in ("NFO", "BFO")
+                or getattr(alert, "contract_symbol", None)
+                or getattr(alert, "strike", None)
+            )
+            sq_eta_str = intraday_squareoff_cutoff(
+                datetime.now(IST).date(), is_derivative=is_deriv_eta
+            ).strftime("%H:%M")
             if th_u in ("SCALP", "INTRADAY_SCALP_ONLY"):
                 eta_val = "15–45m Scalp"
             elif th_u == "INTRADAY":
-                eta_val = "Today 23:15 IST" if ex_u == "MCX" else "Today by 15:15 IST"
+                eta_val = "Today 23:15 IST" if ex_u == "MCX" else f"Today by {sq_eta_str} IST"
             elif th_u == "SWING_SHORT":
                 eta_val = "2–5 Sessions"
             elif th_u == "SWING_MID":
@@ -7898,7 +8040,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             elif th_u == "ROLLING_24H":
                 eta_val = "24h Rolling"
             else:
-                eta_val = "Today 15:15 IST"
+                eta_val = f"Today {sq_eta_str} IST"
 
     conf_val = None
     metrics_dict = getattr(alert, "metrics", None)
@@ -8079,6 +8221,27 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     if c_mf and c_mf not in plan_str and c_mf not in sigs:
                         sigs.append(c_mf)
 
+        # Structured multi-pillar structural signals (OB / Fib OTE / FVG / Sweep / VP / Anchor)
+        raw_sigs = metrics_d.get("signals") or metrics_d.get("structural_location") or []
+        if isinstance(raw_sigs, (list, tuple)):
+            for rs in raw_sigs:
+                if rs and isinstance(rs, str) and rs.strip():
+                    c_rs = _clean_sig_phrase(rs.replace("_", " ").title(), 32)
+                    if c_rs and c_rs not in plan_str and c_rs not in sigs:
+                        sigs.append(c_rs)
+
+        vp_tags_d = metrics_d.get("volume_profile_tags") or []
+        if isinstance(vp_tags_d, (list, tuple)):
+            for vt in vp_tags_d:
+                if vt and isinstance(vt, str):
+                    c_vt = _clean_sig_phrase(vt.replace("_", " ").title(), 28)
+                    if c_vt and c_vt not in plan_str and c_vt not in sigs:
+                        sigs.append(c_vt)
+
+        fib_pct = metrics_d.get("fib_retracement_pct")
+        if fib_pct is not None and not any("Fib" in s for s in sigs):
+            sigs.append(f"Fib {float(fib_pct):.0f}%")
+
         # pattern archetype
         arch = metrics_d.get("closest_archetype")
         if arch and str(arch).strip():
@@ -8095,22 +8258,57 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 if c_apc and c_apc not in plan_str and c_apc not in sigs:
                     sigs.append(c_apc)
 
-        # Institutional Flow Signals (OBV / Triple-DMI / VSA / AVWAP)
+        # Institutional Flow Signals (OBV / Triple-DMI / VSA / AVWAP) — aligned with alert direction
+        dir_str_u = str(getattr(alert, "direction", "") or "").upper()
+        opt_t_u = str(getattr(alert, "option_type", "") or "").upper()
+        c_sym_u = str(getattr(alert, "contract_symbol", "") or "").upper()
+        is_bear_flow = (
+            opt_t_u == "PE" or c_sym_u.endswith("PE") or dir_str_u in ("BEARISH", "SHORT", "SELL")
+        )
+        is_bull_flow = (not is_bear_flow) and (
+            opt_t_u == "CE" or c_sym_u.endswith("CE") or dir_str_u in ("BULLISH", "LONG", "BUY")
+        )
+
+        def _flow_aligned(val_u: str) -> bool:
+            if is_bear_flow and "BULLISH" in val_u:
+                return False
+            if is_bull_flow and "BEARISH" in val_u:
+                return False
+            return True
+
         obv_div = metrics_d.get("obv_divergence")
         if obv_div and str(obv_div).upper() not in ("NONE", "NO_DIVERGENCE", "NEUTRAL", "NULL"):
-            sigs.append(f"OBV: {str(obv_div).replace('_', ' ').title()}")
+            obv_u = str(obv_div).upper()
+            if _flow_aligned(obv_u):
+                sigs.append(f"OBV: {str(obv_div).replace('_', ' ').title()}")
 
         dmi_verd = metrics_d.get("dmi_triple_verdict")
         if dmi_verd and str(dmi_verd).upper() not in ("NONE", "WEAK_OR_CHOPPY", "NEUTRAL", "NULL"):
-            sigs.append(f"Triple-DMI: {str(dmi_verd).replace('_', ' ').title()}")
+            dmi_u = str(dmi_verd).upper()
+            if _flow_aligned(dmi_u):
+                dmi_label = f"Triple-DMI: {str(dmi_verd).replace('_', ' ').title()}"
+                # Never allow a lone DMI indicator badge to masquerade as an isolated setup
+                if not sigs:
+                    cpr_t = metrics_d.get("cpr_type")
+                    prefix_parts = []
+                    if cpr_t:
+                        prefix_parts.append(f"CPR:{str(cpr_t).title()}")
+                    prefix_parts.append("Trend Momentum Only")
+                    sigs.append(f"{' | '.join(prefix_parts)} ({dmi_label})")
+                else:
+                    sigs.append(dmi_label)
 
         vsa_sig = metrics_d.get("vsa_signal")
         if vsa_sig and str(vsa_sig).upper() not in ("NONE", "NEUTRAL", "NULL"):
-            sigs.append(f"VSA: {str(vsa_sig).replace('_', ' ').title()}")
+            vsa_u = str(vsa_sig).upper()
+            if _flow_aligned(vsa_u):
+                sigs.append(f"VSA: {str(vsa_sig).replace('_', ' ').title()}")
 
         avwap_b = metrics_d.get("avwap_bias") or metrics_d.get("avwap_confluence")
         if avwap_b and str(avwap_b).upper() not in ("NONE", "NEUTRAL", "NULL"):
-            sigs.append(f"AVWAP: {str(avwap_b).replace('_', ' ').title()}")
+            avwap_u = str(avwap_b).upper()
+            if _flow_aligned(avwap_u):
+                sigs.append(f"AVWAP: {str(avwap_b).replace('_', ' ').title()}")
 
         # Minervini stage
         mstage = metrics_d.get("minervini_stage")
@@ -8149,7 +8347,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                         lc_str,
                     )
                     lc_str = re.sub(r"\s+", " ", lc_str).strip()
-                    c_excerpt = _clean_sig_phrase(lc_str, 50)
+                    c_excerpt = _clean_sig_phrase(lc_str, 110)
                     if c_excerpt and c_excerpt not in clean_summary and c_excerpt not in plan_str:
                         sigs.append(f"AI: {c_excerpt}")
 
@@ -8201,7 +8399,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         and "PRIME LIQUIDITY" not in str(friction_badge).upper()
         and "TIGHT SPREAD" not in str(friction_badge).upper()
     )
-    if is_real_friction and str(friction_badge) not in (plan_str or ""):
+    if is_real_friction and "Execution Friction:" not in (plan_str or ""):
         slip_note = (
             f" <i>(Est. Slippage: {slip_bps:.0f} bps)</i>"
             if (slip_bps and float(slip_bps) > 0)
@@ -8310,15 +8508,26 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         gex_flip = metrics.get("zero_gamma_level")
         gex_regime = metrics.get("gamma_regime")
         if gex_cw or gex_pw or gex_flip:
-            cw_str = f"₹{gex_cw:,.0f}" if gex_cw else "N/A"
-            pw_str = f"₹{gex_pw:,.0f}" if gex_pw else "N/A"
-            flip_str = f"₹{gex_flip:,.0f}" if gex_flip else "N/A"
             regime_tag = f" ({gex_regime.replace('_', ' ')})" if gex_regime else ""
-            gex_line_str = f"• 🏛️ <b>GEX Structure:</b> Call Wall {cw_str} | Put Wall {pw_str} | Zero-Gamma {flip_str}{regime_tag}"
+            if gex_cw and gex_pw and round(float(gex_cw)) == round(float(gex_pw)):
+                pin_str = f"₹{float(gex_cw):,.0f}"
+                flip_diff = (
+                    f" | Zero-Gamma ₹{float(gex_flip):,.0f}"
+                    if (gex_flip and round(float(gex_flip)) != round(float(gex_cw)))
+                    else ""
+                )
+                gex_line_str = f"• 🏛️ <b>GEX Structure:</b> Pin {pin_str}{flip_diff}{regime_tag}"
+            else:
+                cw_str = f"₹{float(gex_cw):,.0f}" if gex_cw else "N/A"
+                pw_str = f"₹{float(gex_pw):,.0f}" if gex_pw else "N/A"
+                flip_str = f"₹{float(gex_flip):,.0f}" if gex_flip else "N/A"
+                gex_line_str = f"• 🏛️ <b>GEX Structure:</b> Call Wall {cw_str} | Put Wall {pw_str} | Zero-Gamma {flip_str}{regime_tag}"
     except Exception as e_gex_tpl:
         logger.debug(f"[bot.alert_templates] GEX rendering non-fatal: {e_gex_tpl}")
 
     secondary_parts = []
+    if "_pre_action_meta" in locals() and _pre_action_meta:
+        secondary_parts.extend(_pre_action_meta)
     if "hedge_box" in locals() and hedge_box:
         secondary_parts.append(hedge_box.strip())
     if "mandate_box" in locals() and mandate_box:

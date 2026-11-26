@@ -367,8 +367,8 @@ class PaperBroker(BrokerAPI):
                 val = get_ltp(symbol)
                 if val and val > 0:
                     return val
-            except Exception:
-                pass
+            except Exception as e_ltp:
+                logger.debug(f"[engine.paper] LTP lookup failed for {symbol}: {e_ltp}")
 
         for exchange in ("MCX", "NSE", "BSE", "NFO", "CDS"):
             try:
