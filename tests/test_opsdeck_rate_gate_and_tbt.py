@@ -193,6 +193,15 @@ def test_api_system_health_hub_includes_rate_gate_and_tbt(client):
     assert tbt["max_slots"] == 15
     assert "slots" in tbt
 
+    # Verify broker_failover telemetry
+    assert "broker_failover" in data
+    bf = data["broker_failover"]
+    assert "primary_data_broker" in bf
+    assert "execution_broker" in bf
+    assert "flattrade_standby_ready" in bf
+    assert "failover_active" in bf
+    assert bf["active_depth_tier"] in ("50-DEPTH", "5-DEPTH")
+
 
 def test_tbt_multi_socket_worker_pool_partitioning():
     """Verify that TbtSocketWorker pool partitions 15 desired symbols across 3 workers with 5 per worker."""

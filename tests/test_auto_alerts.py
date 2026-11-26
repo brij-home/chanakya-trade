@@ -2309,8 +2309,11 @@ def test_auto_alert_directional_whiplash_guard():
     2. If the incoming BEARISH alert has verified structural reversal (CHoCH / MSS), it supersedes
        the older bullish setup and retires it.
     """
+    from datetime import datetime, timedelta
     from unittest.mock import patch
+    from zoneinfo import ZoneInfo
 
+    _ist = ZoneInfo("Asia/Kolkata")
     with (
         patch(
             "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
@@ -2337,6 +2340,9 @@ def test_auto_alert_directional_whiplash_guard():
             trigger_level=3000.0,
             stop_loss=2940.0,
             target_level=3150.0,
+            created_at=(datetime.now(_ist) - timedelta(minutes=6)).strftime(
+                "%Y-%m-%d %H:%M:%S IST"
+            ),
             is_live=True,
             environment="LIVE",
         )
@@ -2389,8 +2395,8 @@ def test_auto_alert_directional_whiplash_guard():
         # The new alert is inserted as active
         assert engine._alerts[0].alert_id == "whiplash-bear-confirmed"
         assert engine._alerts[0].is_active is True
-        # The older superseded bullish alert is purged so dead corpses don't clutter active alerts
-        assert all(a.alert_id != "whiplash-bull-1" for a in engine._alerts)
+        # The older superseded bullish alert is cleanly deactivated/invalidated so no conflicting active setup remains
+        assert all(a.alert_id != "whiplash-bull-1" for a in engine._alerts if a.is_active)
 
 
 def test_index_directional_supremacy_gate():
@@ -2400,8 +2406,11 @@ def test_index_directional_supremacy_gate():
     must be suppressed unless its supremacy score (confidence × R:R) exceeds the existing by >= 8.
     Only one directional bias is shown to the trader at any time.
     """
+    from datetime import datetime, timedelta
     from unittest.mock import patch
+    from zoneinfo import ZoneInfo
 
+    _ist = ZoneInfo("Asia/Kolkata")
     with (
         patch(
             "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
@@ -2415,7 +2424,7 @@ def test_index_directional_supremacy_gate():
         engine = AutoAlertEngine()
         engine._alerts = []
 
-        # BULLISH CE alert fires first (confidence=82, R:R ~ 2.5 → score ~ 205)
+        # BULLISH CE alert fires first (confidence=82, R:R ~ 2.5 → score ~ 205), aged >= 10m soak window
         nifty_ce = AutoAlert(
             alert_id="idx-sup-ce-1",
             alert_type="GAMMA_BLAST",
@@ -2429,6 +2438,9 @@ def test_index_directional_supremacy_gate():
             trigger_level=155.0,
             target_level=215.0,  # R:R ~ 2.5
             stop_loss=115.0,
+            created_at=(datetime.now(_ist) - timedelta(minutes=11)).strftime(
+                "%Y-%m-%d %H:%M:%S IST"
+            ),
             option_type="CE",
             strike=23050,
             contract_symbol="NIFTY23050CE",
@@ -2440,8 +2452,8 @@ def test_index_directional_supremacy_gate():
         assert len(engine._alerts) == 1
         assert engine._alerts[0].direction == "BULLISH"
 
-        # BEARISH PE alert fires shortly after (confidence=72, R:R ~ 1.8 → score ~ 130)
-        # Lower score — should be suppressed
+        # BEARISH PE alert fires shortly after (confidence=72, R:R ~ 1.64 → score ~ 118)
+        # Lower score — should be suppressed by directional supremacy gate
         nifty_pe_weak = AutoAlert(
             alert_id="idx-sup-pe-weak",
             alert_type="GAMMA_BLAST",
@@ -2453,8 +2465,8 @@ def test_index_directional_supremacy_gate():
             summary="PUT VWAP failure, breakdown ignited",
             ltp=65.6,
             trigger_level=69.4,
-            target_level=38.0,  # R:R ~ 1.8
-            stop_loss=84.0,
+            target_level=98.0,  # R:R = (98-69.4)/(69.4-52) = 1.64
+            stop_loss=52.0,
             option_type="PE",
             strike=23000,
             contract_symbol="NIFTY23000PE",

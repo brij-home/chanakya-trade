@@ -213,6 +213,12 @@ class SectorHeatmapRequest(BaseModel):
     exchange: str = "NSE"
 
 
+class DashboardSnapshotRequest(InstrumentBaseRequest):
+    symbol: str = "NIFTY"
+    exchange: str = "NSE"
+    timeframe: Optional[str] = "15m"
+
+
 class PortfolioHealthRequest(BaseModel):
     portfolio: Optional[dict] = None
 

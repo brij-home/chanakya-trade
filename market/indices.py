@@ -251,23 +251,29 @@ def get_market_snapshot(extended: bool = True) -> MarketSnapshot:
     )
 
 
-NIFTY_TOP_HEAVYWEIGHTS = [
-    "HDFCBANK",
-    "RELIANCE",
-    "ICICIBANK",
-    "INFY",
-    "TCS",
-    "BHARTIARTL",
-    "LT",
-]
+try:
+    from engine.market_internals import BANKNIFTY_WEIGHTS, NIFTY_WEIGHTS
 
-BANKNIFTY_TOP_HEAVYWEIGHTS = [
-    "HDFCBANK",
-    "ICICIBANK",
-    "SBIN",
-    "AXISBANK",
-    "KOTAKBANK",
-]
+    NIFTY_TOP_HEAVYWEIGHTS = list(NIFTY_WEIGHTS.keys())[:7]
+    BANKNIFTY_TOP_HEAVYWEIGHTS = list(BANKNIFTY_WEIGHTS.keys())[:5]
+except Exception:
+    NIFTY_TOP_HEAVYWEIGHTS = [
+        "HDFCBANK",
+        "RELIANCE",
+        "ICICIBANK",
+        "INFY",
+        "TCS",
+        "BHARTIARTL",
+        "LT",
+    ]
+
+    BANKNIFTY_TOP_HEAVYWEIGHTS = [
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "AXISBANK",
+        "KOTAKBANK",
+    ]
 
 
 def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
@@ -313,20 +319,24 @@ def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     spread_pct = round(max_gainer[1] - max_loser[1], 2)
 
     # Bank Nifty: HDFCBANK (~29%) and ICICIBANK (~23%) together control >52% of index.
-    # If they are pulling in opposite directions with magnitude >= 0.40%, index is in gridlock chop.
+    # If they are pulling in opposite directions with spread >= 0.50% or opposing signs, index is in gridlock chop.
     hdfc_chg = changes.get("HDFCBANK", 0.0)
     icici_chg = changes.get("ICICIBANK", 0.0)
     bank_locomotive_split = is_bank_index and (
-        (hdfc_chg >= 0.40 and icici_chg <= -0.40) or (hdfc_chg <= -0.40 and icici_chg >= 0.40)
+        (hdfc_chg * icici_chg < 0 and abs(hdfc_chg - icici_chg) >= 0.50)
+        or (hdfc_chg >= 0.35 and icici_chg <= -0.35)
+        or (hdfc_chg <= -0.35 and icici_chg >= 0.35)
     )
 
     # Polarized Tug-of-War threshold:
-    # Spread between top gainer and top loser >= 3.0% with opposing signs (one >= +1.0%, other <= -1.0%)
-    # OR dispersion standard deviation >= 1.5% with mixed signs.
-    has_opposing_momentum = max_gainer[1] >= 1.0 and max_loser[1] <= -1.0
+    # Spread between top gainer and top loser >= 2.5% with opposing signs (one >= +0.8%, other <= -0.8%)
+    # OR dispersion standard deviation >= 1.2% with mixed signs.
+    has_opposing_momentum = (max_gainer[1] >= 0.80 and max_loser[1] <= -0.80) or (
+        max_gainer[1] >= 1.0 and max_loser[1] <= -0.5
+    )
     is_polarized = bool(
         bank_locomotive_split
-        or (has_opposing_momentum and (spread_pct >= 3.0 or dispersion_std >= 1.5))
+        or (has_opposing_momentum and (spread_pct >= 2.5 or dispersion_std >= 1.2))
     )
 
     if is_polarized:
@@ -889,6 +899,12 @@ def get_premarket_battle_plan(
         cam_l3 = pdc - (cam_range * 1.1 / 4.0)
         cam_l4 = pdc - (cam_range * 1.1 / 2.0)
 
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(clean_name, spot=ltp) or 50.0
+        bull_stk = int(round(cam_h4 / step) * step)
+        bear_stk = int(round(cam_l4 / step) * step)
+
         results[clean_name] = {
             "symbol": clean_name,
             "instrument": inst,
@@ -918,10 +934,10 @@ def get_premarket_battle_plan(
                 "trend_short": f"Buy PE on 5m close below L4 (₹{cam_l4:,.1f})",
                 "reversal_long": f"Buy CE on bullish rejection wick at L3/PDL (₹{cam_l3:,.1f} - ₹{pdl:,.1f}) with tight SL",
                 "reversal_short": f"Buy PE on bearish rejection wick at H3/PDH (₹{cam_h3:,.1f} - ₹{pdh:,.1f}) with tight SL",
-                "bull_strike": int(round(cam_h4 / 50.0) * 50),
-                "bear_strike": int(round(cam_l4 / 50.0) * 50),
-                "bull_contract": f"{clean_name} {int(round(cam_h4 / 50.0) * 50)} CE",
-                "bear_contract": f"{clean_name} {int(round(cam_l4 / 50.0) * 50)} PE",
+                "bull_strike": bull_stk,
+                "bear_strike": bear_stk,
+                "bull_contract": f"{clean_name} {bull_stk} CE",
+                "bear_contract": f"{clean_name} {bear_stk} PE",
                 "h4_trigger": round(cam_h4, 1),
                 "l4_trigger": round(cam_l4, 1),
                 "action_guidance": "Wait for spot to reach key boundary. Never chase in the middle between L3 and H3.",
@@ -964,8 +980,11 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
         h5 = bp.get("h5_target") or round(h4 + (h4 - spot), 1)
         l5 = bp.get("l5_target") or round(l4 - (spot - l4), 1)
 
-        bull_contract = bp.get("bull_contract") or f"{sym} {int(round(h4 / 50.0) * 50)} CE"
-        bear_contract = bp.get("bear_contract") or f"{sym} {int(round(l4 / 50.0) * 50)} PE"
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(sym, spot=spot) or 50.0
+        bull_contract = bp.get("bull_contract") or f"{sym} {int(round(h4 / step) * step)} CE"
+        bear_contract = bp.get("bear_contract") or f"{sym} {int(round(l4 / step) * step)} PE"
 
         regime_badge = (
             "🟢 Narrow (Trend Day Expected)"
@@ -973,16 +992,16 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
             else ("🔴 Wide (Chop/Range Expected)" if "WIDE" in regime else "⚪ Average")
         )
 
-        lines.append(f"<b>📊 {sym}</b> (Spot Anchor: ₹{spot:,.1f} | CPR: {regime_badge})")
-        lines.append(f"  🟢 <b>BULL TRIGGER:</b> Above ₹{h4:,.1f} (H4 Breakout)")
+        lines.append(f"<b>📊 {sym}</b> (Spot: <code>₹{spot:,.1f}</code> · CPR: {regime_badge})")
         lines.append(
-            f"     👉 <b>Strike:</b> <code>{bull_contract}</code> (T1: ₹{h5:,.1f} | SL: ₹{spot:,.1f})"
+            f"  🟢 <b>BULL:</b> Above <code>₹{h4:,.1f}</code> → <code>{bull_contract}</code> (T1: <code>₹{h5:,.1f}</code> | SL: <code>₹{spot:,.1f}</code>)"
         )
-        lines.append(f"  🔴 <b>BEAR TRIGGER:</b> Below ₹{l4:,.1f} (L4 Breakdown)")
         lines.append(
-            f"     👉 <b>Strike:</b> <code>{bear_contract}</code> (T1: ₹{l5:,.1f} | SL: ₹{spot:,.1f})"
+            f"  🔴 <b>BEAR:</b> Below <code>₹{l4:,.1f}</code> → <code>{bear_contract}</code> (T1: <code>₹{l5:,.1f}</code> | SL: <code>₹{spot:,.1f}</code>)"
         )
-        lines.append(f"  ⚠️ <b>Chop Trap Zone:</b> ₹{l4:,.1f} – ₹{h4:,.1f} (Do not chase)")
+        lines.append(
+            f"  <blockquote expandable>⚠️ <b>Chop Trap Zone:</b> <code>₹{l4:,.1f}</code> – <code>₹{h4:,.1f}</code> (Do not chase inside buffer)</blockquote>"
+        )
         lines.append("")
 
     lines.append("──────────────────────────────")
@@ -1113,18 +1132,16 @@ def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
         p_t1 = data.get("bear_t1", 0.0)
 
         lines.append(
-            f"<b>📊 {sym}</b> (Spot: ₹{spot:,.1f} | 3m Range: ₹{orl:,.1f} – ₹{orh:,.1f} [{rng:,.0f} pts])"
-        )
-        lines.append(f"  🟢 <b>BULL TRIGGER:</b> Above ₹{orh:,.1f} (ORH Breach)")
-        lines.append(
-            f"     👉 <b>Strike:</b> <code>{b_c}</code> (T1: ₹{b_t1:,.1f} | SL: ₹{mid:,.1f})"
-        )
-        lines.append(f"  🔴 <b>BEAR TRIGGER:</b> Below ₹{orl:,.1f} (ORL Breakdown)")
-        lines.append(
-            f"     👉 <b>Strike:</b> <code>{p_c}</code> (T1: ₹{p_t1:,.1f} | SL: ₹{mid:,.1f})"
+            f"<b>📊 {sym}</b> (Spot: <code>₹{spot:,.1f}</code> · 3m Bracket: <code>{rng:,.0f} pts</code>)"
         )
         lines.append(
-            f"  ⚠️ <b>Chop Zone:</b> Inside ₹{orl:,.1f} – ₹{orh:,.1f} (Do not chase inside bracket)"
+            f"  🟢 <b>ORH BREACH:</b> Above <code>₹{orh:,.1f}</code> → <code>{b_c}</code> (T1: <code>₹{b_t1:,.1f}</code> | SL: <code>₹{mid:,.1f}</code>)"
+        )
+        lines.append(
+            f"  🔴 <b>ORL BREAKDOWN:</b> Below <code>₹{orl:,.1f}</code> → <code>{p_c}</code> (T1: <code>₹{p_t1:,.1f}</code> | SL: <code>₹{mid:,.1f}</code>)"
+        )
+        lines.append(
+            f"  <blockquote expandable>⚠️ <b>Chop Bracket:</b> <code>₹{orl:,.1f}</code> – <code>₹{orh:,.1f}</code> (Strict No-Chase inside initial range)</blockquote>"
         )
         lines.append("")
 

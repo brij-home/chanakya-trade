@@ -18,6 +18,8 @@
   - `REAL/LIVE` — Verified live broker WebSocket or REST feed during market hours.
   - `OFF-MARKET/EOD` — Post-market settlement / EOD candle.
   - `TEST` — Explicit synthetic test data.
+  - `PARTIAL_DATA` — Multi-chunk history where one or more chunks failed (must skip EOD/warehouse persistence).
+  - `RESEARCH_ONLY_EXPIRED_FNO` — Offline expired-contract replay data (missing Greeks stay `None`).
   - `DEGRADED` / `UNAVAILABLE` — Stale or disconnected feed.
 - **Exchange & Instrument Authority**: Instrument specifications (lot size, tick size, token, segment) must resolve from canonical exchange masters, never from client assumptions.
 
@@ -92,9 +94,9 @@
 ## 9. Rapid Iteration & Fast Validation Protocol
 
 - **Skip Full Pre-Commit Gates During Development**:
-  - Never execute `scripts/validate_all.py` (which runs 21 Vitest frontend workers, linters, and full multi-worker pytest matrices) during rapid interactive development or single-bug fixes. It wastes minutes and locks the terminal.
-  - **Always execute targeted pytest only**: `python -m pytest tests/<relevant_test>.py -k "<test_filter>" -q`.
-  - Apply the fix, run the targeted test (must take $<3$s), restart the background daemon via `scripts\service.ps1 -Action restart`, and confirm resolution directly.
+  - Never execute `scripts/validate_all.py` (which spins up 31 Vitest workers, linters, and full multi-worker pytest matrices) during rapid interactive development or single-bug fixes. It wastes minutes and locks the terminal.
+  - **Always execute targeted pytest / vitest checks on Windows PowerShell** (using `;` between commands and `npm.cmd`): `python -m pytest tests/<relevant_test>.py -q` and `npm.cmd --prefix macos-app test -- --run`.
+  - Apply the fix, run targeted verification, restart the background daemon via `scripts\service.ps1 -Action restart`, and confirm resolution directly.
   - Reserve `validate_all.py` exclusively for when the user explicitly asks for full pre-commit/pre-push validation or before production tagging.
 
 ---
@@ -149,7 +151,7 @@
 
 ## 16. Temporal Anchoring & Knowledge Currency Standard
 
-- **Explicit Temporal Anchoring**: All analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / system prompt anchor, e.g. `2026-10-17`).
-- **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
+- **Explicit Temporal Anchoring**: All analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / current session, e.g. `2026-11-25`).
+- **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, Dec 7 CAS & derivative close split, Sensex Jan 25, 2027 `20→25` lot transition, Apr 2026 STT rates, FutEq MWPL). Always resolve them from `market.rule_schedule`, `market.instruments`, `market.symbol_master`, `engine.charges`, or verify via live web search (`search_web`).
 - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
 

@@ -9,7 +9,7 @@ const BROKERS = {
     desc: 'Best options chain data — free API',
     portalUrl: 'https://myapi.fyers.in',
     portalLabel: 'myapi.fyers.in',
-    redirectUrl: 'http://127.0.0.1:8765/fyers/callback',
+    callbackPath: '/fyers/callback',
     keys: [
       { env: 'FYERS_APP_ID', label: 'App ID', placeholder: 'XXXX-100', secret: false },
       { env: 'FYERS_SECRET_KEY', label: 'Secret Key', placeholder: 'Your secret key', secret: true },
@@ -28,7 +28,7 @@ const BROKERS = {
     desc: 'Order execution — free Personal plan',
     portalUrl: 'https://developers.kite.trade',
     portalLabel: 'developers.kite.trade',
-    redirectUrl: 'http://localhost:8765/zerodha/callback',
+    callbackPath: '/zerodha/callback',
     keys: [
       { env: 'KITE_API_KEY', label: 'API Key', placeholder: 'Your API key', secret: false },
       { env: 'KITE_API_SECRET', label: 'API Secret', placeholder: 'Your API secret', secret: true },
@@ -317,7 +317,7 @@ export default function MarketDataStep({ formData, setFormData, onNext, port }) 
                             {/* Redirect URL — copyable */}
                             <div>
                               <p className="text-muted text-[10px] font-ui mb-1">Redirect URL (copy this exactly):</p>
-                              <CopyableCode text={broker.redirectUrl} />
+                              <CopyableCode text={`${getBaseUrl(port)}/${id}/callback`} />
                             </div>
 
                             {/* API key inputs */}

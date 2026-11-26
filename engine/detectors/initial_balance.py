@@ -427,6 +427,22 @@ def detect_initial_balance_setups(
         variant=variant,
     )
 
+    actionable_plan = {
+        "entry_zone": f"₹{opt_prem:,.1f}" if contract_sym else f"₹{spot:,.1f}",
+        "invalidation_stop_loss": opt_sl if contract_sym else invalidation_sl,
+        "target_1": opt_t1 if contract_sym else target_1,
+        "target_2": round(opt_prem * 2.0, 2) if contract_sym else target_2,
+        "underlying_spot": f"₹{spot:,.1f}",
+        "spot_stop_loss": invalidation_sl,
+        "spot_target_1": target_1,
+        "spot_target_2": target_2,
+        "no_chase_boundary": no_chase,
+        "risk_reward": f"1:{rr_ratio:.1f}",
+        "strategy": strat_name,
+        "recommended_structure": calib.preferred_vehicle if calib else "NAKED_OPTION_BUY",
+        "volatility_regime": calib.volatility_regime if calib else "NORMAL_VIX",
+    }
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type=atype,
@@ -434,7 +450,11 @@ def detect_initial_balance_setups(
         symbol=clean_sym,
         exchange="BFO"
         if clean_sym in ("SENSEX", "BANKEX")
-        else ("MCX" if clean_sym in ("CRUDEOIL", "GOLD") else "NSE"),
+        else (
+            "MCX"
+            if clean_sym in ("CRUDEOIL", "GOLD")
+            else ("NFO" if (clean_sym in _INDEX_SYMBOLS or contract_sym) else "NSE")
+        ),
         direction=direction,
         headline=headline,
         summary=summary,
@@ -448,9 +468,9 @@ def detect_initial_balance_setups(
         contract_symbol=contract_sym,
         expiry_date=exp_date,
         expiry_type=classify_expiry_type(exp_date, clean_sym) if exp_date else "WEEKLY",
-        segment="OPTIONS"
-        if contract_sym
-        else ("INDEX" if clean_sym in _INDEX_SYMBOLS else "EQUITY"),
+        segment="FNO_INDEX"
+        if clean_sym in _INDEX_SYMBOLS
+        else ("FNO_STOCK" if contract_sym else "EQUITY"),
         lot_size=opt_lot,
         option_premium=opt_prem,
         underlying_spot=spot,
@@ -458,17 +478,7 @@ def detect_initial_balance_setups(
         created_at=now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=not is_test_env,
         environment="TEST" if is_test_env else "LIVE",
-        actionable_plan={
-            "entry_zone": f"₹{spot:,.1f}",
-            "invalidation_stop_loss": invalidation_sl,
-            "target_1": target_1,
-            "target_2": target_2,
-            "no_chase_boundary": no_chase,
-            "risk_reward": f"1:{rr_ratio:.1f}",
-            "strategy": strat_name,
-            "recommended_structure": calib.preferred_vehicle if calib else "NAKED_OPTION_BUY",
-            "volatility_regime": calib.volatility_regime if calib else "NORMAL_VIX",
-        },
+        actionable_plan=actionable_plan,
         metrics={
             "ib_high": ib_data.ib_high,
             "ib_low": ib_data.ib_low,

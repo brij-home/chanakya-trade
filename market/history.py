@@ -54,9 +54,9 @@ import threading
 from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-MAX_MEMORY_DFS = (
-    8192  # Optimized for 24 GB RAM hardware (~8,000 DataFrames across all symbols & timeframes)
-)
+MAX_MEMORY_DFS = max(
+    64, int(os.environ.get("CHANAKYA_MAX_MEMORY_DFS", "512"))
+)  # Bounded working set for laptop RAM stability without unbounded DataFrame heap retention
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
 _DF_TTL_SECONDS = 3600.0  # 1 hour in-memory cache for daily EOD history (immutable past bars)
 _INTRADAY_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for intraday (5m, 15m) bars
@@ -149,10 +149,16 @@ def get_ohlcv(
         .replace("BFO:", "")
         .strip()
     )
+    try:
+        from brokers.session import get_data_broker_key
+
+        _brk_key = get_data_broker_key() or "default"
+    except Exception:
+        _brk_key = "default"
     effective_to = as_of or to_date
     cutoff_key = effective_to.strftime("%Y%m%d%H%M%S") if effective_to else "latest"
-    cache_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_{days}_{cutoff_key}_{int(include_live_candle)}"
-    norm_intraday_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_intraday_norm"
+    cache_key = f"{_brk_key}_{clean_sym}_{exchange.upper()}_{kite_interval}_{days}_{cutoff_key}_{int(include_live_candle)}"
+    norm_intraday_key = f"{_brk_key}_{clean_sym}_{exchange.upper()}_{kite_interval}_intraday_norm"
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
@@ -233,9 +239,21 @@ def get_ohlcv(
                 min_expected_bars = int(days * 0.6) if days > 100 else min(days, 15)
                 from market.calendar import get_latest_trading_day
 
+                # Guard against corrupted future-dated rows masquerading as fresh EOD data
+                from config.constants import IST_ZONE as _IST_Z
+
+                today_ist_date = datetime.now(_IST_Z).date()
+                if not stored_df.empty and hasattr(stored_df.index, "date"):
+                    valid_idx_mask = stored_df.index.date <= today_ist_date
+                    if not valid_idx_mask.all():
+                        stored_df = stored_df.loc[valid_idx_mask]
+                        sliced = stored_df.iloc[-days:] if len(stored_df) > days else stored_df
+
                 latest_completed_session = get_latest_trading_day(exchange=exchange)
                 stored_last_date = (
-                    stored_df.index[-1].date() if hasattr(stored_df.index[-1], "date") else None
+                    stored_df.index[-1].date()
+                    if not stored_df.empty and hasattr(stored_df.index[-1], "date")
+                    else None
                 )
                 is_eod_fresh = (
                     stored_last_date is not None and stored_last_date >= latest_completed_session
@@ -341,20 +359,31 @@ def get_ohlcv(
                     try:
                         from market.calendar import is_market_open, get_latest_trading_day
 
-                        latest_bar = wh_df.index[-1]
-                        if hasattr(latest_bar, "to_pydatetime"):
-                            latest_bar = latest_bar.to_pydatetime()
-                        latest_bar_date = latest_bar.date()
-                        latest_completed_session = get_latest_trading_day(exchange=exchange)
+                        from config.constants import IST_ZONE as _IST_Z
+
+                        today_ist_date = datetime.now(_IST_Z).date()
+                        if hasattr(wh_df.index, "date"):
+                            wh_valid_mask = wh_df.index.date <= today_ist_date
+                            if not wh_valid_mask.all():
+                                wh_df = wh_df.loc[wh_valid_mask]
+
+                        if wh_df.empty:
+                            is_stale = True
+                        if not wh_df.empty:
+                            latest_bar = wh_df.index[-1]
+                            if hasattr(latest_bar, "to_pydatetime"):
+                                latest_bar = latest_bar.to_pydatetime()
+                            latest_bar_date = latest_bar.date()
+                            latest_completed_session = get_latest_trading_day(exchange=exchange)
 
                         # If cached warehouse bars don't reach the latest completed trading session date,
                         # the warehouse is stale and must refresh from live broker or feed.
-                        if (
+                        if not wh_df.empty and (
                             latest_bar_date < latest_completed_session
                             and os.environ.get("CHANAKYA_TESTING") != "1"
                         ):
                             is_stale = True
-                        elif (
+                        elif not wh_df.empty and (
                             kite_interval != "day"
                             and is_market_open(exchange)
                             and os.environ.get("CHANAKYA_TESTING") != "1"
@@ -412,6 +441,7 @@ def get_ohlcv(
 
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
     raw = None
+    is_partial_provider_data = False
     if kite_interval == "day":
         try:
             from engine.analysis_cache import cache_get
@@ -591,9 +621,7 @@ def get_ohlcv(
     # Tier 3: explicit data-provider API → yfinance → disk cache with in-flight coalescing.
     # CRITICAL: Indian equity brokers (Fyers, Zerodha, etc.) do not host crypto assets.
     if not raw and not is_crypto:
-        flight_key = (
-            f"{clean_sym}:{exchange}:{kite_interval}:{orig_from_date}:{to_date}:{days}:{as_of}"
-        )
+        flight_key = f"{_brk_key}:{clean_sym}:{exchange}:{kite_interval}:{orig_from_date}:{effective_to}:{days}:{as_of}"
         is_leader = False
         evt: Optional[threading.Event] = None
         box: Optional[list[Any]] = None
@@ -631,6 +659,9 @@ def get_ohlcv(
                         )
                         if raw:
                             provider_name = pri_key
+                            is_partial_provider_data = bool(
+                                getattr(broker, "_last_history_partial", False)
+                            )
                     except Exception as e_pri_hist:
                         logger.debug(
                             f"[market.history] Primary broker ({pri_key}) history failed: {e_pri_hist}"
@@ -654,6 +685,9 @@ def get_ohlcv(
                                 if sec_raw:
                                     raw = sec_raw
                                     provider_name = sec_key
+                                    is_partial_provider_data = bool(
+                                        getattr(sec_broker, "_last_history_partial", False)
+                                    )
                                     logger.info(
                                         f"[market.history] 🔄 Secondary broker failover ({sec_key}) succeeded for {symbol} ({len(raw)} bars)"
                                     )
@@ -676,7 +710,12 @@ def get_ohlcv(
                     with _IN_FLIGHT_HISTORY_LOCK:
                         _IN_FLIGHT_HISTORY_EVENTS.pop(flight_key, None)
 
-    if raw and not is_crypto and provider_name not in ("disk_cache", "cache"):
+    if (
+        raw
+        and not is_crypto
+        and not is_partial_provider_data
+        and provider_name not in ("disk_cache", "cache")
+    ):
         try:
             from engine.historical_warehouse import historical_warehouse
 
@@ -781,21 +820,39 @@ def get_ohlcv(
         return empty_df
 
     df = pd.DataFrame(raw)
+    if df.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    if "date" not in df.columns:
+        if "Date" in df.columns:
+            df = df.rename(columns={"Date": "date"})
+        elif "timestamp" in df.columns:
+            df = df.rename(columns={"timestamp": "date"})
+        elif "datetime" in df.columns:
+            df = df.rename(columns={"datetime": "date"})
+        elif isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={df.index.name or "index": "date"})
     if exchange.upper() in ("NSE", "BSE", "NFO", "MCX", "CDS"):
-        raw_dt = pd.to_datetime(df["date"])
-        if raw_dt.dt.tz is not None:
-            dt_col = raw_dt.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-        else:
-            candidate_col = (
-                pd.to_datetime(df["date"], utc=True)
+        # Distinguish numeric Unix epochs (which are UTC) from Indian exchange date/datetime strings
+        is_numeric_epoch = pd.api.types.is_numeric_dtype(df["date"])
+        if is_numeric_epoch:
+            dt_col = (
+                pd.to_datetime(df["date"], unit="s", utc=True)
                 .dt.tz_convert("Asia/Kolkata")
                 .dt.tz_localize(None)
             )
-            now_local = datetime.now()
-            if not candidate_col.empty and candidate_col.max() > (now_local + timedelta(hours=2)):
-                dt_col = raw_dt
+        else:
+            sample_vals = df["date"].astype(str).head(5).tolist()
+            looks_iso = any(len(v) >= 10 and v[4:5] == "-" and v[7:8] == "-" for v in sample_vals)
+            raw_dt = (
+                pd.to_datetime(df["date"], format="mixed")
+                if looks_iso
+                else pd.to_datetime(df["date"], format="mixed", dayfirst=True)
+            )
+            if raw_dt.dt.tz is not None:
+                dt_col = raw_dt.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
             else:
-                dt_col = candidate_col
+                # Naive exchange date/time strings from Indian brokers represent IST wall-clock
+                dt_col = raw_dt
         if kite_interval == "day":
             dt_col = dt_col.dt.normalize()
         df["date"] = dt_col
@@ -807,20 +864,40 @@ def get_ohlcv(
     df = df.dropna(subset=["open", "high", "low", "close"])
     df = df.sort_index()
 
+    # Reject corrupted future-dated bars (e.g. DD/MM vs MM/DD date inversion)
+    if not df.empty and isinstance(df.index, pd.DatetimeIndex):
+        from config.constants import IST_ZONE as _IST_Z
+
+        today_ist_ts = pd.Timestamp(datetime.now(_IST_Z).date())
+        future_mask = df.index.normalize() > today_ist_ts
+        if future_mask.any():
+            logger.warning(
+                f"[market.history] Dropping {int(future_mask.sum())} future-dated bar(s) "
+                f"(> {today_ist_ts.date()}) for {clean_sym}"
+            )
+            df = df[~future_mask]
+
     # Live/incomplete candle enrichment is opt-in and is never cached as EOD.
     if include_live_candle and not df.empty:
         df = inject_live_tick(df, symbol=symbol, exchange=exchange, interval=kite_interval)
 
     df.attrs["provenance"] = {
-        "data_source": "LIVE_ENRICHED" if include_live_candle else "HISTORICAL_EOD",
+        "data_source": (
+            "PARTIAL_DATA"
+            if is_partial_provider_data
+            else ("LIVE_ENRICHED" if include_live_candle else "HISTORICAL_EOD")
+        ),
         "provider": provider_name,
         "as_of": to_date.isoformat(),
         "snapshot_id": snapshot_id,
-        "reproducible": bool(snapshot_id) and not include_live_candle,
+        "reproducible": bool(snapshot_id)
+        and not include_live_candle
+        and not is_partial_provider_data,
+        "is_partial": is_partial_provider_data,
     }
 
-    # Save into Local SQLite EOD Store for universe-wide reuse
-    if kite_interval == "day" and not df.empty and not as_of:
+    # Save into Local SQLite EOD Store for universe-wide reuse (skip truncated PARTIAL_DATA series)
+    if kite_interval == "day" and not df.empty and not as_of and not is_partial_provider_data:
         try:
             from engine.eod_store import save_ohlcv_batch
 
@@ -829,7 +906,7 @@ def get_ohlcv(
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Save into local Parquet Warehouse (both intraday and daily) with normalized IST timestamps
-    if not df.empty and len(df) >= 5 and not as_of:
+    if not df.empty and len(df) >= 5 and not as_of and not is_partial_provider_data:
         try:
             from engine.historical_warehouse import historical_warehouse
 

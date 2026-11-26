@@ -169,9 +169,16 @@ def test_detect_initial_balance_setups_alert_generation():
     assert "IBH_SWING_FAILURE" in alert.metrics["extension_status"]
     assert alert.actionable_plan is not None
     assert alert.actionable_plan["entry_zone"] is not None
-    assert alert.actionable_plan["invalidation_stop_loss"] > 24475.0
-    assert alert.actionable_plan["target_1"] == 24450.0  # Midpoint
-    assert alert.actionable_plan["target_2"] == 24400.0  # IB Low
+    assert alert.actionable_plan["spot_stop_loss"] > 24475.0
+    assert alert.actionable_plan["spot_target_1"] == 24450.0  # Midpoint
+    assert alert.actionable_plan["spot_target_2"] == 24400.0  # IB Low
+    if alert.contract_symbol:
+        assert (
+            0
+            < alert.actionable_plan["invalidation_stop_loss"]
+            < alert.ltp
+            < alert.actionable_plan["target_1"]
+        )
     assert alert.alert_id.startswith("aa-initial-balance-sfp-nifty-")
     assert "recommended_structure" in alert.metrics
     assert "market_phase" in alert.metrics
@@ -253,8 +260,15 @@ def test_initial_balance_inside_ib_boundary_fade():
     assert alert.direction == "BEARISH"
     assert alert.option_type == "PE"
     assert "FADE" in alert.headline
-    assert alert.actionable_plan["target_1"] == 24450.0  # IB Midpoint / POC
-    assert alert.actionable_plan["invalidation_stop_loss"] > 24500.0  # Above IB High
+    assert alert.actionable_plan["spot_target_1"] == 24450.0  # IB Midpoint / POC
+    assert alert.actionable_plan["spot_stop_loss"] > 24500.0  # Above IB High
+    if alert.contract_symbol:
+        assert (
+            0
+            < alert.actionable_plan["invalidation_stop_loss"]
+            < alert.ltp
+            < alert.actionable_plan["target_1"]
+        )
 
 
 def test_initial_balance_inside_ib_boundary_bounce():
@@ -279,8 +293,15 @@ def test_initial_balance_inside_ib_boundary_bounce():
     assert alert.direction == "BULLISH"
     assert alert.option_type == "CE"
     assert "BOUNCE" in alert.headline
-    assert alert.actionable_plan["target_1"] == 24450.0  # IB Midpoint / POC
-    assert alert.actionable_plan["invalidation_stop_loss"] < 24400.0  # Below IB Low
+    assert alert.actionable_plan["spot_target_1"] == 24450.0  # IB Midpoint / POC
+    assert alert.actionable_plan["spot_stop_loss"] < 24400.0  # Below IB Low
+    if alert.contract_symbol:
+        assert (
+            0
+            < alert.actionable_plan["invalidation_stop_loss"]
+            < alert.ltp
+            < alert.actionable_plan["target_1"]
+        )
 
 
 def test_initial_balance_inside_ib_middle_chop_suppression():

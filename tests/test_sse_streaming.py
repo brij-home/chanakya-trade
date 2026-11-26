@@ -127,8 +127,14 @@ class TestSSEEventBus:
 
             assert len(received) == 1
             chunk = received[0]
-            assert chunk.startswith("data: "), f"Expected 'data: ' prefix, got: {chunk!r}"
             assert chunk.endswith("\n\n"), f"Expected '\\n\\n' suffix, got: {chunk!r}"
+            lines = chunk.rstrip("\n").split("\n")
+            assert lines[0].startswith("id: ") and lines[0][4:].isdigit(), (
+                f"Expected numeric 'id: ' header, got: {chunk!r}"
+            )
+            assert any(line.startswith("data: ") for line in lines), (
+                f"Expected 'data: ' line, got: {chunk!r}"
+            )
 
         _run(_run_test())
 
@@ -152,8 +158,8 @@ class TestSSEEventBus:
             await asyncio.wait_for(task, timeout=2)
 
             chunk = received[0]
-            json_part = chunk[len("data: ") : -2]  # strip "data: " prefix and "\n\n" suffix
-            parsed = json.loads(json_part)
+            data_line = next(l for l in chunk.rstrip("\n").split("\n") if l.startswith("data: "))
+            parsed = json.loads(data_line[len("data: ") :])
             assert parsed == payload
 
         _run(_run_test())
@@ -501,15 +507,17 @@ class TestSSEEndpoints:
         chunks = asyncio.run(_run_test())
         assert len(chunks) == 1
         chunk = chunks[0]
-        assert chunk.startswith("data: "), f"Expected 'data: ' prefix, got: {chunk!r}"
         assert chunk.endswith("\n\n"), f"Expected '\\n\\n' suffix, got: {chunk!r}"
-        # Payload must be valid JSON
-        json_part = chunk[len("data: ") : -2]
-        parsed = json.loads(json_part)
+        lines = chunk.rstrip("\n").split("\n")
+        assert lines[0].startswith("id: ") and lines[0][4:].isdigit(), (
+            f"Expected numeric 'id: ' header, got: {chunk!r}"
+        )
+        data_line = next(l for l in lines if l.startswith("data: "))
+        parsed = json.loads(data_line[len("data: ") :])
         assert parsed["symbol"] == "NIFTY"
 
     def test_alert_event_format_is_valid_sse(self):
-        """Alert events must have 'data: {...}\\n\\n' format."""
+        """Alert events must have 'id: <seq>\\ndata: {...}\\n\\n' format."""
         from web import sse as _sse_mod
 
         async def _run_test():
@@ -538,7 +546,11 @@ class TestSSEEndpoints:
         chunks = asyncio.run(_run_test())
         assert len(chunks) == 1
         chunk = chunks[0]
-        assert chunk.startswith("data: "), f"Expected 'data: ' prefix, got: {chunk!r}"
         assert chunk.endswith("\n\n"), f"Expected '\\n\\n' suffix, got: {chunk!r}"
-        parsed = json.loads(chunk[len("data: ") : -2])
+        lines = chunk.rstrip("\n").split("\n")
+        assert lines[0].startswith("id: ") and lines[0][4:].isdigit(), (
+            f"Expected numeric 'id: ' header, got: {chunk!r}"
+        )
+        data_line = next(l for l in lines if l.startswith("data: "))
+        parsed = json.loads(data_line[len("data: ") :])
         assert parsed["symbol"] == "INFY"

@@ -915,3 +915,111 @@ def test_regime_verdict_naked_vs_hedge(monkeypatch):
     )
     assert plan_hedge is not None
     assert plan_hedge["regime_verdict"] == "HEDGE_RECOMMENDED"
+
+
+def test_bs_iv_solver_convergence():
+    """Verify bs_iv solver accurately recovers Black-Scholes implied volatility."""
+    from engine.options_backtest import bs_iv, bs_premium
+
+    spot = 61600.0
+    strike = 61600.0
+    dte = 7
+    expected_iv = 0.165  # 16.5%
+
+    # 1. CE Test
+    prem_ce = bs_premium(spot, strike, dte, expected_iv, "CE")
+    solved_iv_ce = bs_iv(prem_ce, spot, strike, dte, "CE")
+    assert solved_iv_ce is not None
+    assert abs(solved_iv_ce - expected_iv) <= 0.001, f"Expected {expected_iv}, got {solved_iv_ce}"
+
+    # 2. PE Test
+    prem_pe = bs_premium(spot, strike, dte, expected_iv, "PE")
+    solved_iv_pe = bs_iv(prem_pe, spot, strike, dte, "PE")
+    assert solved_iv_pe is not None
+    assert abs(solved_iv_pe - expected_iv) <= 0.001, f"Expected {expected_iv}, got {solved_iv_pe}"
+
+    # 3. Invalid / below intrinsic test
+    assert (
+        bs_iv(5.0, 61600.0, 61400.0, dte, "CE") is None
+    )  # Intrinsic is 200, price 5 is impossible
+
+
+def test_compute_options_iv_skew_honest_state():
+    """Verify compute_options_iv_skew solves IV from LTP and returns UNAVAILABLE when missing."""
+    from market.options import compute_options_iv_skew, OptionsContract
+    from engine.options_backtest import bs_premium
+
+    from datetime import datetime, timedelta
+    from config.constants import IST
+
+    spot = 61600.0
+    exp_7d = (datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d")
+    # Chain with valid LTPs but zero broker IV
+    c_ltp = bs_premium(spot, 61600.0, 7, 0.18, "CE")  # 18% Call IV
+    p_ltp = bs_premium(spot, 61600.0, 7, 0.15, "PE")  # 15% Put IV
+    chain_with_prices = [
+        OptionsContract(
+            symbol="NSE:BANKNIFTY26DEC61600CE",
+            underlying="BANKNIFTY",
+            expiry=exp_7d,
+            strike=61600.0,
+            option_type="CE",
+            last_price=c_ltp,
+            iv=0.0,  # broker sent 0.0
+            oi=100000,
+            oi_change=1000,
+            volume=50000,
+        ),
+        OptionsContract(
+            symbol="NSE:BANKNIFTY26DEC61600PE",
+            underlying="BANKNIFTY",
+            expiry=exp_7d,
+            strike=61600.0,
+            option_type="PE",
+            last_price=p_ltp,
+            iv=0.0,  # broker sent 0.0
+            oi=100000,
+            oi_change=1000,
+            volume=50000,
+        ),
+    ]
+
+    res = compute_options_iv_skew(chain_with_prices, spot, "BANKNIFTY")
+    assert res["status"] == "ACTIVE"
+    # Should solve ~18.0% and ~15.0%, skew ~ +3.0% (Call Squeeze)
+    assert abs(res["atm_call_iv"] - 18.0) <= 0.5
+    assert abs(res["atm_put_iv"] - 15.0) <= 0.5
+    assert res["atm_skew"] > 1.8
+    assert res["regime"] == "INSTITUTIONAL_CALL_SQUEEZE"
+
+    # Chain with zero prices and zero IV
+    chain_dead = [
+        OptionsContract(
+            symbol="NSE:BANKNIFTY26NOV61600CE",
+            underlying="BANKNIFTY",
+            expiry="2026-11-23",
+            strike=61600.0,
+            option_type="CE",
+            last_price=0.0,
+            iv=0.0,
+            oi=0,
+            oi_change=0,
+            volume=0,
+        ),
+        OptionsContract(
+            symbol="NSE:BANKNIFTY26NOV61600PE",
+            underlying="BANKNIFTY",
+            expiry="2026-11-23",
+            strike=61600.0,
+            option_type="PE",
+            last_price=0.0,
+            iv=0.0,
+            oi=0,
+            oi_change=0,
+            volume=0,
+        ),
+    ]
+    res_dead = compute_options_iv_skew(chain_dead, spot, "BANKNIFTY")
+    assert res_dead["status"] == "UNAVAILABLE"
+    assert res_dead["regime"] == "UNAVAILABLE"
+    assert res_dead["atm_skew"] is None

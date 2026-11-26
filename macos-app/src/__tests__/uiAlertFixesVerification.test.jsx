@@ -385,5 +385,92 @@ describe('UI Alert Fixes - Holistic Verification', () => {
       expect(screen.getByText(/Institutional Trader Action Directive/i)).toBeInTheDocument()
       expect(screen.getByText(/High-torque breakout detected on NIFTY 23600 CE/i)).toBeInTheDocument()
     })
+
+    it('enforces Invariant 14.1 Scale Separation: clamps spot-contaminated targets to option premium space', () => {
+      const contaminatedAlert = {
+        alert_id: 'aa-stage-1-to-2-expansion-radico-pull-20261116',
+        alert_type: 'STAGE_1_TO_2_EXPANSION',
+        symbol: 'RADICO',
+        headline: '🎯 RADICO [Weinstein Stage 1→2 Markup Expansion] 🎯 PULLBACK RETEST (Conviction 87/100)',
+        summary: 'RADICO at high-conviction inflection. Watch for overhead resistance near target ₹4,977.5.',
+        underlying_spot: 4663.0,
+        ltp: 48.5,
+        entry_price: 50.1,
+        stop_loss: 39.8,
+        target_1: 4977.5,
+        target_2: 7441.2,
+        target_3: 19412.16,
+        strike: 4700,
+        option_type: 'CE',
+        contract_symbol: 'NSE:RADICO26NOV4700CE',
+        segment: 'NFO',
+        time_horizon: 'SWING_MID',
+        actionable_plan: {
+          recommended_entry: 50.1,
+          invalidation_stop: 39.8,
+          target_1: '₹4,977.5',
+          target_2: '₹7,441.2',
+          target_3: '₹19,412.16',
+          limit_price: 50.1
+        }
+      }
+
+      const life = resolveAlertLifecycle(contaminatedAlert)
+      expect(life.isDerivative).toBe(true)
+
+      const levels = computeExecutionLevels(contaminatedAlert)
+      // T1, T2, T3 MUST be clamped to option scale, NEVER spot 4977.5
+      expect(levels.t1).toBeLessThanOrEqual(50.1 * 4.0)
+      expect(levels.t1).toBeCloseTo(70.7, 0)
+      expect(levels.t2).toBeLessThanOrEqual(50.1 * 6.0)
+      expect(levels.t3).toBeLessThanOrEqual(50.1 * 8.0)
+
+      // R:R MUST NOT be 478.4R
+      const risk = Math.abs(50.1 - 39.8)
+      const calculatedRR = (levels.t1 - 50.1) / risk
+      expect(calculatedRR).toBeCloseTo(2.0, 1)
+      expect(calculatedRR).toBeLessThan(5.0)
+    })
+
+    it('renders scratch directive exit styling when alert has VELOCITY_STAGNATION_SCRATCH', () => {
+      const scratchAlert = {
+        alert_id: 'aa-options-momentum-midcpnifty-ce-14350-20261117',
+        alert_type: 'INDEX_OPTIONS_MOMENTUM',
+        symbol: 'MIDCPNIFTY',
+        headline: '[VELOCITY STAGNATION SCRATCH] MIDCPNIFTY: Midday Stagnation (45m)',
+        summary: 'Midday momentum dryup. DECISION: VELOCITY_STAGNATION_SCRATCH. Scratch trade near breakeven.',
+        underlying_spot: 14350.0,
+        ltp: 42.0,
+        entry_price: 45.0,
+        stop_loss: 36.0,
+        target_1: 63.0,
+        target_2: 76.5,
+        target_3: 90.0,
+        strike: 14350,
+        option_type: 'CE',
+        contract_symbol: 'NSE:MIDCPNIFTY26NOV14350CE',
+        trailing_decision: 'VELOCITY_STAGNATION_SCRATCH',
+        stage: 'IN_FLIGHT_WARNING'
+      }
+
+      const life = resolveAlertLifecycle(scratchAlert)
+      expect(life.isScratchDirective).toBe(true)
+
+      render(
+        <LiveSpotsProvider value={{}}>
+          <TradeExecutionMatrix
+            alert={scratchAlert}
+            levels={life.levels}
+            lifecycle={life}
+            isDerivative={true}
+          />
+        </LiveSpotsProvider>
+      )
+
+      // Entry Trigger box must switch to Scratch Active
+      expect(screen.getByText(/Scratch Active/i)).toBeInTheDocument()
+      expect(screen.getByText(/POSITION STAGNANT — EXIT AT CMP/i)).toBeInTheDocument()
+      expect(screen.getByText(/Fresh entries are strictly suppressed/i)).toBeInTheDocument()
+    })
   })
 })

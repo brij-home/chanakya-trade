@@ -176,3 +176,35 @@ def test_detector_eligibility_call_setup_structural_sweep_in_distribution():
         "INDEX_CALL_SETUP", regime, rvol=1.1, has_structural_sweep=True, direction="BULLISH"
     )
     assert is_elig_sweep is True
+
+
+def test_fresh_vix_falls_back_to_rest_when_ws_only_is_stale(monkeypatch):
+    """If ws_only=True returns a stale quote (>30s), _fresh_live_vix must still fall back to live REST."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    import market.quotes
+    import analysis.regime_governor as governor
+
+    stale_ws = SimpleNamespace(
+        last_price=16.8,
+        provider="FYERS",
+        data_state="LIVE",
+        received_at=(datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat(),
+    )
+    fresh_rest = SimpleNamespace(
+        last_price=17.56,
+        provider="FYERS",
+        data_state="LIVE",
+        received_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    seen_calls = []
+
+    def _fake_get_quote(symbol, ws_only=False, bypass_cache=False):
+        seen_calls.append((ws_only, bypass_cache))
+        return {symbol: stale_ws if ws_only else fresh_rest}
+
+    monkeypatch.setattr(market.quotes, "get_quote", _fake_get_quote)
+    assert governor._fresh_live_vix() == 17.56
+    assert (True, False) in seen_calls
+    assert (False, True) in seen_calls

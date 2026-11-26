@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
@@ -75,12 +76,20 @@ HBCM_CONSTITUENTS: dict[str, list[dict[str, Any]]] = {
         {"symbol": "AXISBANK", "weight_pct": 10.0},
         {"symbol": "KOTAKBANK", "weight_pct": 9.0},
     ],
+    "MIDCPNIFTY": [
+        {"symbol": "PERSISTENT", "weight_pct": 3.8},
+        {"symbol": "COFORGE", "weight_pct": 3.5},
+        {"symbol": "DIXON", "weight_pct": 3.4},
+        {"symbol": "MAXHEALTH", "weight_pct": 3.9},
+        {"symbol": "FEDERALBNK", "weight_pct": 3.3},
+    ],
 }
 
 MIN_CONFLUENCE_THRESHOLD = 4  # >= 4 of 5 must agree concurrently
 # Weighted fallback: 3/5 pass if their combined weight >= this % of the index
 MIN_WEIGHTED_CONFLUENCE_PCT = 55.0
-_HBCM_CACHE: dict[str, tuple[float, HBCMResult]] = {}
+_MAX_HBCM_CACHE = 128
+_HBCM_CACHE: OrderedDict[str, tuple[float, HBCMResult]] = OrderedDict()
 _HBCM_LOCK = threading.Lock()
 _HBCM_TTL = 15.0  # Reduced 30s→15s: halves stale-data window on fast moves
 
@@ -136,6 +145,8 @@ def get_hbcm_constituents(underlying: str) -> list[dict[str, Any]]:
         return HBCM_CONSTITUENTS["SENSEX"]
     elif clean_key in ("BANKEX", "BSEBANKEX"):
         return HBCM_CONSTITUENTS["BANKEX"]
+    elif clean_key in ("MIDCPNIFTY", "NIFTYMIDSELECT", "MIDCAP", "NIFTYMIDCAPSELECT"):
+        return HBCM_CONSTITUENTS["MIDCPNIFTY"]
     return HBCM_CONSTITUENTS.get(clean, [])
 
 
@@ -372,15 +383,28 @@ def evaluate_hbcm(
 
     if dir_norm == "BULLISH":
         confluence_pass = b_count >= MIN_CONFLUENCE_THRESHOLD
+        bull_weight = sum(weights_map.get(s, 0.0) for s in bullish_symbols)
+        bull_weight_pct = (bull_weight / max(1.0, tot_weight)) * 100.0
 
-        # ── Weighted Fallback (Momentum Bypass for early fast rallies) ─────────
-        # Symmetric to the BEARISH weighted fallback below.
-        # 2+ bullish heavyweights that cover >= 55% of index weight = institutional rally.
+        # ── Weighted Confluence (Market-Cap Institutional Alignment) ─────────
+        # 1. Standard unweighted pass: >= 4/5 heavyweights bullish
+        # 2. Weighted institutional pass: >= 3/5 heavyweights bullish AND combined weight >= 55% AND opposing <= 1
+        # 3. Momentum fallback pass (allow_weighted_fallback): >= 2/5 heavyweights bullish AND combined weight >= 55% AND opposing <= 2
         _bullish_weighted_pass = False
-        if not confluence_pass and allow_weighted_fallback and b_count >= 2:
-            bull_weight = sum(weights_map.get(s, 0.0) for s in bullish_symbols)
-            bull_weight_pct = (bull_weight / max(1.0, tot_weight)) * 100.0
-            if bull_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:
+        if not confluence_pass:
+            if b_count >= 3 and bull_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT and bear_count <= 1:
+                _bullish_weighted_pass = True
+                logger.info(
+                    f"[HBCM] BULLISH weighted institutional confluence PASS for {clean_und}: "
+                    f"{b_count}/5 heavyweights ({', '.join(bullish_symbols)}) cover "
+                    f"{bull_weight_pct:.1f}% >= {MIN_WEIGHTED_CONFLUENCE_PCT}% weight threshold."
+                )
+            elif (
+                allow_weighted_fallback
+                and b_count >= 2
+                and bull_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT
+                and bear_count <= 2
+            ):
                 _bullish_weighted_pass = True
                 logger.info(
                     f"[HBCM] BULLISH weighted-fallback PASS for {clean_und}: "
@@ -396,29 +420,39 @@ def evaluate_hbcm(
             f"✅ HBCM BULLISH CONFLUENCE PASS ({b_count}/{total_n} heavyweights above VWAP, ~{tot_weight:.1f}% weight represented). "
             f"Aligned: {', '.join(aligned)}."
             if confluence_pass
-            else f"🛑 HBCM CONFLUENCE FAILED: Only {b_count}/{total_n} heavyweights bullish above VWAP (requires >= 4/5). "
+            else f"🛑 HBCM CONFLUENCE FAILED: Only {b_count}/{total_n} heavyweights bullish above VWAP (requires >= 4/5 or >= 55% weight with 3/5). "
             f"Lagging: {', '.join(unaligned)}."
         )
         rejection_reason = (
             None
             if confluence_pass
-            else f"Heavyweight breadth unaligned: only {b_count}/{total_n} constituents ({', '.join(aligned) or 'None'}) bullish above VWAP (institutional breakout requires >= 4/5)."
+            else f"Heavyweight breadth unaligned: only {b_count}/{total_n} constituents ({', '.join(aligned) or 'None'}) bullish above VWAP (institutional breakout requires >= 4/5 or >= 55% weight with 3/5)."
         )
 
     else:
         confluence_pass = bear_count >= MIN_CONFLUENCE_THRESHOLD
+        bear_weight = sum(weights_map.get(s, 0.0) for s in bearish_symbols)
+        bear_weight_pct = (bear_weight / max(1.0, tot_weight)) * 100.0
 
-        # ── Weighted Fallback (Momentum Bypass for early fast dumps) ──────────
-        # When the caller signals explosive momentum or verified V-top AND we have >= 2 of 5
-        # bearish heavyweights, check if their combined index weight covers >= 55%
-        # of the total represented weight. This allows signals like:
-        #   HDFCBANK (27%) + ICICIBANK (23%) = 50% / 80% = 62.5% → PASS
-        # while still rejecting weak setups where only lightweight names align.
+        # ── Weighted Confluence (Market-Cap Institutional Alignment) ──────────
+        # 1. Standard unweighted pass: >= 4/5 heavyweights bearish
+        # 2. Weighted institutional pass: >= 3/5 heavyweights bearish AND combined weight >= 55% AND opposing <= 1
+        # 3. Momentum fallback pass (allow_weighted_fallback): >= 2/5 heavyweights bearish AND combined weight >= 55% AND opposing <= 2
         _weighted_fallback_pass = False
-        if not confluence_pass and allow_weighted_fallback and bear_count >= 2:
-            bear_weight = sum(weights_map.get(s, 0.0) for s in bearish_symbols)
-            bear_weight_pct = (bear_weight / max(1.0, tot_weight)) * 100.0
-            if bear_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:
+        if not confluence_pass:
+            if bear_count >= 3 and bear_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT and b_count <= 1:
+                _weighted_fallback_pass = True
+                logger.info(
+                    f"[HBCM] BEARISH weighted institutional confluence PASS for {clean_und}: "
+                    f"{bear_count}/5 heavyweights ({', '.join(bearish_symbols)}) cover "
+                    f"{bear_weight_pct:.1f}% >= {MIN_WEIGHTED_CONFLUENCE_PCT}% weight threshold."
+                )
+            elif (
+                allow_weighted_fallback
+                and bear_count >= 2
+                and bear_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT
+                and b_count <= 2
+            ):
                 _weighted_fallback_pass = True
                 logger.info(
                     f"[HBCM] BEARISH weighted-fallback PASS for {clean_und}: "
@@ -435,13 +469,13 @@ def evaluate_hbcm(
             f"✅ HBCM BEARISH CONFLUENCE PASS ({bear_count}/{total_n} heavyweights below VWAP, ~{tot_weight:.1f}% weight represented). "
             f"Aligned: {', '.join(aligned)}."
             if confluence_pass
-            else f"🛑 HBCM CONFLUENCE FAILED: Only {bear_count}/{total_n} heavyweights bearish below VWAP (requires >= 4/5). "
+            else f"🛑 HBCM CONFLUENCE FAILED: Only {bear_count}/{total_n} heavyweights bearish below VWAP (requires >= 4/5 or >= 55% weight with 3/5). "
             f"Resisting: {', '.join(unaligned)}."
         )
         rejection_reason = (
             None
             if confluence_pass
-            else f"Heavyweight breadth unaligned: only {bear_count}/{total_n} constituents ({', '.join(aligned) or 'None'}) bearish below VWAP (institutional breakdown requires >= 4/5)."
+            else f"Heavyweight breadth unaligned: only {bear_count}/{total_n} constituents ({', '.join(aligned) or 'None'}) bearish below VWAP (institutional breakdown requires >= 4/5 or >= 55% weight with 3/5)."
         )
 
     # In synthetic test environments where constituent quotes were not provided:
@@ -471,5 +505,8 @@ def evaluate_hbcm(
     if not is_testing:
         with _HBCM_LOCK:
             _HBCM_CACHE[cache_key] = (now_ts, res)
+            _HBCM_CACHE.move_to_end(cache_key)
+            while len(_HBCM_CACHE) > _MAX_HBCM_CACHE:
+                _HBCM_CACHE.popitem(last=False)
 
     return res

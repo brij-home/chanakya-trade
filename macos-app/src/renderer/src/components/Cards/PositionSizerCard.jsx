@@ -1,67 +1,105 @@
 import { useState, useEffect } from 'react'
 import { useInspectorStore } from '../../store/inspectorStore'
+import { getBaseUrl, useChatStore } from '../../store/chatStore'
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 export default function PositionSizerCard({ data }) {
   const init = data?.data ?? data ?? {}
   const openInspector = useInspectorStore((s) => s.openInspector)
+  const sidecarPort = useChatStore((s) => s.port)
   const { getTicker } = useRealtimeMarket()
 
   const [symbol, setSymbol] = useState(init.symbol || 'NIFTY')
+  const [resolvedServerLot, setResolvedServerLot] = useState(
+    init.lot_size && Number(init.lot_size) > 1 ? Number(init.lot_size) : null
+  )
   const liveTick = getTicker(symbol)
   const liveLtp = liveTick?.ltp != null && liveTick.ltp > 0 ? Number(liveTick.ltp) : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null)
 
   const initialEntry = Number(init.entry_price || init.ltp || liveLtp || 0)
   const [entryPrice, setEntryPrice] = useState(initialEntry)
-  const [stopLoss, setStopLoss] = useState(Number(init.stop_loss || (initialEntry > 0 ? initialEntry * 0.98 : 0)))
+  const [stopLoss, setStopLoss] = useState(Number(init.stop_loss || 0))
   const [capital, setCapital] = useState(Number(init.capital || 200000))
   const [riskPct, setRiskPct] = useState(Number(init.max_risk_pct || 1.5))
   const [model, setModel] = useState(init.sizing_model || 'atr_volatility')
-  const [isFno, setIsFno] = useState(Boolean(init.is_fno || ['NIFTY', 'BANKNIFTY', 'FINNIFTY'].includes(symbol)))
+  const [isFno, setIsFno] = useState(Boolean(init.is_fno || ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'BANKEX', 'MIDCPNIFTY'].includes(symbol)))
+
+  // Resolve canonical exchange lot size from backend risk/master endpoint (never hardcode stale constants)
+  useEffect(() => {
+    if (init.lot_size && Number(init.lot_size) > 1) {
+      setResolvedServerLot(Number(init.lot_size))
+      return
+    }
+    let cancelled = false
+    const cleanSym = String(symbol || '').replace(/^(NSE:|BSE:|NFO:|BFO:|MCX:)/i, '').trim().toUpperCase()
+    if (!cleanSym || !isFno) {
+      setResolvedServerLot(null)
+      return
+    }
+    fetch(`${getBaseUrl(sidecarPort)}/api/risk/size/${encodeURIComponent(cleanSym)}?is_fno=true`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload) => {
+        if (cancelled) return
+        const lot = Number(payload?.data?.lot_size || 0)
+        if (lot > 0) setResolvedServerLot(lot)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [symbol, isFno, init.lot_size, sidecarPort])
 
   useEffect(() => {
     if (entryPrice === 0 && liveLtp && liveLtp > 0) {
       setEntryPrice(liveLtp)
-      if (stopLoss === 0) {
-        setStopLoss(Math.round(liveLtp * 0.98 * 10) / 10)
-      }
     }
-  }, [liveLtp])
+  }, [liveLtp, entryPrice])
 
-  // Stop distance
-  const stopDist = Math.max(0.01, Math.abs(entryPrice - stopLoss))
+  // Stop distance requires explicit structural SL (never synthesize arbitrary percentage stops)
+  const hasValidInputs = entryPrice > 0 && stopLoss > 0 && Math.abs(entryPrice - stopLoss) > 0
+  const stopDist = hasValidInputs ? Math.abs(entryPrice - stopLoss) : 0
   const riskBudget = capital * (riskPct / 100)
 
-  // Local live calculation
-  let rawShares = Math.floor(riskBudget / stopDist)
-  if (model === 'atr_volatility') {
-    const volStop = stopDist * 1.2
-    rawShares = Math.floor(riskBudget / volStop)
-  } else if (model === 'half_kelly') {
-    const halfKellyAlloc = capital * 0.15
-    rawShares = Math.floor(halfKellyAlloc / entryPrice)
+  let rawShares = 0
+  if (hasValidInputs) {
+    rawShares = Math.floor(riskBudget / stopDist)
+    if (model === 'atr_volatility') {
+      rawShares = Math.floor(riskBudget / (stopDist * 1.2))
+    } else if (model === 'half_kelly') {
+      const winProb = Number(init.win_rate || 0)
+      const payoffRatio = Number(init.payoff_ratio || 2.0)
+      if (winProb > 0 && winProb < 1 && payoffRatio > 0) {
+        const fullKelly = winProb - (1 - winProb) / payoffRatio
+        const boundedHalfKelly = Math.max(0, Math.min(0.25, fullKelly * 0.5))
+        rawShares = Math.floor((capital * boundedHalfKelly) / entryPrice)
+      } else {
+        // Without validated win-rate telemetry, fall back conservatively to 1% risk-budget sizing
+        rawShares = Math.floor(riskBudget / stopDist)
+      }
+    }
   }
 
   // Capital ceiling (max 25%)
   const maxCap = capital * 0.25
-  const capLimitedShares = Math.floor(maxCap / entryPrice)
+  const capLimitedShares = entryPrice > 0 ? Math.floor(maxCap / entryPrice) : 0
   let calculatedShares = Math.min(rawShares, capLimitedShares)
 
-  // Lot size detection
-  let lotSize = 1
-  if (isFno || symbol === 'NIFTY') lotSize = 25
-  else if (symbol === 'BANKNIFTY') lotSize = 15
-  else if (symbol === 'FINNIFTY') lotSize = 25
+  // Canonical lot size resolution (zero 1-lot risk-override floor: 0 lots stays 0)
+  const lotSize = isFno ? (resolvedServerLot || 0) : 1
 
-  let lots = 1
-  if (lotSize > 1) {
-    lots = Math.floor(calculatedShares / lotSize)
-    if (lots === 0 && capital >= entryPrice * lotSize) lots = 1
-    calculatedShares = lots * lotSize
+  let lots = 0
+  if (isFno) {
+    if (lotSize > 0 && calculatedShares > 0) {
+      lots = Math.floor(calculatedShares / lotSize)
+      calculatedShares = lots * lotSize
+    } else {
+      lots = 0
+      calculatedShares = 0
+    }
   } else {
-    calculatedShares = Math.max(1, calculatedShares)
-    lots = 1
+    calculatedShares = hasValidInputs ? Math.max(0, calculatedShares) : 0
+    lots = calculatedShares > 0 ? 1 : 0
   }
 
   const capitalAllocated = calculatedShares * entryPrice

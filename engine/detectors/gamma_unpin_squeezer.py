@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
+from config.constants import IST
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import AutoAlert
 
@@ -36,11 +36,6 @@ if TYPE_CHECKING:
     from engine.detection_context import DetectionContext
 
 logger = logging.getLogger("engine.detectors.gamma_unpin_squeezer")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
@@ -246,6 +241,9 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                     time_horizon="0DTE_EXPIRY_AFTERNOON",
                     metrics={
                         "spot_price": spot,
+                        "vwap": vwap_ref,
+                        "signals": ["VWAP_GEX_FLIP", "GAMMA_UNPIN_EXPANSION"],
+                        "structural_location": ["GEX_ZERO_GAMMA_FLIP", "VWAP"],
                         "gex_flip_strike": gex_flip,
                         "net_gex": net_gex,
                         "gamma_regime": gamma_regime,
@@ -379,6 +377,9 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                     time_horizon="0DTE_EXPIRY_AFTERNOON",
                     metrics={
                         "spot_price": spot,
+                        "vwap": vwap_ref,
+                        "signals": ["VWAP_GEX_FLIP", "GAMMA_UNPIN_EXPANSION"],
+                        "structural_location": ["GEX_ZERO_GAMMA_FLIP", "VWAP"],
                         "gex_flip_strike": gex_flip,
                         "net_gex": net_gex,
                         "gamma_regime": gamma_regime,

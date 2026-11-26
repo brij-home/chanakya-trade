@@ -11,9 +11,11 @@ Verifies:
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 
+from config.constants import IST
 from engine.alert_scrutiny import AlertScrutinyAuditor, ScrutinyResult
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
@@ -336,6 +338,7 @@ def test_tier1_bearish_with_option_recommendation(auditor: AlertScrutinyAuditor)
         strike=13500.0,
         option_type="PE",
         option_premium=450.0,
+        created_at=f"{datetime.now(IST).strftime('%Y-%m-%d')} 11:30:00 IST",
         is_live=True,
         environment="LIVE",
     )
@@ -1075,3 +1078,34 @@ def test_macro_india_vix_shock_veto(auditor):
     assert passed is False
     assert "Volatility Shock Veto" in reason
     assert flags.get("vix_shock_veto") is True
+
+
+def test_tier1_exhaustion_radar_round_magnet_veto(auditor: AlertScrutinyAuditor):
+    """Verify that Gate 15b vetoes a trade colliding into a round strike with choked headroom (< 1.0R)."""
+    alert = AutoAlert(
+        alert_id="test-exh-round-01",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="NIFTY ORB Breakout",
+        summary="Test Nifty round strike collision",
+        ltp=24485.0,
+        trigger_level=24485.0,
+        stop_loss=24420.0,  # 65 pts risk
+        target_level=24650.0,
+        confidence=80,
+        metrics={
+            "rvol": 1.2,  # Normal RVOL (< 2.0x, so no punch-through exception)
+            "vwap": 24450.0,
+        },
+        created_at=f"{datetime.now(IST).strftime('%Y-%m-%d')} 11:30:00 IST",
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert "Institutional Exhaustion Radar Veto" in reason
+    assert flags.get("exhaustion_clean") is False
+    assert "exhaustion_radar" in alert.metrics

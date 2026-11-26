@@ -4,6 +4,7 @@ import { useMarketClock } from '../../hooks/useMarketClock'
 import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import { fuzzySearchUniverse } from '../../data/universeData'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 /**
  * HorizonSwitcher — Global Intraday vs Swing context toggle pill
@@ -40,10 +41,10 @@ export function MarketDynamicsPill() {
       } catch (_) {}
     }
     fetchDyn()
-    const interval = setInterval(fetchDyn, 10000)
+    const stopPoll = createVisibilityInterval(fetchDyn, 10000)
     return () => {
       active = false
-      clearInterval(interval)
+      stopPoll()
     }
   }, [port, sidecarError])
 

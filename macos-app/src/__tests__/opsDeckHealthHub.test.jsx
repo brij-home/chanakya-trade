@@ -65,6 +65,35 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
     })
   })
 
+  it('SystemHealthPill displays TBT 50-depth slot count and failover badge when present', async () => {
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            overall_status: 'CRITICAL',
+            incident_counts: { P0: 1, P1: 0, P2: 0, P3: 0 },
+            circuit_breaker: { state: 'OPEN', remaining_cooldown_seconds: 30 },
+            tbt: { active_total: 6, max_slots: 15 },
+            broker_failover: {
+              primary_data_broker: 'fyers',
+              execution_broker: 'fyers',
+              flattrade_standby_ready: true,
+              failover_active: true,
+              active_depth_tier: '5-DEPTH',
+            },
+          }),
+      })
+    )
+
+    render(<SystemHealthPill onOpenDrawer={vi.fn()} onOpenOpsDeck={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/BREAKER/i)).toBeInTheDocument()
+      expect(screen.getByText('FAILOVER:FT')).toBeInTheDocument()
+    })
+  })
+
   it('OpsDrawer renders circuit breaker controls and active incidents when open', async () => {
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({

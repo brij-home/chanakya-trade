@@ -17,10 +17,11 @@ Architectural Guarantees:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pandas as pd
@@ -29,7 +30,7 @@ from engine.alert_identity import canonical_alert_symbol
 from engine.ring_buffer import RollingTickBuffer
 
 logger = logging.getLogger(__name__)
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 _TIMEFRAME_SECONDS = {
     "1m": 60,
@@ -42,6 +43,37 @@ _TIMEFRAME_SECONDS = {
     "60m": 3600,
 }
 
+# Institutional Timeframe Buffer Capacities
+# Underlyings hold full session (09:15-15:30 = 375m) in 1m + bounded multi-timeframe deques.
+TIMEFRAME_CAPACITIES: dict[str, int] = {
+    "1m": 375,  # Standard full session 09:15 - 15:30 (375 minutes)
+    "3m": 125,  # 375 / 3 = 125 bars
+    "5m": 250,  # ~3.3 sessions (75 bars/day)
+    "10m": 150,  # ~4 sessions
+    "15m": 250,  # ~10 sessions
+    "30m": 150,  # ~11 sessions
+    "1h": 150,  # ~23 sessions
+    "60m": 150,  # ~23 sessions
+    "1d": 250,  # ~1 year of trading sessions
+    "day": 250,
+}
+
+_OPT_REGEX = re.compile(
+    r"(\d+(?:CE|PE)$)|(\s+(?:CE|PE)$)|(-(?:CE|PE)$)|(:(?:CE|PE)$)",
+    re.IGNORECASE,
+)
+
+
+def is_option_symbol(symbol: str) -> bool:
+    """
+    Returns True if symbol represents an option contract (e.g. NIFTY24NOV24500CE, RELIANCE 2500 CE).
+    Fast regex check to avoid overhead on streaming tick hot-paths.
+    """
+    if not symbol:
+        return False
+    s = symbol.strip().upper()
+    return bool(_OPT_REGEX.search(s))
+
 
 class LiveCandleWeaver:
     """
@@ -51,7 +83,7 @@ class LiveCandleWeaver:
 
     def __init__(self, max_bars: int = 500) -> None:
         self.max_bars = max_bars
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         # Key: (canonical_symbol, timeframe_str) -> deque of completed bars
         self._completed_bars: dict[tuple[str, str], deque[dict[str, Any]]] = {}
         # Key: (canonical_symbol, timeframe_str) -> dict of current building bar
@@ -68,12 +100,14 @@ class LiveCandleWeaver:
     ) -> None:
         """
         Process a single tick to update building bars and roll over completed bars.
+        Option contracts are pruned to only synthesize 1m, 3m, and 5m bars in RAM.
         """
         if ltp <= 0:
             return
 
         ts = float(tick_ts if tick_ts and tick_ts > 0 else time.time())
         sym = canonical_alert_symbol(symbol)
+        is_opt = is_option_symbol(sym)
 
         with self._lock:
             # Calculate delta volume if exchange provides day cumulative volume
@@ -87,6 +121,11 @@ class LiveCandleWeaver:
                 self._last_day_volume[sym] = day_volume
 
             for tf, interval_sec in _TIMEFRAME_SECONDS.items():
+                # Institutional RAM Pruning: Option contracts only weave 1m, 3m, 5m bars.
+                # Higher timeframes (10m, 15m, 30m, 1h) are skipped for option contracts.
+                if is_opt and tf not in ("1m", "3m", "5m"):
+                    continue
+
                 key = (sym, tf)
                 bucket_start = int(ts // interval_sec) * interval_sec
                 active = self._active_bars.get(key)
@@ -95,7 +134,8 @@ class LiveCandleWeaver:
                     # Seal previous active bar if it exists
                     if active is not None:
                         if key not in self._completed_bars:
-                            self._completed_bars[key] = deque(maxlen=self.max_bars)
+                            cap = TIMEFRAME_CAPACITIES.get(tf, self.max_bars)
+                            self._completed_bars[key] = deque(maxlen=cap)
                         self._completed_bars[key].append(
                             {
                                 "timestamp": active["timestamp"],
@@ -142,9 +182,12 @@ class LiveCandleWeaver:
         timeframe: str = "1m",
         limit: int = 100,
         include_active: bool = True,
+        fallback_to_warehouse: bool = False,
+        min_bars: int = 0,
     ) -> list[dict[str, Any]]:
         """
         Returns chronological list of OHLCV bars.
+        Optionally falls back to HistoricalWarehouse on cache miss or insufficient bars.
         """
         sym = canonical_alert_symbol(symbol)
         key = (sym, timeframe.lower())
@@ -167,6 +210,32 @@ class LiveCandleWeaver:
                     }
                 )
 
+        if fallback_to_warehouse and (not candles or (min_bars > 0 and len(candles) < min_bars)):
+            try:
+                from engine.historical_warehouse import historical_warehouse
+
+                wh_df = historical_warehouse.load_bars(sym, interval=timeframe)
+                if not wh_df.empty:
+                    self.seed_candles(sym, timeframe, wh_df)
+                    with self._lock:
+                        completed = list(self._completed_bars.get(key, []))
+                        active = self._active_bars.get(key)
+                        candles = list(completed)
+                        if include_active and active is not None:
+                            candles.append(
+                                {
+                                    "timestamp": active["timestamp"],
+                                    "open": active["open"],
+                                    "high": active["high"],
+                                    "low": active["low"],
+                                    "close": active["close"],
+                                    "volume": active["volume"],
+                                    "trades": active["trades"],
+                                }
+                            )
+            except Exception as e_wh:
+                logger.debug(f"[LiveCandleWeaver] Warehouse fallback note: {e_wh}")
+
         if limit and len(candles) > limit:
             return candles[-limit:]
         return candles
@@ -177,13 +246,22 @@ class LiveCandleWeaver:
         timeframe: str = "1m",
         limit: int = 100,
         include_active: bool = True,
+        fallback_to_warehouse: bool = False,
+        min_bars: int = 0,
     ) -> pd.DataFrame:
         """
         Returns OHLCV bars formatted as a pandas DataFrame matching market.history.get_ohlcv.
         Index: timezone-naive datetime in IST.
         Columns: open, high, low, close, volume.
         """
-        candles = self.get_candles(symbol, timeframe, limit=limit, include_active=include_active)
+        candles = self.get_candles(
+            symbol,
+            timeframe=timeframe,
+            limit=limit,
+            include_active=include_active,
+            fallback_to_warehouse=fallback_to_warehouse,
+            min_bars=min_bars,
+        )
         if not candles:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
@@ -205,6 +283,48 @@ class LiveCandleWeaver:
         df.index.name = "date"
         return df
 
+    def seed_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        df: pd.DataFrame,
+    ) -> int:
+        """
+        Pre-seeds completed bars in RAM from historical DataFrame.
+        Enables instant warm-start for indicators without mid-session REST roundtrips.
+        """
+        if df is None or df.empty:
+            return 0
+        sym = canonical_alert_symbol(symbol)
+        tf = timeframe.lower()
+        key = (sym, tf)
+
+        with self._lock:
+            if key not in self._completed_bars:
+                cap = TIMEFRAME_CAPACITIES.get(tf, self.max_bars)
+                self._completed_bars[key] = deque(maxlen=cap)
+
+            count = 0
+            for idx, row in df.iterrows():
+                ts = idx if isinstance(idx, (datetime, pd.Timestamp)) else pd.to_datetime(idx)
+                if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+                    ts = ts.tz_convert(IST).tz_localize(None)
+
+                c_dict = {
+                    "timestamp": ts,
+                    "open": float(row.get("open", 0.0) or 0.0),
+                    "high": float(row.get("high", 0.0) or 0.0),
+                    "low": float(row.get("low", 0.0) or 0.0),
+                    "close": float(row.get("close", 0.0) or 0.0),
+                    "volume": float(row.get("volume", 0.0) or 0.0),
+                    "trades": int(row.get("trades", 0) or 0),
+                }
+                # Append if strictly newer than last completed bar
+                if not self._completed_bars[key] or self._completed_bars[key][-1]["timestamp"] < ts:
+                    self._completed_bars[key].append(c_dict)
+                    count += 1
+            return count
+
     def clear(self) -> None:
         """Evicts in-memory candles to release RAM."""
         with self._lock:
@@ -222,17 +342,36 @@ class MarketMatrix:
 
     def __init__(self, buffer_capacity: int = 2000) -> None:
         self.buffer_capacity = buffer_capacity
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._buffers: dict[str, RollingTickBuffer] = {}
         self._latest_ticks: dict[str, dict[str, Any]] = {}
         self.candle_weaver = LiveCandleWeaver(max_bars=500)
         self._registered_aliases: dict[str, str] = {}
         self._jit_scout_cooldown: dict[str, float] = {}
+        self._current_session_date: Optional[str] = None
 
     def _get_or_create_buffer_locked(self, sym: str) -> RollingTickBuffer:
         if sym not in self._buffers:
             self._buffers[sym] = RollingTickBuffer(capacity=self.buffer_capacity)
         return self._buffers[sym]
+
+    def _reset_daily_session_locked(self) -> None:
+        """Internal lock-held reset of daily session state."""
+        self.candle_weaver.clear()
+        for buf in self._buffers.values():
+            buf.reset_session()
+        self._jit_scout_cooldown.clear()
+        logger.info("[MarketMatrix] Daily session reset completed at session boundary.")
+
+    def reset_daily_session(self) -> None:
+        """
+        Cleanses intraday data at daily session boundary (09:15:00 IST).
+        Evicts synthesized intraday candles from LiveCandleWeaver and resets
+        session-cumulative VWAP volume sums on all active RollingTickBuffers.
+        Retains buffer latest ticks/structure so there is no gap in streaming continuity.
+        """
+        with self._lock:
+            self._reset_daily_session_locked()
 
     def on_tick(self, tick: Any) -> None:
         """
@@ -250,6 +389,11 @@ class MarketMatrix:
         day_high = 0.0
         day_low = 0.0
         prev_close = 0.0
+        bid = 0.0
+        ask = 0.0
+        bid_qty = 0
+        ask_qty = 0
+        oi = 0
 
         provider = str(
             (tick.get("provider") if isinstance(tick, dict) else getattr(tick, "provider", None))
@@ -265,6 +409,39 @@ class MarketMatrix:
             day_high = float(tick.get("high") or tick.get("h") or 0.0)
             day_low = float(tick.get("low") or tick.get("l") or 0.0)
             prev_close = float(tick.get("close") or tick.get("c") or tick.get("prev_close") or 0.0)
+            bid = float(
+                tick.get("bid")
+                or tick.get("bp")
+                or tick.get("bp1")
+                or tick.get("buy_price")
+                or tick.get("b1")
+                or 0.0
+            )
+            ask = float(
+                tick.get("ask")
+                or tick.get("sp")
+                or tick.get("sp1")
+                or tick.get("sell_price")
+                or tick.get("a1")
+                or 0.0
+            )
+            bid_qty = int(
+                tick.get("bid_size")
+                or tick.get("bid_qty")
+                or tick.get("bq")
+                or tick.get("bq1")
+                or tick.get("buy_qty")
+                or 0
+            )
+            ask_qty = int(
+                tick.get("ask_size")
+                or tick.get("ask_qty")
+                or tick.get("sq")
+                or tick.get("sq1")
+                or tick.get("sell_qty")
+                or 0
+            )
+            oi = int(tick.get("oi") or tick.get("open_interest") or 0)
         else:
             raw_symbol = str(
                 getattr(tick, "symbol", "")
@@ -282,13 +459,38 @@ class MarketMatrix:
             prev_close = float(
                 getattr(tick, "close", 0.0) or getattr(tick, "prev_close", 0.0) or 0.0
             )
+            bid = float(
+                getattr(tick, "bid", 0.0)
+                or getattr(tick, "buy_price", 0.0)
+                or getattr(tick, "best_bid", 0.0)
+                or 0.0
+            )
+            ask = float(
+                getattr(tick, "ask", 0.0)
+                or getattr(tick, "sell_price", 0.0)
+                or getattr(tick, "best_ask", 0.0)
+                or 0.0
+            )
+            bid_qty = int(getattr(tick, "bid_qty", 0) or getattr(tick, "buy_qty", 0) or 0)
+            ask_qty = int(getattr(tick, "ask_qty", 0) or getattr(tick, "sell_qty", 0) or 0)
+            oi = int(getattr(tick, "oi", 0) or getattr(tick, "open_interest", 0) or 0)
 
         if not raw_symbol or ltp <= 0:
             return
 
         clean = canonical_alert_symbol(raw_symbol)
 
+        # Check session date rollover to automatically reset session on day boundary
+        tick_dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(IST)
+        tick_date_str = tick_dt.strftime("%Y-%m-%d")
+
         with self._lock:
+            if self._current_session_date is None:
+                self._current_session_date = tick_date_str
+            elif tick_date_str > self._current_session_date:
+                self._current_session_date = tick_date_str
+                self._reset_daily_session_locked()
+
             self._registered_aliases[raw_symbol] = clean
             buf = self._get_or_create_buffer_locked(clean)
             existing = self._latest_ticks.get(clean, {})
@@ -301,6 +503,11 @@ class MarketMatrix:
                 "high": max(day_high, ltp, existing.get("high", 0.0)),
                 "low": min(day_low, ltp) if (day_low > 0 or existing.get("low", 0.0) > 0) else ltp,
                 "prev_close": prev_close or existing.get("prev_close", 0.0),
+                "bid": bid or existing.get("bid", 0.0),
+                "ask": ask or existing.get("ask", 0.0),
+                "bid_qty": bid_qty or existing.get("bid_qty", 0),
+                "ask_qty": ask_qty or existing.get("ask_qty", 0),
+                "oi": oi or existing.get("oi", 0),
                 "symbol": clean,
                 "raw_symbol": raw_symbol,
                 "provider": provider,
@@ -337,6 +544,15 @@ class MarketMatrix:
 
         atp_val = float(latest.get("atp", 0.0) or 0.0)
         ltp_val = float(latest.get("ltp", 0.0) or 0.0)
+        bid_val = float(latest.get("bid", 0.0) or 0.0)
+        ask_val = float(latest.get("ask", 0.0) or 0.0)
+        bid_q = int(latest.get("bid_qty", 0) or 0)
+        ask_q = int(latest.get("ask_qty", 0) or 0)
+        oi_val = int(latest.get("oi", 0) or 0)
+
+        spread_pts = round(max(0.0, ask_val - bid_val), 4) if (bid_val > 0 and ask_val > 0) else 0.0
+        spread_pct = round((spread_pts / ltp_val) * 100.0, 3) if ltp_val > 0 else 0.0
+        ofi = round((bid_q - ask_q) / (bid_q + ask_q), 3) if (bid_q + ask_q) > 0 else 0.0
 
         if not buf:
             return {
@@ -361,6 +577,14 @@ class MarketMatrix:
                 "min": 0.0,
                 "max": 0.0,
                 "total_volume": int(latest.get("volume", 0) or 0),
+                "bid": bid_val,
+                "ask": ask_val,
+                "bid_qty": bid_q,
+                "ask_qty": ask_q,
+                "spread_pts": spread_pts,
+                "spread_pct": spread_pct,
+                "oi": oi_val,
+                "ofi": ofi,
             }
 
         stats = buf.get_snapshot()
@@ -370,7 +594,11 @@ class MarketMatrix:
         stats["volume"] = int(latest.get("volume", 0) or stats.get("total_volume", 0) or 0)
         stats["timestamp"] = float(latest.get("timestamp", 0.0) or 0.0)
         stats["provider"] = str(latest.get("provider", "stream"))
-        stats["session_vwap"] = atp_val if atp_val > 0 else stats.get("vwap", 0.0)
+        stats["session_vwap"] = (
+            atp_val
+            if atp_val > 0
+            else (float(stats.get("session_vwap", 0.0) or 0.0) or stats.get("vwap", 0.0))
+        )
         stats["atp_distance_pct"] = (
             round(((stats["last_price"] - atp_val) / atp_val) * 100.0, 3) if atp_val > 0 else 0.0
         )
@@ -379,11 +607,66 @@ class MarketMatrix:
             if stats["last_price"] >= atp_val > 0
             else ("BELOW_ATP" if atp_val > 0 else "UNKNOWN")
         )
+        stats["bid"] = bid_val
+        stats["ask"] = ask_val
+        stats["bid_qty"] = bid_q
+        stats["ask_qty"] = ask_q
+        stats["spread_pts"] = spread_pts
+        stats["spread_pct"] = spread_pct
+        stats["oi"] = oi_val
+        stats["ofi"] = ofi
 
         # If exchange provides explicit ATP, incorporate when tick buffer volume is nascent
         if atp_val > 0 and (stats["vwap"] == 0 or stats["count"] < 10):
             stats["vwap"] = atp_val
         return stats
+
+    def get_bbo(self, symbol: str) -> dict[str, Any]:
+        """
+        Return instantaneous Best Bid and Offer (BBO), spread, and order flow imbalance in O(1).
+        """
+        clean = canonical_alert_symbol(symbol)
+        with self._lock:
+            latest = self._latest_ticks.get(clean, {})
+        ltp = float(latest.get("ltp", 0.0) or 0.0)
+        bid = float(latest.get("bid", 0.0) or 0.0)
+        ask = float(latest.get("ask", 0.0) or 0.0)
+        bid_q = int(latest.get("bid_qty", 0) or 0)
+        ask_q = int(latest.get("ask_qty", 0) or 0)
+
+        spread_pts = round(max(0.0, ask - bid), 4) if (bid > 0 and ask > 0) else 0.0
+        spread_pct = round((spread_pts / ltp) * 100.0, 3) if ltp > 0 else 0.0
+        ofi = round((bid_q - ask_q) / (bid_q + ask_q), 3) if (bid_q + ask_q) > 0 else 0.0
+        mid = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else ltp
+        micro = (
+            round((bid * ask_q + ask * bid_q) / (bid_q + ask_q), 2)
+            if (bid_q + ask_q) > 0 and bid > 0 and ask > 0
+            else mid
+        )
+
+        return {
+            "symbol": clean,
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "bid_qty": bid_q,
+            "ask_qty": ask_q,
+            "spread_pts": spread_pts,
+            "spread_pct": spread_pct,
+            "mid_price": mid,
+            "micro_price": micro,
+            "ofi": ofi,
+            "timestamp": float(latest.get("timestamp", 0.0) or 0.0),
+        }
+
+    def get_oi(self, symbol: str) -> Optional[int]:
+        """Return instantaneous Open Interest from streaming ticks in O(1)."""
+        clean = canonical_alert_symbol(symbol)
+        with self._lock:
+            latest = self._latest_ticks.get(clean)
+            if latest and latest.get("oi", 0) > 0:
+                return int(latest["oi"])
+        return None
 
     def get_atp(self, symbol: str) -> Optional[float]:
         """Returns instantaneous exchange-computed session Average Traded Price (ATP) or None."""
@@ -426,9 +709,16 @@ class MarketMatrix:
         timeframe: str = "1m",
         limit: int = 100,
         include_active: bool = True,
+        fallback_to_warehouse: bool = False,
+        min_bars: int = 0,
     ) -> list[dict[str, Any]]:
         return self.candle_weaver.get_candles(
-            symbol, timeframe=timeframe, limit=limit, include_active=include_active
+            symbol,
+            timeframe=timeframe,
+            limit=limit,
+            include_active=include_active,
+            fallback_to_warehouse=fallback_to_warehouse,
+            min_bars=min_bars,
         )
 
     def get_candles_df(
@@ -437,10 +727,26 @@ class MarketMatrix:
         timeframe: str = "1m",
         limit: int = 100,
         include_active: bool = True,
+        fallback_to_warehouse: bool = False,
+        min_bars: int = 0,
     ) -> pd.DataFrame:
         return self.candle_weaver.get_candles_df(
-            symbol, timeframe=timeframe, limit=limit, include_active=include_active
+            symbol,
+            timeframe=timeframe,
+            limit=limit,
+            include_active=include_active,
+            fallback_to_warehouse=fallback_to_warehouse,
+            min_bars=min_bars,
         )
+
+    def seed_historical_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        df: pd.DataFrame,
+    ) -> int:
+        """Warm-starts in-memory candle weaver from historical DataFrame to eliminate mid-session REST roundtrips."""
+        return self.candle_weaver.seed_candles(symbol, timeframe, df)
 
     def get_intraday_breadth(self, universe: Optional[list[str]] = None) -> dict[str, Any]:
         """

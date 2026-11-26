@@ -19,7 +19,6 @@ from config.discovery_policy import allows_context_symbol, get_discovery_policy
 import os
 import threading
 import time
-from calendar import monthrange
 from collections import OrderedDict
 from datetime import date, datetime
 from pathlib import Path
@@ -27,7 +26,9 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_WS_SUBSCRIPTIONS = 5000  # FYERS API v3 Data Socket supports up to 5,000 symbols concurrently
+MAX_WS_SUBSCRIPTIONS = (
+    4999  # Fyers API v3 Data Socket strictly enforces < 5,000 symbols (code -99 at 5000+)
+)
 
 # Permanent base set: key indices/commodities + top liquid institutional equities
 CORE_BASE_SYMBOLS: list[str] = [
@@ -130,7 +131,8 @@ try:
     # Pre-seed top institutional benchmarks from nifty_total_market.json (up to 750)
     _tot_path = Path("data/universes/nifty_total_market.json")
     if _tot_path.exists():
-        _tot_data = json.load(open(_tot_path, "r", encoding="utf-8"))
+        with open(_tot_path, "r", encoding="utf-8") as _f_tot:
+            _tot_data = json.load(_f_tot)
         for _item in _tot_data:
             _raw_sym = _item.get("symbol", "").strip().upper()
             if _raw_sym:
@@ -184,29 +186,13 @@ MONTH_NAME_MAP: dict[str, int] = {
 }
 
 
-def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
+def _calc_monthly_expiry_date(
+    exch: str, underlying: str, yr: int, mo: int, is_option: bool = False
+) -> date:
     """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS."""
-    exch_up = (exch or "NSE").upper()
-    if exch_up in ("NSE", "NFO", "BSE", "BFO"):
-        from market.calendar import get_monthly_expiry_for_month
+    from market.instruments import _calc_monthly_expiry_date as _inst_calc
 
-        return get_monthly_expiry_for_month(underlying, yr, mo)
-
-    _, num_days = monthrange(yr, mo)
-    if exch_up == "MCX":
-        if "CRUDE" in underlying.upper():
-            exp_day = min(19, num_days)
-            d = date(yr, mo, exp_day)
-        else:
-            d = date(yr, mo, num_days)
-    else:
-        d = date(yr, mo, num_days)
-    try:
-        from market.calendar import get_adjusted_expiry_date
-
-        return get_adjusted_expiry_date(d, exch_up if exch_up in ("BSE", "MCX") else "NFO")
-    except Exception:
-        return d
+    return _inst_calc(exch, underlying, yr, mo, is_option=is_option)
 
 
 def parse_contract_expiry(symbol: str) -> Optional[date]:
@@ -375,9 +361,13 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
 
     comm_symbols = [
         _resolve_commodity_contract("CRUDEOIL", ref_time=now),
+        _resolve_commodity_contract("CRUDEOILM", ref_time=now),
         _resolve_commodity_contract("NATURALGAS", ref_time=now),
+        _resolve_commodity_contract("NATGASMINI", ref_time=now),
         _resolve_commodity_contract("GOLD", ref_time=now),
+        _resolve_commodity_contract("GOLDM", ref_time=now),
         _resolve_commodity_contract("SILVER", ref_time=now),
+        _resolve_commodity_contract("SILVERM", ref_time=now),
         _resolve_commodity_contract("COPPER", ref_time=now),
         _resolve_commodity_contract("ZINC", ref_time=now),
         _resolve_currency_contract("USDINR"),
@@ -387,7 +377,8 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
     if ref_time is None:
         from market.contract_selection import get_commodity_option_grid
 
-        comm_symbols.extend(get_commodity_option_grid("CRUDEOIL", strikes_per_side=2, as_of=now))
+        for u in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
+            comm_symbols.extend(get_commodity_option_grid(u, strikes_per_side=2, as_of=now))
 
     # Authoritative pre-subscription filter: drop symbols the published master does
     # not list. A degraded snapshot may hide a newly listed contract, so it only
@@ -412,7 +403,7 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
                 master = None
             # An unavailable master cannot prove a symbol unlisted; keep it rather
             # than dropping possibly valid exposure or discovery contracts.
-            if master is None or symbol in master:
+            if not master or symbol in master:
                 kept.append(symbol)
         pruned = len(comm_symbols) - len(kept)
         if pruned > 0:
@@ -594,7 +585,7 @@ class WsSubscriptionManager:
 
     def cleanse_closed_session_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
         """
-        At 15:30 IST market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
+        At derivative market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
         from both core derivatives and dynamic subscriptions to liberate WebSocket slots and memory
         for evening commodity and currency trading.
         Permanent baseline equities, indices, and active MCX commodities are strictly preserved.
@@ -603,7 +594,9 @@ class WsSubscriptionManager:
             from market.calendar import is_market_open
             import os
 
-            if is_market_open("NSE") and not os.environ.get("CHANAKYA_TESTING"):
+            if (is_market_open("NFO") or is_market_open("NSE")) and not os.environ.get(
+                "CHANAKYA_TESTING"
+            ):
                 return []
         except Exception as e_mkt_open:
             logger.debug(
@@ -859,28 +852,33 @@ class WsSubscriptionManager:
     def get_diagnostics(self) -> dict[str, Any]:
         """Return WebSocket subscription capacity, metrics, and breakdown."""
         with self._lock:
-            core_count = len(self._core_symbols)
-            dynamic_count = len(self._dynamic_symbols)
-            total = core_count + dynamic_count
-            util_pct = (
-                round(total / self._max_subscriptions * 100, 1) if self._max_subscriptions else 0.0
-            )
+            core_syms = set(self._core_symbols)
+            dyn_syms = set(self._dynamic_symbols)
             recent_dynamic = list(self._dynamic_symbols.keys())[-10:]
-            return {
-                "max_capacity": self._max_subscriptions,
-                "total_subscribed": total,
-                "core_count": core_count,
-                "dynamic_count": dynamic_count,
-                "utilization_pct": util_pct,
-                "recent_symbols": recent_dynamic,
-                "anchored_spots": dict(self._anchored_spots),
-                "discovery_profile": get_discovery_policy().profile,
-                "retained_out_of_scope_symbols": [
-                    s
-                    for s in self._core_symbols | set(self._dynamic_symbols)
-                    if not allows_context_symbol(s)
-                ],
-            }
+            anchored = dict(self._anchored_spots)
+            max_subs = self._max_subscriptions
+
+        core_count = len(core_syms)
+        dynamic_count = len(dyn_syms)
+        total = core_count + dynamic_count
+        util_pct = round(total / max_subs * 100, 1) if max_subs else 0.0
+        profile = get_discovery_policy().profile
+        retained_out_of_scope = (
+            [s for s in (core_syms | dyn_syms) if not allows_context_symbol(s)]
+            if profile == "FNO_ONLY"
+            else []
+        )
+        return {
+            "max_capacity": max_subs,
+            "total_subscribed": total,
+            "core_count": core_count,
+            "dynamic_count": dynamic_count,
+            "utilization_pct": util_pct,
+            "recent_symbols": recent_dynamic,
+            "anchored_spots": anchored,
+            "discovery_profile": profile,
+            "retained_out_of_scope_symbols": retained_out_of_scope,
+        }
 
 
 # Global singleton

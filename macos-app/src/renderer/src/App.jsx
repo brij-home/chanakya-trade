@@ -21,6 +21,7 @@ import NotificationDetailModal from './components/Notifications/NotificationDeta
 import { useNotificationStore } from './store/notificationStore'
 import SystemHealthPill from './components/Common/SystemHealthPill'
 import OpsDrawer from './components/Common/OpsDrawer'
+import { createVisibilityInterval } from './utils/visibilityPoll'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
@@ -104,7 +105,11 @@ function playAlertChime() {
 
 /* ── Main App ───────────────────────────────────────────────────────────── */
 export default function App() {
-  const { setPort, setSidecarError, setBrokerStatuses, activeView, setActiveView } = useChatStore()
+  const setPort = useChatStore((s) => s.setPort)
+  const setSidecarError = useChatStore((s) => s.setSidecarError)
+  const setBrokerStatuses = useChatStore((s) => s.setBrokerStatuses)
+  const activeView = useChatStore((s) => s.activeView)
+  const setActiveView = useChatStore((s) => s.setActiveView)
   const createSession = useChatStore((s) => s.createSession)
   const port = useChatStore((s) => s.port)
   const appMode = useChatStore((s) => s.appMode)
@@ -493,9 +498,8 @@ export default function App() {
         .then(setBrokerStatuses)
         .catch(() => {})
     fetchStatus()
-    // Keep slower 30s fallback poll — SSE will be primary
-    const t = setInterval(fetchStatus, 30000)
-    return () => clearInterval(t)
+    // Keep slower 30s fallback poll (pauses when hidden) — SSE is primary
+    return createVisibilityInterval(fetchStatus, 30000)
   }, [port])
 
   // ── Initial mode fetch as fast-path before SSE delivers snapshot ────────────
@@ -507,10 +511,12 @@ export default function App() {
         const res = await fetch(`${getBaseUrl(port)}/api/mode`)
         if (res.ok) {
           const data = await res.json()
-          setAppMode(data.mode ?? 'PAPER')
+          setAppMode(data.mode || 'UNKNOWN')
+        } else {
+          setAppMode('UNKNOWN')
         }
       } catch {
-        // If endpoint is unavailable, keep default PAPER mode
+        setAppMode('UNKNOWN')
       } finally {
         setModeLoading(false)
       }
@@ -527,8 +533,7 @@ export default function App() {
         .then(setPilotSafety)
         .catch(() => setPilotSafety(null))
     fetchPilotSafety()
-    const timer = setInterval(fetchPilotSafety, 15000)
-    return () => clearInterval(timer)
+    return createVisibilityInterval(fetchPilotSafety, 15000)
   }, [port])
 
   const handleOpenOrderTicket = useCallback((ticketData) => {

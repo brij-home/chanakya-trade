@@ -668,15 +668,15 @@ class MStockWebSocket:
                     except Exception:
                         from datetime import (
                             datetime,
-                            timezone as dt_tz,
-                            timedelta as dt_td,
                             time as dt_time,
                         )
 
-                        ist = dt_tz(dt_td(hours=5, minutes=30))
-                        now_ist = datetime.now(ist)
+                        from config.constants import IST as _MST_IST
+                        from market.rule_schedule import derivative_close as _deriv_close
+
+                        now_ist = datetime.now(_MST_IST)
                         is_open = (now_ist.weekday() < 5) and (
-                            dt_time(9, 0) <= now_ist.time() <= dt_time(15, 30)
+                            dt_time(9, 0) <= now_ist.time() <= _deriv_close(now_ist.date())
                         )
 
                     if not is_open:

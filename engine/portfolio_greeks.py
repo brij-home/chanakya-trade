@@ -229,15 +229,16 @@ def calculate_portfolio_greeks(
             )
         )
 
-    # Convert Net Delta Value into NIFTY contract equivalents (1 NIFTY lot = 25 shares * spot)
+    # Convert Net Delta Value into NIFTY contract equivalents using canonical exchange lot master
     try:
-        from market.instruments import get_lot_size
+        from market.instruments import get_fno_lot_size
 
-        nifty_lot_size = float(get_lot_size("NIFTY") or 65.0)
-    except Exception:
-        nifty_lot_size = 65.0
+        nifty_lot_size = float(get_fno_lot_size("NIFTY") or 0.0)
+    except Exception as e_lot:
+        logger.debug(f"[PortfolioGreeks] Canonical NIFTY lot lookup unavailable: {e_lot}")
+        nifty_lot_size = 0.0
     nifty_lot_val = nifty_lot_size * nifty_spot
-    net_delta_nifty_eq = round(agg_delta_value / max(1.0, nifty_lot_val), 2)
+    net_delta_nifty_eq = round(agg_delta_value / nifty_lot_val, 2) if nifty_lot_val > 0 else 0.0
 
     # Classify Posture
     if net_delta_nifty_eq > 5.0:

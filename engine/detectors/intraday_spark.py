@@ -12,28 +12,42 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta, time as dtime
+from collections import OrderedDict
+from datetime import datetime, time as dtime
+import threading
 from typing import Any, Optional
 
 import numpy as np
 
+from config.constants import IST
 from engine.alert_model import AutoAlert
 from engine.alert_identity import canonical_alert_symbol
 from engine.dynamic_risk import resolve_price_tier
 
 logger = logging.getLogger("chanakya.detectors.intraday_spark")
-IST = timezone(timedelta(hours=5, minutes=30))
 
-_AVG_VOL_SESSION_CACHE: dict[str, tuple[str, float]] = {}
+_MAX_AVG_VOL_CACHE = 512
+_AVG_VOL_CACHE_LOCK = threading.Lock()
+_AVG_VOL_SESSION_CACHE: OrderedDict[str, tuple[str, float]] = OrderedDict()
+
+
+def _set_cached_avg_vol(clean_sym: str, today_str: str, avg_v: float) -> None:
+    with _AVG_VOL_CACHE_LOCK:
+        _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+        _AVG_VOL_SESSION_CACHE.move_to_end(clean_sym)
+        while len(_AVG_VOL_SESSION_CACHE) > _MAX_AVG_VOL_CACHE:
+            _AVG_VOL_SESSION_CACHE.popitem(last=False)
 
 
 def get_cached_avg_volume_20(symbol: str) -> float:
     """Returns 20-day average daily volume with L1 in-session caching (< 0.01ms lookup)."""
     clean_sym = canonical_alert_symbol(symbol)
     today_str = datetime.now(IST).strftime("%Y%m%d")
-    cached = _AVG_VOL_SESSION_CACHE.get(clean_sym)
-    if cached and cached[0] == today_str and cached[1] > 0:
-        return cached[1]
+    with _AVG_VOL_CACHE_LOCK:
+        cached = _AVG_VOL_SESSION_CACHE.get(clean_sym)
+        if cached and cached[0] == today_str and cached[1] > 0:
+            _AVG_VOL_SESSION_CACHE.move_to_end(clean_sym)
+            return cached[1]
 
     # 1. Try DailyLevelsStore if available
     try:
@@ -42,10 +56,29 @@ def get_cached_avg_volume_20(symbol: str) -> float:
         dl = get_daily_levels(clean_sym)
         if dl and getattr(dl, "avg_vol_20", 0.0) > 0:
             avg_v = float(dl.avg_vol_20)
-            _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+            _set_cached_avg_vol(clean_sym, today_str, avg_v)
             return avg_v
     except Exception as e_dl:
         logger.debug("[IntradaySpark] get_daily_levels failed for %s: %s", clean_sym, e_dl)
+
+    # 1.5 Try local SQLite EOD store before calling network (in non-test environments so unit test mocks work)
+    is_test_env = (
+        (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+    if not is_test_env:
+        try:
+            from engine.eod_store import get_eod_df
+
+            df_eod = get_eod_df(clean_sym, days=30)
+            if df_eod is not None and len(df_eod) >= 15 and "volume" in df_eod.columns:
+                avg_v = float(df_eod["volume"].iloc[-20:].mean())
+                if avg_v > 0:
+                    _set_cached_avg_vol(clean_sym, today_str, avg_v)
+                    return avg_v
+        except Exception as e_eod:
+            logger.debug("[IntradaySpark] get_eod_df failed for %s: %s", clean_sym, e_eod)
 
     # 2. Fetch from history once per session and cache
     try:
@@ -64,13 +97,13 @@ def get_cached_avg_volume_20(symbol: str) -> float:
                     float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
                 )
                 if avg_v > 0:
-                    _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+                    _set_cached_avg_vol(clean_sym, today_str, avg_v)
                     return avg_v
     except Exception as e_hist:
         logger.debug("[IntradaySpark] get_ohlcv failed for %s: %s", clean_sym, e_hist)
 
     # Cache default fallback to prevent hammering the network on every 45s scan cycle
-    _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, 500000.0)
+    _set_cached_avg_vol(clean_sym, today_str, 500000.0)
     return 500000.0
 
 
@@ -102,8 +135,8 @@ def compute_time_of_day_rvol(
     ref_dt: Optional[datetime] = None,
 ) -> float:
     """Computes Time-of-Day Relative Volume (TOD-RVOL)."""
-    if avg_daily_vol <= 0:
-        return 1.0
+    if avg_daily_vol <= 0 or current_vol < 0:
+        return 0.0
     now_ist = ref_dt or datetime.now(IST)
     if now_ist.tzinfo is None:
         now_ist = now_ist.replace(tzinfo=IST)
@@ -144,7 +177,10 @@ def detect_intraday_mover_sparks(
         or (os.environ.get("DEPLOY_MODE") == "test")
         or ("PYTEST_CURRENT_TEST" in os.environ)
     )
-    if not is_test_env and (curr_t < dtime(9, 20) or curr_t > dtime(15, 15)):
+    from market.rule_schedule import intraday_entry_cutoff
+
+    _spark_cutoff = intraday_entry_cutoff(now_dt.date(), is_derivative=False)
+    if not is_test_env and (curr_t < dtime(9, 20) or curr_t > _spark_cutoff):
         return found
 
     scan_universe = list(universe) if universe else precursor_radar.get_scan_universe(segment="ALL")
@@ -254,8 +290,14 @@ def detect_intraday_mover_sparks(
                 if abs(chg) < 1.20 or rvol < 1.25:
                     continue
             if time_hm >= 840 and seg != "INDEX":
-                # Intraday cash stock entries silenced after 14:00 IST (75m runway gate before 15:15 square-off)
-                continue
+                from engine.position_sizer import is_fno_symbol
+
+                # Intraday cash stock entries silenced after 14:00 IST (75m runway gate before 15:15 square-off).
+                # Liquid F&O stock options have rapid 15-30m horizons and remain active until 14:45 IST (matching session_runway.py Invariant 6b).
+                if not is_fno_symbol(clean_sym):
+                    continue
+                elif time_hm >= 885:  # 14:45 IST
+                    continue
 
         if vwap > 0:
             vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0
@@ -374,6 +416,32 @@ def detect_intraday_mover_sparks(
                     continue
             except Exception as e_tide:
                 logger.debug(f"[IntradaySpark] Index tide check skipped for {clean_sym}: {e_tide}")
+
+        # Gate 32: Microstructure Order Book Imbalance (OBI) & Fortress Wall Shield
+        # Protects against shorting directly into institutional bid absorption walls (OBI50 >= +0.30)
+        # or buying into massive ask distribution supply walls (OBI50 <= -0.30).
+        try:
+            from market.order_book import get_depth_book
+
+            depth = get_depth_book(clean_sym)
+            if depth and (depth.best_bid > 0 or depth.best_ask > 0):
+                obi_val = float(depth.obi(50))
+                if not is_bullish and obi_val >= 0.30:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed breakdown spark on {clean_sym}: "
+                        f"Severe Bid Book Imbalance (OBI50={obi_val:+.2f} >= +0.30) indicates institutional absorption wall."
+                    )
+                    continue
+                elif is_bullish and obi_val <= -0.30:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed breakout spark on {clean_sym}: "
+                        f"Severe Ask Book Imbalance (OBI50={obi_val:+.2f} <= -0.30) indicates institutional supply wall."
+                    )
+                    continue
+        except Exception as e_depth:
+            logger.debug(
+                f"[IntradaySpark] Order book depth check skipped for {clean_sym}: {e_depth}"
+            )
 
         is_mock_spark = (
             type(q).__name__ == "MagicMock"
@@ -737,11 +805,61 @@ def detect_intraday_mover_sparks(
         df_5m = None
         alignment_count = 0
         try:
-            from market.history import get_ohlcv
+            is_test_env = (
+                (os.environ.get("CHANAKYA_TESTING") == "1")
+                or (os.environ.get("DEPLOY_MODE") == "test")
+                or ("PYTEST_CURRENT_TEST" in os.environ)
+            )
+            if not is_test_env:
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    mm = get_market_matrix()
+                    df_5m = mm.get_candles_df(clean_sym, timeframe="5m", limit=80)
+                except Exception:
+                    df_5m = None
+
+            if df_5m is None or len(df_5m) < 6:
+                from market.history import get_ohlcv
+
+                df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=3)
+                if df_5m is not None and len(df_5m) >= 6 and not is_test_env:
+                    try:
+                        from engine.market_matrix import get_market_matrix
+
+                        get_market_matrix().seed_historical_candles(clean_sym, "5m", df_5m)
+                    except Exception as e_seed5:
+                        logger.debug(
+                            f"[IntradaySpark] MarketMatrix 5m seed skipped for {clean_sym}: {e_seed5}"
+                        )
+
+            df_15m = None
+            if not is_test_env:
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    df_15m = get_market_matrix().get_candles_df(
+                        clean_sym, timeframe="15m", limit=80
+                    )
+                except Exception:
+                    df_15m = None
+
+            if df_15m is None or len(df_15m) < 10:
+                from market.history import get_ohlcv
+
+                df_15m = get_ohlcv(clean_sym, exchange="NSE", interval="15minute", days=5)
+                if df_15m is not None and len(df_15m) >= 10 and not is_test_env:
+                    try:
+                        from engine.market_matrix import get_market_matrix
+
+                        get_market_matrix().seed_historical_candles(clean_sym, "15m", df_15m)
+                    except Exception as e_seed15:
+                        logger.debug(
+                            f"[IntradaySpark] MarketMatrix 15m seed skipped for {clean_sym}: {e_seed15}"
+                        )
+
             from analysis.market_structure import compute_mtf_alignment
 
-            df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=3)
-            df_15m = get_ohlcv(clean_sym, exchange="NSE", interval="15minute", days=5)
             if df_5m is not None and df_15m is not None:
                 mtf_res = compute_mtf_alignment(
                     df_5m=df_5m, df_15m=df_15m, df_daily=df, direction=direction
@@ -909,19 +1027,173 @@ def detect_intraday_mover_sparks(
 
         # Optimal Entry & Limit Retest Calibration (Invariant 12):
         # If the move is extended beyond the consolidation base, do not market-buy CMP candle exhaustion peaks.
-        # Anchor the primary trigger at the OTE Limit or Base zone retest level.
+        # Anchor the primary trigger at the OTE Limit or Base zone retest level, and guarantee
+        # SL / Target geometry remains coherent relative to effective_trigger (no Inverted Stop-Loss).
         effective_trigger = float(ote_limit) if (is_ext and ote_limit > 0) else float(ltp)
         effective_stage = "PRIMED" if (is_ext and ote_limit > 0) else stage
 
         if is_ext and ote_limit > 0:
             headline = f"🎯 [LIMIT RETEST: {base_struct or 'OTE'}] {headline}"
+            min_pullback_gap = max(tick_offset * 2.0, round(0.25 * atr_val, 2))
+            if is_bullish and (
+                sl_price >= effective_trigger or (effective_trigger - sl_price) < min_pullback_gap
+            ):
+                pull_risk = round(
+                    max(price_tier.abs_min_risk_pts, min_risk * 0.75, 0.90 * atr_val), 2
+                )
+                cand_sl = round(effective_trigger - pull_risk, 2)
+                if 0 < cand_sl < effective_trigger:
+                    sl_price = cand_sl
+                    risk_pts = round(effective_trigger - sl_price, 2)
+                    t1_price = round(max(t1_price, effective_trigger + 2.0 * risk_pts), 2)
+                    t2_price = round(max(t2_price, t1_price + 1.5 * risk_pts), 2)
+                    t3_price = round(max(t3_price, t2_price + 2.0 * risk_pts), 2)
+                    no_chase_lvl = round(min(t1_price - tick_offset, ltp * 1.008), 2)
+                    rr_str = (
+                        f"1:{round(abs(t1_price - effective_trigger) / max(0.01, risk_pts), 1)}"
+                    )
+                    plan["stop_loss"] = f"₹{sl_price:,.1f}"
+                    plan["target"] = f"₹{t1_price:,.1f}"
+                    plan["target_2"] = f"₹{t2_price:,.1f}"
+                    plan["target_3"] = f"₹{t3_price:,.1f}"
+                    plan["target_moonshot"] = f"₹{t3_price:,.1f}"
+                    plan["no_chase_boundary"] = f"₹{no_chase_lvl:,.1f}"
+                    plan["risk_reward"] = rr_str
+                    if isinstance(plan.get("trade_plan"), dict):
+                        plan["trade_plan"]["entry_price"] = effective_trigger
+                        plan["trade_plan"]["invalidation_stop"] = sl_price
+                        plan["trade_plan"]["target_1"] = t1_price
+                        plan["trade_plan"]["target_2"] = t2_price
+                        plan["trade_plan"]["target_3"] = t3_price
+                        plan["trade_plan"]["stop_distance_pts"] = risk_pts
+                else:
+                    effective_trigger = float(ltp)
+                    effective_stage = stage
+            elif (not is_bullish) and (
+                sl_price <= effective_trigger or (sl_price - effective_trigger) < min_pullback_gap
+            ):
+                pull_risk = round(
+                    max(price_tier.abs_min_risk_pts, min_risk * 0.75, 0.90 * atr_val), 2
+                )
+                cand_sl = round(effective_trigger + pull_risk, 2)
+                cand_t1 = round(max(0.05, effective_trigger - 2.0 * pull_risk), 2)
+                if cand_t1 < effective_trigger < cand_sl:
+                    sl_price = cand_sl
+                    risk_pts = round(sl_price - effective_trigger, 2)
+                    t1_price = min(t1_price, cand_t1)
+                    if t1_price <= 0.05 or t1_price >= effective_trigger:
+                        t1_price = cand_t1
+                    t2_price = round(min(t2_price, max(0.05, t1_price - 1.5 * risk_pts)), 2)
+                    t3_price = round(min(t3_price, max(0.05, t2_price - 2.0 * risk_pts)), 2)
+                    no_chase_lvl = round(max(t1_price + tick_offset, ltp * 0.992), 2)
+                    rr_str = (
+                        f"1:{round(abs(effective_trigger - t1_price) / max(0.01, risk_pts), 1)}"
+                    )
+                    plan["stop_loss"] = f"₹{sl_price:,.1f}"
+                    plan["target"] = f"₹{t1_price:,.1f}"
+                    plan["target_2"] = f"₹{t2_price:,.1f}"
+                    plan["target_3"] = f"₹{t3_price:,.1f}"
+                    plan["target_moonshot"] = f"₹{t3_price:,.1f}"
+                    plan["no_chase_boundary"] = f"₹{no_chase_lvl:,.1f}"
+                    plan["risk_reward"] = rr_str
+                    if isinstance(plan.get("trade_plan"), dict):
+                        plan["trade_plan"]["entry_price"] = effective_trigger
+                        plan["trade_plan"]["invalidation_stop"] = sl_price
+                        plan["trade_plan"]["target_1"] = t1_price
+                        plan["trade_plan"]["target_2"] = t2_price
+                        plan["trade_plan"]["target_3"] = t3_price
+                        plan["trade_plan"]["stop_distance_pts"] = risk_pts
+                else:
+                    effective_trigger = float(ltp)
+                    effective_stage = stage
+
+        # Option Resolution for F&O Assets (Invariant 1 & 11)
+        from engine.position_sizer import get_lot_size
+        from engine.option_resolver import is_index_symbol, resolve_option_contract
+
+        stock_lot_size = get_lot_size(clean_sym)
+        is_idx = is_index_symbol(clean_sym)
+        should_prefer_opt = is_idx or (stock_lot_size > 1)
+
+        resolved_opt = None
+        if should_prefer_opt:
+            try:
+                resolved_opt = resolve_option_contract(
+                    symbol=clean_sym,
+                    spot=ltp,
+                    direction=direction,
+                    underlying_sl=sl_price,
+                    underlying_target=t1_price,
+                    prefer_options=True,
+                )
+            except Exception as e_opt:
+                logger.debug(f"[IntradaySpark] Option resolution error for {clean_sym}: {e_opt}")
+
+        has_opt = resolved_opt is not None and getattr(resolved_opt, "entry_premium", 0.0) > 0
+        opt_contract_sym = resolved_opt.contract_symbol if has_opt else None
+        opt_ltp = resolved_opt.entry_premium if has_opt else None
+        opt_sl = resolved_opt.sl_premium if has_opt else None
+        opt_t1 = resolved_opt.t1_premium if has_opt else None
+        opt_t2 = resolved_opt.t2_premium if has_opt else None
+        opt_runner = resolved_opt.t3_premium if has_opt else None
+        opt_strike = resolved_opt.strike if has_opt else None
+        opt_type = resolved_opt.option_type if has_opt else ("CE" if is_bullish else "PE")
+        opt_lot_sz = (
+            resolved_opt.lot_size if has_opt else (stock_lot_size if stock_lot_size > 1 else 1)
+        )
+        opt_exp = getattr(resolved_opt, "expiry", None) if has_opt else None
+        opt_nc = round(opt_ltp * 1.05, 2) if has_opt else None
+
+        alert_seg = "FNO_INDEX" if is_idx else ("FNO_STOCK" if has_opt else seg)
+        alert_exch = (
+            "BFO"
+            if clean_sym in ("SENSEX", "BANKEX")
+            else ("NFO" if (is_idx or has_opt) else "NSE")
+        )
+
+        if has_opt:
+            plan["option_action"] = f"BUY {opt_type}"
+            plan["contract_symbol"] = opt_contract_sym
+            plan["contract"] = opt_contract_sym
+            plan["instrument"] = opt_contract_sym
+            plan["instrument_type"] = "OPTION"
+            plan["strike"] = opt_strike
+            plan["option_type"] = opt_type
+            plan["option_entry"] = f"₹{opt_ltp:,.2f}"
+            plan["option_sl"] = f"₹{opt_sl:,.2f}"
+            plan["option_target"] = f"₹{opt_t1:,.2f}"
+            plan["option_target_1"] = f"₹{opt_t1:,.2f}"
+            plan["option_target_2"] = f"₹{opt_t2:,.2f}" if opt_t2 else None
+            plan["option_target_3"] = f"₹{opt_runner:,.2f}" if opt_runner else None
+            plan["option_no_chase_boundary"] = f"₹{opt_nc:,.2f}" if opt_nc else None
+            plan["tactical_sl"] = f"₹{opt_sl:,.2f}"
+            plan["lot_size"] = opt_lot_sz
+            plan["option_plan"] = resolved_opt.as_dict()
+            plan["underlying_symbol"] = clean_sym
+            plan["underlying_spot"] = f"₹{ltp:,.1f}"
+            plan["underlying_sl"] = f"₹{sl_price:,.1f}"
+            plan["structural_spot_sl"] = f"₹{sl_price:,.1f}"
+            plan["segment"] = alert_seg
+            if getattr(resolved_opt, "spread_details", None):
+                plan["hedged_spread"] = resolved_opt.spread_details
+                plan["strategy_type"] = resolved_opt.strategy_type
+
+        if has_opt and opt_strike:
+            headline = (
+                f"🎯 [{opt_contract_sym or (str(int(opt_strike)) + ' ' + opt_type)}] {headline}"
+            )
+            summary = (
+                f"{summary} | Option Plan: Buy {int(opt_strike)} {opt_type} near ₹{opt_ltp:,.2f} "
+                f"(SL ₹{opt_sl:,.2f}, T1 ₹{opt_t1:,.2f}). Spot Invalidation SL: ₹{sl_price:,.2f}."
+            )
 
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
             stage=effective_stage,
             symbol=clean_sym,
-            exchange="NSE",
+            exchange=alert_exch,
+            segment=alert_seg,
             direction=direction,
             headline=headline,
             summary=summary,
@@ -949,12 +1221,24 @@ def detect_intraday_mover_sparks(
             created_at=now_iso,
             is_live=is_authentic_spark,
             environment="LIVE" if is_authentic_spark else "TEST",
+            contract_symbol=opt_contract_sym,
+            strike=opt_strike,
+            option_type=opt_type if has_opt else None,
+            option_premium=opt_ltp,
+            tactical_sl=opt_sl if has_opt else None,
+            structural_spot_sl=sl_price if has_opt else None,
+            underlying_sl=sl_price if has_opt else None,
+            expiry_date=opt_exp,
+            derivative_type="OPT" if has_opt else None,
+            option_stop_loss=opt_sl,
+            option_target_level=opt_t1,
+            lot_size=opt_lot_sz,
             metrics={
                 "rvol": rvol,
                 "turnover_cr": turnover_cr,
                 "vwap": vwap,
                 "change_pct": chg,
-                "segment": seg,
+                "segment": alert_seg,
                 "atr": atr_val,
                 "no_chase_boundary": no_chase_lvl,
                 "target_1": t1_price,
@@ -999,6 +1283,13 @@ def detect_intraday_mover_sparks(
                 "cpr_type": "NARROW" if is_narrow_cpr else ("WIDE" if is_wide_cpr else "AVERAGE"),
                 "is_narrow_cpr": is_narrow_cpr,
                 "is_wide_cpr": is_wide_cpr,
+                "underlying_spot": ltp if has_opt else None,
+                "underlying_sl": sl_price if has_opt else None,
+                "underlying_target": t1_price if has_opt else None,
+                "contract_symbol": opt_contract_sym,
+                "strike": opt_strike,
+                "option_type": opt_type if has_opt else None,
+                "option_premium": opt_ltp,
             },
             actionable_plan=plan,
         )

@@ -43,7 +43,7 @@ _SNAPSHOT_CACHE: dict[
     str, tuple[float, tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]]
 ] = {}
 _SNAPSHOT_LOCK = threading.RLock()
-_SNAPSHOT_TTL = 15.0  # 15.0-second coalescing cache
+_SNAPSHOT_TTL = 45.0  # 45.0-second snapshot cache aligned with OCM refresh cadence
 
 _STRIKE_BASELINE_OI: dict[str, int] = {}
 _BASELINE_DATE: Optional[str] = None
@@ -73,6 +73,38 @@ def _store_in_snapshot_cache(
             for k in keys_to_drop:
                 _SNAPSHOT_CACHE.pop(k, None)
         _SNAPSHOT_CACHE[cache_key] = (now_ts, res)
+
+
+def _overlay_live_quotes_on_chain(cached_chain: list[OptionsContract]) -> None:
+    """Overlays latest real-time L2/L3 tick quotes (LTP, bid, ask, volume, OI) from in-memory quote cache onto option contracts."""
+    if not cached_chain:
+        return
+    try:
+        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+        with _quote_cache_lock:
+            for c in cached_chain:
+                q_rec = _QUOTE_CACHE.get(c.symbol)
+                if q_rec:
+                    q_obj = q_rec[1]
+                    lp = getattr(q_obj, "last_price", 0.0)
+                    if lp > 0:
+                        c.ltp = lp
+                        c.last_price = lp
+                    v = getattr(q_obj, "volume", 0)
+                    if v > 0:
+                        c.volume = v
+                    bid = getattr(q_obj, "bid", 0.0)
+                    if bid > 0:
+                        c.bid = bid
+                    ask = getattr(q_obj, "ask", 0.0)
+                    if ask > 0:
+                        c.ask = ask
+                    oi = getattr(q_obj, "oi", 0)
+                    if oi > 0:
+                        c.oi = oi
+    except Exception as e_tick:
+        logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
 
 
 def clear_options_caches() -> int:
@@ -290,6 +322,23 @@ def enrich_options_chain_deltas(
         except Exception as e_greeks:
             logger.debug(f"[market.options] Dynamic Greeks enrichment exception: {e_greeks}")
 
+    # 4. Canonical Lot Size Verification (SSOT):
+    # Ensure all option contracts carry the authoritative SEBI contract lot size
+    try:
+        from market.symbol_master import get_lot_size as _master_lot
+        from market.instruments import get_fno_lot_size as _inst_lot
+
+        for c in chain:
+            sym = getattr(c, "symbol", "")
+            und = getattr(c, "underlying", "") or clean_und
+            canon_lot = _master_lot(sym)
+            if canon_lot <= 1:
+                canon_lot = _inst_lot(und)
+            if canon_lot > 0:
+                c.lot_size = canon_lot
+    except Exception as e_lot:
+        logger.debug(f"[market.options] Canonical lot size verification note: {e_lot}")
+
     return chain
 
 
@@ -351,22 +400,7 @@ def get_options_chain(
                     is_broker=True, is_empty=not bool(cached_chain), symbol=clean_sym
                 )
                 if (now - cached_at) < ttl:
-                    try:
-                        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
-
-                        with _quote_cache_lock:
-                            for c in cached_chain:
-                                q_rec = _QUOTE_CACHE.get(c.symbol)
-                                if q_rec:
-                                    q_obj = q_rec[1]
-                                    lp = getattr(q_obj, "last_price", 0.0)
-                                    if lp > 0:
-                                        c.ltp = lp
-                                    v = getattr(q_obj, "volume", 0)
-                                    if v > 0:
-                                        c.volume = v
-                    except Exception as e_tick:
-                        logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
+                    _overlay_live_quotes_on_chain(cached_chain)
                     return cached_chain
 
     # Institutional Single-Stock Physical Expiry Rollover:
@@ -440,7 +474,7 @@ def get_options_chain(
         except Exception as e_suppressed:
             logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
-        # Tier 1: data broker (live broker feed)
+        # Tier 1: primary data broker (live broker feed)
         if broker_available:
             try:
                 chain = get_data_broker().get_options_chain(underlying, expiry)
@@ -456,42 +490,42 @@ def get_options_chain(
                 warn_fallback(
                     "options", str(e), "commodity_black76" if is_commodity else "secondary_broker"
                 )
-                if not is_commodity:
-                    try:
-                        from brokers.session import get_all_brokers, get_data_broker_key
 
-                        pri_key = get_data_broker_key() or "broker"
-                        all_connected = get_all_brokers()
-                        for sec_key, sec_broker in all_connected.items():
-                            if sec_key == pri_key or getattr(sec_broker, "_is_mock", False):
-                                continue
-                            if hasattr(sec_broker, "get_options_chain"):
-                                try:
-                                    sec_chain = sec_broker.get_options_chain(underlying, expiry)
-                                    if sec_chain and any(
-                                        float(getattr(c, "last_price", 0.0) or 0.0) > 0
-                                        for c in sec_chain
-                                    ):
-                                        record_source("options", sec_key)
-                                        sec_chain = enrich_options_chain_deltas(
-                                            sec_chain, underlying, expiry
-                                        )
-                                        _store_in_chain_cache(cache_key, sec_chain)
-                                        if not is_index:
-                                            _store_in_chain_cache(f"{clean_sym}:nearest", sec_chain)
-                                        logger.info(
-                                            f"[market.options] 🔄 Secondary broker failover ({sec_key}) succeeded for {underlying} ({len(sec_chain)} contracts)"
-                                        )
-                                        chain_result = sec_chain
-                                        return sec_chain
-                                except Exception as e_sec_opt:
-                                    logger.debug(
-                                        f"[market.options] Secondary broker ({sec_key}) options chain failed: {e_sec_opt}"
-                                    )
-                    except Exception as e_sec_find:
-                        logger.debug(
-                            f"[market.options] Secondary broker search error: {e_sec_find}"
-                        )
+        # Tier 1b: Automatic Secondary Broker Failover (e.g. Flattrade) whenever primary is
+        # tripped, raised, or returned an empty/zero-LTP chain.
+        if not is_commodity:
+            try:
+                from brokers.session import get_all_brokers, get_data_broker_key
+
+                pri_key = get_data_broker_key() or "broker"
+                all_connected = get_all_brokers()
+                for sec_key, sec_broker in all_connected.items():
+                    if sec_key == pri_key or getattr(sec_broker, "_is_mock", False):
+                        continue
+                    if hasattr(sec_broker, "get_options_chain"):
+                        try:
+                            sec_chain = sec_broker.get_options_chain(underlying, expiry)
+                            if sec_chain and any(
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in sec_chain
+                            ):
+                                record_source("options", sec_key)
+                                sec_chain = enrich_options_chain_deltas(
+                                    sec_chain, underlying, expiry
+                                )
+                                _store_in_chain_cache(cache_key, sec_chain)
+                                if not is_index:
+                                    _store_in_chain_cache(f"{clean_sym}:nearest", sec_chain)
+                                logger.info(
+                                    f"[market.options] 🔄 Secondary broker failover ({sec_key}) succeeded for {underlying} ({len(sec_chain)} contracts)"
+                                )
+                                chain_result = sec_chain
+                                return sec_chain
+                        except Exception as e_sec_opt:
+                            logger.debug(
+                                f"[market.options] Secondary broker ({sec_key}) options chain failed: {e_sec_opt}"
+                            )
+            except Exception as e_sec_find:
+                logger.debug(f"[market.options] Secondary broker search error: {e_sec_find}")
 
         # Tier 2: For MCX commodities, build Black-76 theoretical option chain from live futures quote
         if is_commodity:
@@ -535,6 +569,25 @@ def get_options_chain(
                 _store_in_chain_cache(cache_key, chain)
                 chain_result = chain
                 return chain
+
+        # Tier 3.5: Stale-While-Revalidate (SWR) from unified in-memory cache
+        # If live broker request was throttled by rate gate, timed out, or returned empty,
+        # fallback to the existing valid cached chain in RAM overlayed with live quotes.
+        if not is_commodity:
+            with _CHAIN_CACHE_LOCK:
+                prior = _CHAIN_CACHE.get(cache_key) or (
+                    _CHAIN_CACHE.get(f"{clean_sym}:nearest") if not is_index else None
+                )
+                if prior and prior[1] and len(prior[1]) > 0:
+                    cached_at, cached_chain = prior
+                    _overlay_live_quotes_on_chain(cached_chain)
+                    record_source("options", "broker_swr_cached")
+                    logger.info(
+                        f"[market.options] ⚡ Stale-While-Revalidate: Served cached options chain for {clean_sym} "
+                        f"({len(cached_chain)} contracts, age {now - cached_at:.1f}s) under broker throttle."
+                    )
+                    chain_result = cached_chain
+                    return cached_chain
 
         # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
 
@@ -588,7 +641,11 @@ def get_options_chain(
                     logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
         record_source("options", "none")
-        _store_in_chain_cache(cache_key, [])
+        # Anti-Pattern Fix: Never poison the cache with empty [] if a valid cached chain already exists in memory
+        with _CHAIN_CACHE_LOCK:
+            existing = _CHAIN_CACHE.get(cache_key)
+            if not (existing and existing[1]):
+                _store_in_chain_cache(cache_key, [])
         chain_result = []
         return []
     finally:
@@ -829,30 +886,33 @@ def get_options_snapshot(
             if (now_ts - cached_at) < _SNAPSHOT_TTL:
                 return cached_res
 
-    # Tier 1: Primary Data Broker (m.Stock, Fyers, Shoonya, Zerodha)
+    # Tier 1: Delegate through unified get_options_chain() so _CHAIN_CACHE and
+    # _IN_FLIGHT_CHAIN_LOCK single-flight coalescing prevent duplicate broker REST storms.
     try:
         broker = get_data_broker()
         broker_name = get_data_broker_key() or getattr(broker, "name", "broker")
         if broker:
-            chain = broker.get_options_chain(underlying, expiry)
+            chain = get_options_chain(underlying, expiry)
             if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
                 spot = 0.0
                 try:
-                    spot_fn = getattr(broker, "get_ltp", None)
-                    if callable(spot_fn):
-                        spot = float(spot_fn(underlying) or 0.0)
-                except Exception as e_suppressed:
-                    logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
+                    from market.quotes import get_ltp as _mkt_ltp
+
+                    spot = float(_mkt_ltp(underlying) or 0.0)
+                except Exception:
+                    spot = 0.0
                 if not spot or spot <= 0:
                     try:
-                        from market.quotes import get_ltp as _mkt_ltp
-
-                        spot = float(_mkt_ltp(underlying) or 0.0)
-                    except Exception:
-                        spot = 0.0
-                expiries = getattr(broker, "get_expiries", lambda _: [])(underlying)
+                        spot_fn = getattr(broker, "get_ltp", None)
+                        if callable(spot_fn):
+                            spot = float(spot_fn(underlying) or 0.0)
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.options] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+                expiries = sorted({c.expiry for c in chain if getattr(c, "expiry", None)})
                 if not expiries:
-                    expiries = sorted({c.expiry for c in chain if c.expiry})
+                    expiries = get_expiries(underlying)
                 source_info = {
                     "provider": broker_name,
                     "source": "BROKER_REST",
@@ -927,7 +987,16 @@ def get_options_snapshot(
     return [], None, [], source_info
 
 
-def chain_to_dataframe(contracts: list[OptionsContract]) -> pd.DataFrame:
+def _field(c: Any, key: str, default: Any = None) -> Any:
+    """Universal accessor that seamlessly extracts attributes from objects or dictionary keys."""
+    if c is None:
+        return default
+    if isinstance(c, dict):
+        return c.get(key, default)
+    return getattr(c, key, default)
+
+
+def chain_to_dataframe(contracts: list[Any]) -> pd.DataFrame:
     """
     Convert options chain list to a pivot-style DataFrame
     matching the standard market display format:
@@ -939,18 +1008,24 @@ def chain_to_dataframe(contracts: list[OptionsContract]) -> pd.DataFrame:
 
     rows: dict[float, dict] = {}
     for c in contracts:
-        strike = c.strike
+        strike = float(_field(c, "strike", 0.0) or 0.0)
+        if strike <= 0:
+            continue
         if strike not in rows:
             rows[strike] = {"strike": strike}
-        prefix = c.option_type  # "CE" or "PE"
-        rows[strike][f"{prefix}_ltp"] = c.last_price
-        rows[strike][f"{prefix}_oi"] = c.oi
-        rows[strike][f"{prefix}_oi_chg"] = c.oi_change
-        rows[strike][f"{prefix}_volume"] = c.volume
-        rows[strike][f"{prefix}_iv"] = c.iv or 0.0
-        rows[strike][f"{prefix}_symbol"] = c.symbol
+        prefix = str(_field(c, "option_type", "")).upper()
+        if prefix not in ("CE", "PE"):
+            continue
+        rows[strike][f"{prefix}_ltp"] = float(_field(c, "last_price", 0.0) or 0.0)
+        rows[strike][f"{prefix}_oi"] = int(_field(c, "oi", 0) or 0)
+        rows[strike][f"{prefix}_oi_chg"] = int(_field(c, "oi_change", 0) or 0)
+        rows[strike][f"{prefix}_volume"] = int(_field(c, "volume", 0) or 0)
+        rows[strike][f"{prefix}_iv"] = float(_field(c, "iv", 0.0) or 0.0)
+        rows[strike][f"{prefix}_symbol"] = str(_field(c, "symbol", "") or "")
 
     df = pd.DataFrame(list(rows.values()))
+    if df.empty:
+        return df
     df = df.sort_values("strike").reset_index(drop=True)
 
     # Ensure all columns exist even if one side is missing
@@ -1028,7 +1103,7 @@ def get_atm_straddle_metrics(
     if not chain:
         return None
 
-    valid_contracts = [c for c in chain if float(getattr(c, "last_price", 0.0) or 0.0) > 0]
+    valid_contracts = [c for c in chain if float(_field(c, "last_price", 0.0) or 0.0) > 0]
     if not valid_contracts:
         return None
 
@@ -1037,8 +1112,8 @@ def get_atm_straddle_metrics(
         (
             c
             for c in valid_contracts
-            if float(getattr(c, "strike", 0.0)) == atm_k
-            and getattr(c, "option_type", "").upper() == "CE"
+            if float(_field(c, "strike", 0.0) or 0.0) == atm_k
+            and str(_field(c, "option_type", "")).upper() == "CE"
         ),
         None,
     )
@@ -1046,26 +1121,30 @@ def get_atm_straddle_metrics(
         (
             c
             for c in valid_contracts
-            if float(getattr(c, "strike", 0.0)) == atm_k
-            and getattr(c, "option_type", "").upper() == "PE"
+            if float(_field(c, "strike", 0.0) or 0.0) == atm_k
+            and str(_field(c, "option_type", "")).upper() == "PE"
         ),
         None,
     )
 
     if not atm_ce or not atm_pe:
         ce_candidates = [
-            c for c in valid_contracts if getattr(c, "option_type", "").upper() == "CE"
+            c for c in valid_contracts if str(_field(c, "option_type", "")).upper() == "CE"
         ]
         pe_candidates = [
-            c for c in valid_contracts if getattr(c, "option_type", "").upper() == "PE"
+            c for c in valid_contracts if str(_field(c, "option_type", "")).upper() == "PE"
         ]
         if not ce_candidates or not pe_candidates:
             return None
-        atm_ce = min(ce_candidates, key=lambda c: abs(float(c.strike) - spot))
-        atm_pe = min(pe_candidates, key=lambda c: abs(float(c.strike) - spot))
+        atm_ce = min(
+            ce_candidates, key=lambda c: abs(float(_field(c, "strike", 0.0) or 0.0) - spot)
+        )
+        atm_pe = min(
+            pe_candidates, key=lambda c: abs(float(_field(c, "strike", 0.0) or 0.0) - spot)
+        )
 
-    ce_ltp = float(getattr(atm_ce, "last_price", 0.0) or 0.0)
-    pe_ltp = float(getattr(atm_pe, "last_price", 0.0) or 0.0)
+    ce_ltp = float(_field(atm_ce, "last_price", 0.0) or 0.0)
+    pe_ltp = float(_field(atm_pe, "last_price", 0.0) or 0.0)
     if ce_ltp <= 0 or pe_ltp <= 0:
         return None
 
@@ -1076,14 +1155,14 @@ def get_atm_straddle_metrics(
     exp_thresh = round(straddle_p * 1.15, 2)
     noise_h = round(atm_k + (0.40 * straddle_p), 2)
     noise_l = round(atm_k - (0.40 * straddle_p), 2)
-    exp_date = getattr(atm_ce, "expiry", None) or expiry
+    exp_date = _field(atm_ce, "expiry", None) or expiry
 
     return ATMStraddleMetrics(
         underlying=clean_u,
         spot=spot,
         atm_strike=atm_k,
-        ce_symbol=getattr(atm_ce, "symbol", f"{clean_u} {atm_k} CE"),
-        pe_symbol=getattr(atm_pe, "symbol", f"{clean_u} {atm_k} PE"),
+        ce_symbol=str(_field(atm_ce, "symbol", f"{clean_u} {atm_k} CE")),
+        pe_symbol=str(_field(atm_pe, "symbol", f"{clean_u} {atm_k} PE")),
         ce_ltp=ce_ltp,
         pe_ltp=pe_ltp,
         straddle_price=straddle_p,
@@ -1103,9 +1182,23 @@ def get_atm_strike(underlying: str, spot: float) -> float:
     Return the at-the-money strike closest to spot price.
     """
     chain = get_options_chain(underlying)
-    strikes = sorted({c.strike for c in chain})
+    strikes = sorted(
+        {
+            float(_field(c, "strike", 0.0) or 0.0)
+            for c in chain
+            if float(_field(c, "strike", 0.0) or 0.0) > 0
+        }
+    )
     if not strikes:
-        return round(spot / 50) * 50  # fallback
+        try:
+            from market.symbol_master import get_strike_step
+
+            step = get_strike_step(underlying, spot=spot)
+            if step > 0:
+                return round(spot / step) * step
+        except Exception as e_step:
+            logger.debug(f"[market.options] Strike step lookup skipped for {underlying}: {e_step}")
+        return round(spot / 50.0) * 50.0  # fallback
     return min(strikes, key=lambda s: abs(s - spot))
 
 
@@ -1118,8 +1211,16 @@ def get_pcr(underlying: str, expiry: Optional[str] = None) -> Optional[float]:
     chain = get_options_chain(underlying, expiry)
     if not chain:
         return None
-    ce_oi = sum(c.oi for c in chain if c.option_type == "CE")
-    pe_oi = sum(c.oi for c in chain if c.option_type == "PE")
+    ce_oi = sum(
+        int(_field(c, "oi", 0) or 0)
+        for c in chain
+        if str(_field(c, "option_type", "")).upper() == "CE"
+    )
+    pe_oi = sum(
+        int(_field(c, "oi", 0) or 0)
+        for c in chain
+        if str(_field(c, "option_type", "")).upper() == "PE"
+    )
     if ce_oi == 0 and pe_oi == 0:
         return None
     if ce_oi == 0:
@@ -1138,14 +1239,23 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[floa
     chain = get_options_chain(underlying, expiry)
     if not chain:
         return None
-    strikes = sorted({c.strike for c in chain})
+    strikes = sorted(
+        {
+            float(_field(c, "strike", 0.0) or 0.0)
+            for c in chain
+            if float(_field(c, "strike", 0.0) or 0.0) > 0
+        }
+    )
     if not strikes:
         return None
 
     # Build quick lookup: strike → {CE: contract, PE: contract}
-    lookup: dict[float, dict[str, OptionsContract]] = {}
+    lookup: dict[float, dict[str, Any]] = {}
     for c in chain:
-        lookup.setdefault(c.strike, {})[c.option_type] = c
+        stk = float(_field(c, "strike", 0.0) or 0.0)
+        opt_type = str(_field(c, "option_type", "")).upper()
+        if stk > 0 and opt_type in ("CE", "PE"):
+            lookup.setdefault(stk, {})[opt_type] = c
 
     pain: dict[float, float] = {}
     for test_strike in strikes:
@@ -1155,13 +1265,13 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[floa
             pe = contracts.get("PE")
             # CE holders lose if test_strike < s (their CE expires worthless)
             if ce and test_strike < s:
-                total_pain += max(0, s - test_strike) * ce.oi
+                total_pain += max(0.0, s - test_strike) * int(_field(ce, "oi", 0) or 0)
             # PE holders lose if test_strike > s
             if pe and test_strike > s:
-                total_pain += max(0, test_strike - s) * pe.oi
+                total_pain += max(0.0, test_strike - s) * int(_field(pe, "oi", 0) or 0)
         pain[test_strike] = total_pain
 
-    return min(pain, key=pain.get)  # type: ignore[arg-type]
+    return min(pain, key=pain.get) if pain else None
 
 
 # ── Human-Readable Option Formatting ──────────────────────────
@@ -1459,7 +1569,19 @@ def compute_chain_gex(
         else:
             resolved_lot = 1
 
+    # High-Performance In-RAM Vectorized Evaluation (<0.5ms)
+    try:
+        from market.vectorized_greeks import vectorized_compute_gex
+
+        return vectorized_compute_gex(
+            chain, spot=spot, lot_size=resolved_lot, underlying=underlying or ""
+        )
+    except Exception as e_vec:
+        logger.debug(f"[market.options] Vectorized GEX fallback to scalar loop: {e_vec}")
+
     strike_gex: dict[float, float] = defaultdict(float)
+    strike_call_gex: dict[float, float] = defaultdict(float)
+    strike_put_gex: dict[float, float] = defaultdict(float)
     strike_dex: dict[float, float] = defaultdict(float)
     total_call_gex = 0.0
     total_put_gex = 0.0
@@ -1487,32 +1609,38 @@ def compute_chain_gex(
         if strike <= 0 or oi <= 0 or opt_type not in ("CE", "PE"):
             continue
 
-        # If gamma is not provided, analytically compute Black-Scholes gamma
-        if gamma_val <= 0:
-            t_years = 4.0 / 365.25  # default near-term ~4 days
-            if exp_str:
-                for fmt in ("%Y-%m-%d", "%d%b%y", "%d%b%Y", "%d-%b-%Y"):
-                    try:
-                        exp_dt = datetime.strptime(exp_str.strip().upper(), fmt).replace(
-                            tzinfo=timezone.utc
-                        )
-                        t_days = max(0.25, (exp_dt - now).total_seconds() / 86400.0)
-                        t_years = t_days / 365.25
-                        break
-                    except Exception as e:
-                        logger.debug(f"[market.options] Exp parsing suppressed: {e}")
+        # Compute expiry time-to-maturity in IST (15:30 IST settlement close) and Black-Scholes d1
+        t_years = 4.0 / 365.25  # default near-term ~4 days
+        if exp_str:
+            from config.constants import IST
 
-            sigma = max(0.08, min(2.5, iv / 100.0)) if iv > 0 else 0.15
-            r = 0.065  # 6.5% standard RBI rate
+            now_ist = now.astimezone(IST)
+            for fmt in ("%Y-%m-%d", "%d%b%y", "%d%b%Y", "%d-%b-%Y"):
+                try:
+                    exp_naive = datetime.strptime(exp_str.strip().upper(), fmt)
+                    exp_dt = exp_naive.replace(hour=15, minute=30, tzinfo=IST)
+                    t_days = max(0.05, (exp_dt - now_ist).total_seconds() / 86400.0)
+                    t_years = t_days / 365.25
+                    break
+                except Exception as e:
+                    logger.debug(f"[market.options] Exp parsing suppressed: {e}")
 
+        sigma = max(0.08, min(2.5, iv / 100.0)) if iv > 0 else 0.15
+        r = 0.065  # 6.5% standard RBI rate
+
+        d1 = None
+        if spot > 0 and strike > 0:
             try:
                 d1 = (math.log(spot / strike) + (r + 0.5 * sigma * sigma) * t_years) / (
                     sigma * math.sqrt(t_years)
                 )
-                pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
-                gamma_val = pdf_d1 / (spot * sigma * math.sqrt(t_years))
+                if gamma_val <= 0:
+                    pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+                    gamma_val = pdf_d1 / (spot * sigma * math.sqrt(t_years))
             except (ValueError, ZeroDivisionError, OverflowError):
-                gamma_val = 0.0
+                d1 = None
+                if gamma_val <= 0:
+                    gamma_val = 0.0
 
         if gamma_val <= 0:
             continue
@@ -1521,22 +1649,29 @@ def compute_chain_gex(
         notional_gamma = gamma_val * (spot**2) * 0.01 * oi * resolved_lot
 
         # Analytical Black-Scholes Dealer Delta Exposure (DEX in Crores)
+        # Dealer is net short customer options: CE dealer_delta = -delta (<0), PE dealer_delta = -delta (>0 since put delta < 0)
         try:
-            cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-            delta_val = cdf_d1 if opt_type == "CE" else (cdf_d1 - 1.0)
-            dealer_delta = -delta_val if opt_type == "CE" else (1.0 - delta_val)
-            dex_cr = (dealer_delta * spot * oi * resolved_lot) / 1e7
-        except Exception:
+            if d1 is not None:
+                cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+                delta_val = cdf_d1 if opt_type == "CE" else (cdf_d1 - 1.0)
+                dealer_delta = -delta_val
+                dex_cr = (dealer_delta * spot * oi * resolved_lot) / 1e7
+            else:
+                dex_cr = 0.0
+        except Exception as e_dex:
+            logger.debug(f"[market.options] DEX calculation error for strike {strike}: {e_dex}")
             dex_cr = 0.0
 
         if opt_type == "CE":
             total_call_gex += notional_gamma
             strike_gex[strike] += notional_gamma
+            strike_call_gex[strike] += notional_gamma
             total_call_dex += dex_cr
             strike_dex[strike] += dex_cr
         else:
             total_put_gex += notional_gamma
             strike_gex[strike] -= notional_gamma
+            strike_put_gex[strike] += notional_gamma
             total_put_dex += dex_cr
             strike_dex[strike] += dex_cr
 
@@ -1544,6 +1679,11 @@ def compute_chain_gex(
 
     net_gex = total_call_gex - total_put_gex
     regime = "POSITIVE_GAMMA_PIN" if net_gex >= 0 else "NEGATIVE_GAMMA_ACCELERATION"
+
+    # Call Wall (Maximum positive Call GEX — strong dealer selling resistance)
+    call_wall = max(strike_call_gex.items(), key=lambda x: x[1])[0] if strike_call_gex else spot
+    # Put Wall (Maximum Put GEX — strong dealer buying support)
+    put_wall = max(strike_put_gex.items(), key=lambda x: x[1])[0] if strike_put_gex else spot
 
     # Compute Gamma Flip Strike
     sorted_strikes = sorted(strike_gex.keys())
@@ -1578,6 +1718,8 @@ def compute_chain_gex(
         "net_gex": round(net_gex, 2),
         "call_gex": round(total_call_gex, 2),
         "put_gex": round(total_put_gex, 2),
+        "call_wall": round(call_wall, 2),
+        "put_wall": round(put_wall, 2),
         "gamma_regime": regime,
         "gex_flip_strike": round(flip_strike, 2),
         "is_acceleration_zone": bool(is_acceleration),
@@ -1625,54 +1767,119 @@ def compute_options_iv_skew(
         .upper()
     )
 
-    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        step = 100.0
-    elif clean_und in ("NIFTY", "FINNIFTY"):
-        step = 50.0
-    elif clean_und == "MIDCPNIFTY":
-        step = 25.0
-    else:
-        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+    try:
+        from market.symbol_master import get_strike_step
+
+        step = float(get_strike_step(clean_und, spot=spot))
+        if step <= 0:
+            step = 50.0
+    except Exception:
+        if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+            step = 100.0
+        elif clean_und in ("NIFTY", "FINNIFTY"):
+            step = 50.0
+        elif clean_und == "MIDCPNIFTY":
+            step = 25.0
+        else:
+            step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
 
     atm_strike = round(spot / step) * step
 
     calls = {
-        float(getattr(c, "strike", 0.0)): c for c in chain if getattr(c, "option_type", "") == "CE"
+        float(_field(c, "strike", 0.0) or 0.0): c
+        for c in chain
+        if _field(c, "option_type", "") == "CE"
     }
     puts = {
-        float(getattr(c, "strike", 0.0)): c for c in chain if getattr(c, "option_type", "") == "PE"
+        float(_field(c, "strike", 0.0) or 0.0): c
+        for c in chain
+        if _field(c, "option_type", "") == "PE"
     }
 
     atm_c = calls.get(atm_strike)
     atm_p = puts.get(atm_strike)
 
-    atm_c_iv = float(getattr(atm_c, "iv", 0.0) or 0.0)
-    atm_p_iv = float(getattr(atm_p, "iv", 0.0) or 0.0)
+    atm_c_iv = float(_field(atm_c, "iv", 0.0) or 0.0)
+    atm_p_iv = float(_field(atm_p, "iv", 0.0) or 0.0)
+
+    # Resolve DTE for implied volatility solver fallback
+    dte_val = 7
+    exp_str = _field(atm_c or atm_p, "expiry", None)
+    if exp_str:
+        try:
+            from datetime import date
+
+            exp_d = date.fromisoformat(str(exp_str)[:10])
+            dte_val = max(1, (exp_d - date.today()).days)
+        except Exception:
+            dte_val = 7
+
+    from engine.options_backtest import bs_iv
 
     if atm_c_iv <= 0:
         nearby_c = [
-            c for c in chain if getattr(c, "option_type", "") == "CE" and getattr(c, "iv", 0.0)
+            c for c in chain if _field(c, "option_type", "") == "CE" and _field(c, "iv", 0.0)
         ]
         if nearby_c:
-            nearby_c.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-            atm_c_iv = float(getattr(nearby_c[0], "iv", 0.0) or 0.0)
+            nearby_c.sort(key=lambda c: abs(float(_field(c, "strike", 0.0) or 0.0) - spot))
+            atm_c_iv = float(_field(nearby_c[0], "iv", 0.0) or 0.0)
+        elif atm_c and float(_field(atm_c, "last_price", 0.0) or 0.0) > 0:
+            c_px = float(_field(atm_c, "last_price", 0.0))
+            solved_c = bs_iv(c_px, spot, atm_strike, dte_val, "CE")
+            if solved_c:
+                atm_c_iv = round(solved_c * 100.0, 2)
 
     if atm_p_iv <= 0:
         nearby_p = [
-            c for c in chain if getattr(c, "option_type", "") == "PE" and getattr(c, "iv", 0.0)
+            c for c in chain if _field(c, "option_type", "") == "PE" and _field(c, "iv", 0.0)
         ]
         if nearby_p:
-            nearby_p.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-            atm_p_iv = float(getattr(nearby_p[0], "iv", 0.0) or 0.0)
+            nearby_p.sort(key=lambda c: abs(float(_field(c, "strike", 0.0) or 0.0) - spot))
+            atm_p_iv = float(_field(nearby_p[0], "iv", 0.0) or 0.0)
+        elif atm_p and float(_field(atm_p, "last_price", 0.0) or 0.0) > 0:
+            p_px = float(_field(atm_p, "last_price", 0.0))
+            solved_p = bs_iv(p_px, spot, atm_strike, dte_val, "PE")
+            if solved_p:
+                atm_p_iv = round(solved_p * 100.0, 2)
 
-    atm_skew = round(atm_c_iv - atm_p_iv, 2) if (atm_c_iv > 0 and atm_p_iv > 0) else 0.0
+    if atm_c_iv <= 0 or atm_p_iv <= 0:
+        return {
+            "status": "UNAVAILABLE",
+            "atm_strike": atm_strike,
+            "atm_call_iv": atm_c_iv,
+            "atm_put_iv": atm_p_iv,
+            "atm_skew": None,
+            "otm_call_iv": 0.0,
+            "otm_put_iv": 0.0,
+            "wing_skew": None,
+            "skew_25d": None,
+            "regime": "UNAVAILABLE",
+            "spread_pricing_edge": "IV surface data unavailable for underlying",
+            "is_call_skew_elevated": False,
+            "is_put_skew_elevated": False,
+        }
+
+    atm_skew = round(atm_c_iv - atm_p_iv, 2)
 
     otm_c_strike = atm_strike + (step * 2)
     otm_p_strike = max(step, atm_strike - (step * 2))
     otm_c = calls.get(otm_c_strike)
     otm_p = puts.get(otm_p_strike)
-    otm_c_iv = float(getattr(otm_c, "iv", 0.0) or 0.0)
-    otm_p_iv = float(getattr(otm_p, "iv", 0.0) or 0.0)
+    otm_c_iv = float(_field(otm_c, "iv", 0.0) or 0.0)
+    otm_p_iv = float(_field(otm_p, "iv", 0.0) or 0.0)
+
+    if otm_c_iv <= 0 and otm_c and float(_field(otm_c, "last_price", 0.0) or 0.0) > 0:
+        otm_c_px = float(_field(otm_c, "last_price", 0.0))
+        solved_otm_c = bs_iv(otm_c_px, spot, otm_c_strike, dte_val, "CE")
+        if solved_otm_c:
+            otm_c_iv = round(solved_otm_c * 100.0, 2)
+
+    if otm_p_iv <= 0 and otm_p and float(_field(otm_p, "last_price", 0.0) or 0.0) > 0:
+        otm_p_px = float(_field(otm_p, "last_price", 0.0))
+        solved_otm_p = bs_iv(otm_p_px, spot, otm_p_strike, dte_val, "PE")
+        if solved_otm_p:
+            otm_p_iv = round(solved_otm_p * 100.0, 2)
+
     wing_skew = round(otm_c_iv - otm_p_iv, 2) if (otm_c_iv > 0 and otm_p_iv > 0) else 0.0
 
     from engine.iv_surface import calculate_25delta_skew

@@ -31,6 +31,8 @@ Calibrations:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time as dtime
 from typing import Any, Optional
@@ -212,6 +214,9 @@ class HierarchicalSignalPipeline:
     def __init__(self) -> None:
         self.min_confluence_score = 75
         self.min_indicative_rr_floor = 1.8
+        self._3cs_cache: dict[str, tuple[float, Level1ContextResult]] = {}
+        self._3cs_lock = threading.Lock()
+        self._3cs_ttl = 15.0
 
     # ── Level 1: Market Context (Modernized 3Cs) ──────────────────────────────
 
@@ -230,6 +235,14 @@ class HierarchicalSignalPipeline:
         now_dt = ref_dt or datetime.now(IST)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=IST)
+
+        cache_key = f"{clean_sym}:{exchange}:{time_horizon}:{strategy_orientation}"
+        if alert is None and ref_dt is None:
+            with self._3cs_lock:
+                if cache_key in self._3cs_cache:
+                    c_ts, c_res = self._3cs_cache[cache_key]
+                    if time.time() - c_ts < self._3cs_ttl:
+                        return c_res
 
         res = Level1ContextResult()
         is_intraday = time_horizon.upper() in ("INTRADAY", "SCALP", "0DTE")
@@ -360,8 +373,81 @@ class HierarchicalSignalPipeline:
             logger.debug(f"[HierarchicalEngine] Indicator snapshot lookup error: {e_snap}")
 
         # ── Environmental Decision Logic ──
-        # Rule: Edgeless Chop Gate
-        if is_intraday and res.is_edgeless_chop:
+        # Rule 1: Edgeless Chop Gate
+        flow_conflict_pillars: list[str] = []
+        if is_intraday and is_directional and alert is not None:
+            metrics_l1 = getattr(alert, "metrics", {}) or {}
+            if isinstance(metrics_l1, dict):
+                alert_dir = str(getattr(alert, "direction", "BULLISH")).upper()
+                is_bull_dir = alert_dir not in ("BEARISH", "SHORT", "SELL")
+                eagle_l1 = metrics_l1.get("eagle_regime") or {}
+                mtf_l1 = eagle_l1.get("multi_tf") if isinstance(eagle_l1, dict) else {}
+                trend_15m_l1 = str((mtf_l1 or {}).get("trend_15m", "")).upper()
+                hw_align_l1 = str((eagle_l1 or {}).get("heavyweights_alignment", "")).upper()
+                dmi_l1 = str(
+                    metrics_l1.get("dmi_triple_verdict") or metrics_l1.get("dmi_model") or ""
+                ).upper()
+                avwap_l1 = str(metrics_l1.get("avwap_bias", "")).upper()
+                obv_l1 = str(metrics_l1.get("obv_divergence", "")).upper()
+                spot_l1 = float(
+                    getattr(alert, "underlying_spot", 0.0) or metrics_l1.get("spot", 0.0) or 0.0
+                )
+                vwap_l1 = float(metrics_l1.get("vwap", 0.0) or 0.0)
+
+                if is_bull_dir:
+                    if trend_15m_l1 == "BEARISH":
+                        flow_conflict_pillars.append("15m_BEARISH")
+                    if dmi_l1 == "TRIPLE_BEARISH_CONFIRMED":
+                        flow_conflict_pillars.append("TRIPLE_DMI_BEARISH")
+                    if avwap_l1 == "BEARISH" or (
+                        vwap_l1 > 0 and spot_l1 > 0 and spot_l1 < vwap_l1 * 0.998
+                    ):
+                        flow_conflict_pillars.append("BELOW_VWAP_AVWAP")
+                    if res.participant_fii_bias in ("BEARISH", "EXTREME_BEARISH"):
+                        flow_conflict_pillars.append("FII_BEARISH")
+                    if hw_align_l1 in ("STRONG_BEARISH", "MODERATE_BEARISH"):
+                        flow_conflict_pillars.append("HEAVYWEIGHTS_BEARISH")
+                    if obv_l1 == "BEARISH_DIVERGENCE":
+                        flow_conflict_pillars.append("OBV_BEARISH")
+                    has_bull_orderflow = bool(
+                        (res.order_flow_obi is not None and float(res.order_flow_obi) >= 0.15)
+                        or str(res.cvd_divergence or "").upper() == "BULLISH_ABSORPTION"
+                    )
+                    if len(flow_conflict_pillars) >= 4 and not has_bull_orderflow:
+                        res.passed = False
+                        res.status = "COUNTER_FLOW_CONFLICT"
+                        res.reasons.append(
+                            f"Bullish entry blocked by {len(flow_conflict_pillars)} opposing flow pillars ({', '.join(flow_conflict_pillars)}) without order-book absorption"
+                        )
+                else:
+                    if trend_15m_l1 == "BULLISH":
+                        flow_conflict_pillars.append("15m_BULLISH")
+                    if dmi_l1 == "TRIPLE_BULLISH_CONFIRMED":
+                        flow_conflict_pillars.append("TRIPLE_DMI_BULLISH")
+                    if avwap_l1 == "BULLISH" or (
+                        vwap_l1 > 0 and spot_l1 > 0 and spot_l1 > vwap_l1 * 1.002
+                    ):
+                        flow_conflict_pillars.append("ABOVE_VWAP_AVWAP")
+                    if res.participant_fii_bias in ("BULLISH", "OVERCROWDED_BULLISH"):
+                        flow_conflict_pillars.append("FII_BULLISH")
+                    if hw_align_l1 in ("STRONG_BULLISH", "MODERATE_BULLISH"):
+                        flow_conflict_pillars.append("HEAVYWEIGHTS_BULLISH")
+                    if obv_l1 == "BULLISH_DIVERGENCE":
+                        flow_conflict_pillars.append("OBV_BULLISH")
+                    has_bear_orderflow = bool(
+                        (res.order_flow_obi is not None and float(res.order_flow_obi) <= -0.15)
+                        or str(res.cvd_divergence or "").upper() == "BEARISH_EXHAUSTION"
+                    )
+                    if len(flow_conflict_pillars) >= 4 and not has_bear_orderflow:
+                        res.passed = False
+                        res.status = "COUNTER_FLOW_CONFLICT"
+                        res.reasons.append(
+                            f"Bearish entry blocked by {len(flow_conflict_pillars)} opposing flow pillars ({', '.join(flow_conflict_pillars)}) without order-book exhaustion"
+                        )
+
+        if not res.passed:
+            pass
+        elif is_intraday and res.is_edgeless_chop:
             if is_directional:
                 res.passed = False
                 res.status = "EDGELESS_CHOP"
@@ -378,9 +464,22 @@ class HierarchicalSignalPipeline:
                 res.coaching_notes.append(
                     "Edgeless chop creates ideal conditions for defined-risk non-directional premium collection"
                 )
+        elif (
+            is_intraday
+            and is_directional
+            and res.adr_exhaustion_pct >= 90.0
+            and alert is not None
+            and any("ADR exhausted" in r for r in res.reasons)
+        ):
+            res.passed = False
+            res.status = "ADR_EXHAUSTED"
         else:
             res.passed = True
             res.status = "FAVORABLE"
+
+        if alert is None and ref_dt is None:
+            with self._3cs_lock:
+                self._3cs_cache[cache_key] = (time.time(), res)
 
         return res
 
@@ -473,13 +572,27 @@ class HierarchicalSignalPipeline:
             location_anchors.append("CENTRAL_PIVOT_RANGE")
 
         res.location_anchors = location_anchors
-        # Calculate structural confluence score
+        # Calculate structural confluence score (and penalize contradictory DMI / 15m trend)
         base_score = 65
         base_score += len(location_anchors) * 7
         if metrics.get("has_flow"):
             base_score += 5
+        dmi_u = str(metrics.get("dmi_triple_verdict") or metrics.get("dmi_model") or "").upper()
+        dir_u = str(getattr(alert, "direction", "BULLISH")).upper()
+        is_bull_l2 = dir_u not in ("BEARISH", "SHORT", "SELL")
+        has_counter_flow = bool(
+            (is_bull_l2 and dmi_u == "TRIPLE_BEARISH_CONFIRMED")
+            or (not is_bull_l2 and dmi_u == "TRIPLE_BULLISH_CONFIRMED")
+        )
+        if has_counter_flow:
+            base_score -= 12
+            res.coaching_notes.append(
+                f"Counter-flow penalty (-12): Triple-DMI ({dmi_u}) opposes {dir_u} entry"
+            )
         res.structural_confluence_score = min(98, max(50, base_score))
-        res.has_sufficient_confluence = len(location_anchors) >= 1 or base_score >= 75
+        res.has_sufficient_confluence = (
+            len(location_anchors) >= 1 and res.structural_confluence_score >= 70
+        ) or res.structural_confluence_score >= 75
 
         # 4. WHAT: Asset Selection & Instrument Feasibility
         contract = getattr(alert, "contract_symbol", None) or metrics.get("contract_symbol")
@@ -585,15 +698,33 @@ class HierarchicalSignalPipeline:
         # Check Anti-Chase Boundary Violation
         direction_str = str(getattr(alert, "direction", "BULLISH")).upper()
         is_bull = direction_str not in ("BEARISH", "SHORT", "SELL")
+        act_plan_str = str((plan_dict or {}).get("action", "")).upper()
+        is_option_long = bool(
+            getattr(alert, "contract_symbol", None)
+            or getattr(alert, "option_type", None)
+            or str(getattr(alert, "preferred_vehicle", "")).upper()
+            in ("NAKED_OPTION", "OPTION", "SPREAD_ONLY")
+            or act_plan_str.startswith("BUY")
+            or "LONG" in act_plan_str
+        )
+        if is_option_long:
+            is_upside_profit = True
+        elif (
+            alert.target_level and alert.trigger_level and alert.target_level != alert.trigger_level
+        ):
+            is_upside_profit = alert.target_level > alert.trigger_level
+        else:
+            is_upside_profit = is_bull
+
         if no_chase > 0 and ltp > 0:
-            if is_bull and ltp > no_chase:
+            if is_upside_profit and ltp > no_chase:
                 res.is_chased = True
                 res.passed = False
                 res.status = "CHASED_ENTRY"
                 res.reasons.append(
                     f"Price ₹{ltp:,.2f} surged past no-chase boundary ₹{no_chase:,.2f}; chasing prohibited"
                 )
-            elif not is_bull and ltp < no_chase:
+            elif not is_upside_profit and ltp < no_chase:
                 res.is_chased = True
                 res.passed = False
                 res.status = "CHASED_ENTRY"
@@ -760,6 +891,10 @@ class HierarchicalSignalPipeline:
             verdict_label = "SUPPRESSED_REGIME_CHOP"
             conviction_tier = "DEFINED_RISK_ONLY"
             primary_reason = l1.reasons[0] if l1.reasons else "Suppressed by edgeless chop regime"
+        elif not l1.passed:
+            verdict_label = f"VETOED_{l1.status}" if l1.status else "VETOED_CONTEXT"
+            conviction_tier = "REJECTED"
+            primary_reason = l1.reasons[0] if l1.reasons else "Market context vetoed setup"
         elif not l2.passed:
             verdict_label = "VETOED_TRAP" if l2.status == "TRAP_VETO" else "REJECTED_SETUP"
             conviction_tier = "REJECTED"
@@ -770,7 +905,9 @@ class HierarchicalSignalPipeline:
             )
             conviction_tier = "REJECTED"
             primary_reason = l3.reasons[0] if l3.reasons else "Execution parameters disqualified"
-        elif composite_score >= 85 or getattr(alert, "confidence", 0) >= 90:
+        elif composite_score >= 85 or (
+            getattr(alert, "confidence", 0) >= 90 and l2.structural_confluence_score >= 75
+        ):
             verdict_label = "APEX_APPROVED"
             conviction_tier = "APEX_CONFLUENCE"
             primary_reason = (

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import OpsDeckView from '../renderer/src/components/Views/OpsDeckView'
 
 const mockRadarData = {
@@ -238,6 +238,9 @@ describe('OpsDeckView — Universe Depth Radar Master-Detail Integration', () =>
     // Now Active Inspector is visible
     expect(screen.getByText('ACTIVE INSPECTOR')).toBeInTheDocument()
     expect(screen.getByText(/Inspector: Docked/i)).toBeInTheDocument()
+    await act(async () => {
+      await Promise.resolve()
+    })
 
     // Clicking close (✕) button collapses the inspector back
     const closeBtn = screen.getByTestId('close-radar-inspector')
@@ -253,6 +256,9 @@ describe('OpsDeckView — Universe Depth Radar Master-Detail Integration', () =>
 
     expect(screen.getByText('ACTIVE INSPECTOR')).toBeInTheDocument()
     expect(screen.getByText(/Inspector: Docked/i)).toBeInTheDocument()
+    await act(async () => {
+      await Promise.resolve()
+    })
   })
 
   it('isolates Sentinel hover card to column with screen-adaptive solid opaque portal', async () => {

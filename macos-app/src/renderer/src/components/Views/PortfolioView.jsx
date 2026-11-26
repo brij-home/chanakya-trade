@@ -632,7 +632,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                               quantity: Math.abs(Number(row.qty || 1)),
                               entry_price: row.ltp || row.avg_price,
                               order_type: 'MARKET',
-                              product: row.product || 'INTRADAY',
+                              product: row.product || 'MIS',
                             })
                           }}
                           className="text-[10px] px-2 py-1 rounded-lg font-bold text-rose-400 border border-rose-500/30 hover:bg-rose-500/10 transition-all cursor-pointer"

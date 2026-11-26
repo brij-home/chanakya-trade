@@ -36,6 +36,7 @@ import pandas as pd
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import ActionableBlueprint, AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
+from market.rule_schedule import intraday_squareoff_cutoff
 
 logger = logging.getLogger("chanakya.detectors.turtle_soup")
 IST = ZoneInfo("Asia/Kolkata")
@@ -73,6 +74,7 @@ def detect_turtle_soup_sweep(
     rvol: float = 1.0,
     session_date: Optional[date] = None,
     time_horizon: str = "INTRADAY",
+    change_pct: Optional[float] = None,
 ) -> Optional[AutoAlert]:
     """
     Scans for institutional liquidity sweep rejections (Turtle Soup)
@@ -113,6 +115,7 @@ def detect_turtle_soup_sweep(
     sweep_type: Optional[str] = None
     sweep_level: float = 0.0
     sweep_wick_ext: float = 0.0
+    sweep_wick_ratio: float = 0.0
 
     for idx in eval_bars:
         b_o = float(o_s.iloc[idx])
@@ -133,6 +136,7 @@ def detect_turtle_soup_sweep(
                 sweep_type = "BEARISH_UPTHRUST"
                 sweep_level = prior_high
                 sweep_wick_ext = b_h
+                sweep_wick_ratio = upper_shadow
                 break
 
         # 2. Bullish Spring (Bear Trap at Prior Low)
@@ -144,6 +148,7 @@ def detect_turtle_soup_sweep(
                 sweep_type = "BULLISH_SPRING"
                 sweep_level = prior_low
                 sweep_wick_ext = b_l
+                sweep_wick_ratio = lower_shadow
                 break
 
     if not sweep_type:
@@ -158,21 +163,41 @@ def detect_turtle_soup_sweep(
     is_bullish = sweep_type == "BULLISH_SPRING"
     direction = "BULLISH" if is_bullish else "BEARISH"
 
-    # ── VWAP Trend Alignment Guard ──
+    # ── Trend Day & Relative Strength Alignment Guard ──
+    session_open_move_pct = 0.0
+    if len(o_s) > 0 and float(o_s.iloc[0]) > 0:
+        session_open_move_pct = (curr_ltp - float(o_s.iloc[0])) / float(o_s.iloc[0]) * 100.0
+
+    eff_chg = change_pct if change_pct is not None else session_open_move_pct
+
     effective_vwap = vwap if (vwap and vwap > 0) else None
     if effective_vwap:
-        if is_bullish and curr_ltp < effective_vwap * 0.985:
-            logger.debug(
-                f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Deeply submerged below VWAP "
-                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
-            )
-            return None
-        if not is_bullish and curr_ltp > effective_vwap * 1.015:
-            logger.debug(
-                f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
-                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
-            )
-            return None
+        if is_bullish:
+            if curr_ltp < effective_vwap * 0.998 and eff_chg <= -0.80:
+                logger.info(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Trend Day Lockout "
+                    f"(Stock is down {eff_chg:.2f}% and submerged below VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+            if curr_ltp < effective_vwap * 0.985:
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Deeply submerged below VWAP "
+                    f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+        else:
+            if curr_ltp > effective_vwap * 1.002 and eff_chg >= 0.80:
+                logger.info(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Trend Day Lockout "
+                    f"(Stock is up {eff_chg:.2f}% and holding firmly above VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
+            if curr_ltp > effective_vwap * 1.010:
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
+                    f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+                )
+                return None
 
     # ── Microstructure / TBT 50-Depth Order Book Confirmation ──
     try:
@@ -234,16 +259,19 @@ def detect_turtle_soup_sweep(
                     )
                     return None
 
-                # If bearish upthrust: verify we aren't shorting an active Camarilla H4 breakout
+                # If bearish upthrust: verify we aren't shorting a genuine green Camarilla H4 breakout candle.
+                # A true liquidity sweep (upper rejection shadow >= 35%) above H4 is a valid bull trap to short.
+                # Only suppress if candle is expanding upward with no upper rejection wick (< 25%).
                 if (
                     not is_bullish
                     and cam_h4 > 0
                     and curr_ltp > cam_h4
                     and abs(curr_ltp - cam_h4) / cam_h4 <= 0.02
+                    and sweep_wick_ratio < 0.25
                 ):
                     logger.debug(
                         f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
-                        f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f}"
+                        f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f} with active upward expansion"
                     )
                     return None
     except Exception as e_cam:
@@ -351,7 +379,10 @@ def detect_turtle_soup_sweep(
     resolved_opt = None
 
     try:
-        if is_index_symbol(clean_sym):
+        from engine.position_sizer import get_lot_size
+
+        stock_lot = get_lot_size(clean_sym)
+        if is_index_symbol(clean_sym) or stock_lot > 1:
             resolved_opt = resolve_option_contract(
                 symbol=clean_sym,
                 spot=curr_ltp,
@@ -383,20 +414,32 @@ def detect_turtle_soup_sweep(
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
-        entry_range=f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
-        trigger_level=entry_price,
-        invalidation_stop=stop_loss,
-        target_1=target_1,
-        target_2=target_2,
-        runner_target=runner_target,
-        risk_reward=f"1:{rr_ratio:.1f}",
-        no_chase_boundary=no_chase,
+        entry_range=f"₹{opt_entry * 0.98:,.2f} – ₹{opt_entry * 1.02:,.2f}"
+        if has_opt
+        else f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+        trigger_level=opt_entry if has_opt else entry_price,
+        invalidation_stop=opt_sl if has_opt else stop_loss,
+        target_1=opt_t1 if has_opt else target_1,
+        target_2=opt_t2 if has_opt else target_2,
+        runner_target=opt_t3 if has_opt else runner_target,
+        risk_reward=f"1:{round((opt_t1 - opt_entry) / max(0.5, opt_entry - opt_sl), 1)}"
+        if has_opt
+        else f"1:{rr_ratio:.1f}",
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
-        when_to_buy=f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection."
-        + (f" (Option {contract_symbol} near ₹{opt_entry:,.2f})" if has_opt else ""),
-        when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
-        + (f" (or premium beyond ₹{opt_nc:,.2f})" if has_opt else ""),
-        segment="FNO_INDEX" if is_index_symbol(clean_sym) else "EQUITY",
+        when_to_buy=(
+            f"Limit order at OTE pullback near ₹{opt_entry:,.2f} ({contract_symbol})."
+            if has_opt
+            else f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection."
+        ),
+        when_to_wait=(
+            f"Do not chase if premium exceeds ₹{opt_nc:,.2f}."
+            if has_opt
+            else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
+        ),
+        segment="FNO_INDEX"
+        if is_index_symbol(clean_sym)
+        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
         contract=contract_symbol,
         strike=strike,
         option_type=option_type,
@@ -432,12 +475,41 @@ def detect_turtle_soup_sweep(
         style_val = "SWING_REVERSAL"
     else:
         horizon_val = "INTRADAY"
-        eta_desc = "Today 15:15 IST" if exchange != "MCX" else "Today 23:15 IST"
+        if exchange == "MCX":
+            eta_desc = "Today 23:15 IST"
+        else:
+            _sqoff_ts = intraday_squareoff_cutoff(
+                date.today(), is_derivative=(exchange in ("NFO", "BFO"))
+            )
+            eta_desc = f"Today {_sqoff_ts.strftime('%H:%M')} IST"
         style_val = "INTRADAY_REVERSAL"
 
     confidence_val = 89 if smt_confirmed else 82
     if calib and calib.is_mean_reversion_favored:
         confidence_val = min(94, confidence_val + 4)
+
+    # Multi-Timeframe Fractal Entry Coordination (Micro-Sweep & Scale-Out Plan)
+    try:
+        from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+        zone_h = max(sweep_level, sweep_wick_ext)
+        zone_l = min(sweep_level, sweep_wick_ext)
+        fractal_res = coordinate_fractal_entry(
+            symbol=clean_sym,
+            htf_zone_high=zone_h,
+            htf_zone_low=zone_l,
+            direction=direction,
+            df_ltf=df,
+            primary_rvol=rvol,
+        )
+        if fractal_res:
+            blueprint.extra_details["fractal_blueprint"] = fractal_res.to_dict()
+            blueprint.extra_details["scale_out_plan"] = fractal_res.scale_out_plan
+            blueprint.execution_style = fractal_res.limit_entry_style
+    except Exception as e_fractal:
+        logger.debug(f"[TurtleSoup] Fractal entry coordination non-fatal exception: {e_fractal}")
+
+    act_plan = blueprint.to_dict()
 
     alert = AutoAlert(
         alert_id=alert_id,
@@ -451,20 +523,22 @@ def detect_turtle_soup_sweep(
         direction=direction,
         headline=headline,
         summary=summary,
-        ltp=curr_ltp,
-        trigger_level=entry_price,
-        target_level=target_1,
-        stop_loss=stop_loss,
+        ltp=opt_entry if has_opt else curr_ltp,
+        trigger_level=opt_entry if has_opt else entry_price,
+        target_level=opt_t1 if has_opt else target_1,
+        stop_loss=opt_sl if has_opt else stop_loss,
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
+        option_premium=opt_entry if has_opt else None,
+        underlying_spot=curr_ltp,
         confidence=confidence_val,
         time_horizon=horizon_val,
         eta_label=eta_desc,
         setup_style=style_val,
         entry_type="LIMIT_ON_PULLBACK",
-        no_chase_boundary=no_chase,
-        actionable_plan=blueprint.to_dict(),
+        no_chase_boundary=opt_nc if has_opt else no_chase,
+        actionable_plan=act_plan,
         metrics={
             "sweep_type": sweep_type,
             "swept_level": sweep_level,
@@ -475,6 +549,7 @@ def detect_turtle_soup_sweep(
             "vwap": vwap,
             "smt_confirmed": smt_confirmed,
             "smt_sibling": smt_sibling,
+            "fractal_blueprint": act_plan.get("fractal_blueprint"),
             "recommended_structure": calib.preferred_vehicle
             if calib
             else ("DEBIT_SPREAD" if is_index_symbol(clean_sym) else "NAKED_OPTION_BUY"),

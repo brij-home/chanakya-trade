@@ -1146,34 +1146,34 @@ def _fetch_nse_shareholding(symbol: str) -> dict:
             "Accept": "*/*",
             "Referer": "https://www.nseindia.com",
         }
-        session = httpx.Client(follow_redirects=True)
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        with httpx.Client(follow_redirects=True) as session:
+            session.get("https://www.nseindia.com", headers=headers, timeout=5)
 
-        # Get XBRL URL from master list
-        r = session.get(
-            f"https://www.nseindia.com/api/corporate-share-holdings-master?index=equities&symbol={symbol.upper()}",
-            headers=headers,
-            timeout=8,
-        )
-        if r.status_code != 200:
-            return {}
+            # Get XBRL URL from master list
+            r = session.get(
+                f"https://www.nseindia.com/api/corporate-share-holdings-master?index=equities&symbol={symbol.upper()}",
+                headers=headers,
+                timeout=8,
+            )
+            if r.status_code != 200:
+                return {}
 
-        master = r.json()
-        if not isinstance(master, list) or not master:
-            return {}
+            master = r.json()
+            if not isinstance(master, list) or not master:
+                return {}
 
-        latest = master[0]
-        xbrl_url = latest.get("xbrl", "")
-        quarter = latest.get("date", "")
-        if not xbrl_url:
-            return {}
+            latest = master[0]
+            xbrl_url = latest.get("xbrl", "")
+            quarter = latest.get("date", "")
+            if not xbrl_url:
+                return {}
 
-        # Fetch and parse XBRL
-        r2 = session.get(xbrl_url, headers=headers, timeout=10)
-        if r2.status_code != 200:
-            return {}
+            # Fetch and parse XBRL
+            r2 = session.get(xbrl_url, headers=headers, timeout=10)
+            if r2.status_code != 200:
+                return {}
 
-        return _parse_shareholding_xbrl(r2.text, quarter)
+            return _parse_shareholding_xbrl(r2.text, quarter)
 
     except Exception:
         return {}
@@ -1187,26 +1187,26 @@ def _fetch_nse_announcements(symbol: str, limit: int = 5) -> list[dict]:
             "Accept": "application/json",
             "Referer": "https://www.nseindia.com",
         }
-        session = httpx.Client(follow_redirects=True)
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        r = session.get(
-            f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={symbol.upper()}",
-            headers=headers,
-            timeout=8,
-        )
-        r.raise_for_status()
-        data = r.json()
-        results = []
-        if isinstance(data, list):
-            for item in data[:limit]:
-                results.append(
-                    {
-                        "date": item.get("an_dt", "")[:20],
-                        "desc": item.get("desc", ""),
-                        "subject": item.get("attchmntText", item.get("desc", ""))[:100],
-                    }
-                )
-        return results
+        with httpx.Client(follow_redirects=True) as session:
+            session.get("https://www.nseindia.com", headers=headers, timeout=5)
+            r = session.get(
+                f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={symbol.upper()}",
+                headers=headers,
+                timeout=8,
+            )
+            r.raise_for_status()
+            data = r.json()
+            results = []
+            if isinstance(data, list):
+                for item in data[:limit]:
+                    results.append(
+                        {
+                            "date": item.get("an_dt", "")[:20],
+                            "desc": item.get("desc", ""),
+                            "subject": item.get("attchmntText", item.get("desc", ""))[:100],
+                        }
+                    )
+            return results
     except Exception:
         return []
 

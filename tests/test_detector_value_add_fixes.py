@@ -159,6 +159,7 @@ def test_option_derivative_lockout_propagates_to_underlying():
         stop_loss=85.0,
         target_level=130.0,
         option_premium=100.0,
+        created_at="2026-10-08 11:30:00 IST",
     )
 
     learning_engine.conduct_invalidation_post_mortem(

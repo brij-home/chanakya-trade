@@ -51,9 +51,25 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 from pathlib import Path
+
+# ── Force IPv4 — SEBI requires registered static IP for API calls ──
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in ("::1",):
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+    try:
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    except socket.gaierror:
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_getaddrinfo
 
 logger = logging.getLogger("chanakya.web.api")
 
@@ -85,32 +101,47 @@ from contextlib import asynccontextmanager
 async def _background_cache_warmer():
     """Background task to pre-warm quotes, OHLCV, and RRG matrix in memory for lightning fast UI response."""
 
-    def _warm_sync():
+    def _warm_sync(force_boot: bool = False):
         try:
+            from config.discovery_policy import get_discovery_policy
+            from market.calendar import is_market_open
             from market.quotes import get_quote
             from market.history import get_ohlcv
             from analysis.sector_rotation import get_sector_rrg_matrix
 
-            # 1. Warm top index & mover quotes in parallel
+            policy = get_discovery_policy()
+            mkt_active = (
+                is_market_open("NSE")
+                or is_market_open("BSE")
+                or is_market_open("NFO")
+                or is_market_open("MCX")
+            )
+            if not force_boot and not mkt_active:
+                try:
+                    from engine.memory_guard import trim_memory_if_needed
+
+                    trim_memory_if_needed()
+                except Exception as e_mem:
+                    logger.debug(f"[web.api] Off-market memory trim check error: {e_mem}")
+                return
+
+            # 1. Warm core index benchmarks & top liquid F&O index constituents only (scope-respecting)
+            warm_syms = [
+                "NSE:NIFTY 50",
+                "NSE:NIFTY BANK",
+                "NSE:INDIA VIX",
+                "BSE:SENSEX",
+                "NSE:RELIANCE",
+                "NSE:HDFCBANK",
+                "NSE:ICICIBANK",
+                "NSE:INFY",
+                "NSE:TCS",
+            ]
             try:
-                get_quote(
-                    [
-                        "NSE:NIFTY 50",
-                        "NSE:NIFTY BANK",
-                        "NSE:INDIA VIX",
-                        "BSE:SENSEX",
-                        "NSE:RELIANCE",
-                        "NSE:TCS",
-                        "NSE:INFY",
-                        "NSE:HDFCBANK",
-                        "NSE:ICICIBANK",
-                        "NSE:COFORGE",
-                        "NSE:TRENT",
-                        "NSE:HCLTECH",
-                        "NSE:DIVISLAB",
-                        "NSE:TECHM",
-                    ]
-                )
+                # Prefer WebSocket cache first; only fall back to REST if cache is cold
+                ws_quotes = get_quote(warm_syms, ws_only=True) or {}
+                if len(ws_quotes) < 3:
+                    get_quote(warm_syms)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 2. Warm OHLCV for benchmark indices (2-year lookback)
@@ -119,18 +150,20 @@ async def _background_cache_warmer():
                 get_ohlcv("BANKNIFTY", days=500)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-            # 3. Warm sector rotation matrix
+            # 3. Warm sector rotation matrix & directional constituents
             try:
+                from analysis.sector_rotation import get_directional_sector_constituents
+
                 get_sector_rrg_matrix(use_cache=True)
+                get_directional_sector_constituents()
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-            # 4. Warm options chain for key index benchmarks via OptionsChainManager
+            # 4. Pre-warm Universe Depth Radar snapshot (OptionsChainManager already manages chain loop)
             try:
-                from market.oc_manager import get_oc_manager
+                from market.universe_depth_radar import get_universe_depth_radar_snapshot
 
-                ocm = get_oc_manager()
-                for sym in ("NIFTY", "BANKNIFTY"):
-                    ocm.refresh_symbol(sym)
+                seg_target = "FNO" if policy.fno_only else "ALL"
+                get_universe_depth_radar_snapshot(segment=seg_target, limit=80, allow_rest=False)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 5. Check memory headroom and trim in-memory caches if approaching limits
@@ -144,12 +177,36 @@ async def _background_cache_warmer():
             logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
-        await asyncio.sleep(5)
-        await asyncio.to_thread(_warm_sync)
+        # Stagger initial cache warmer past live streams and pre-market sync to prevent boot burst
+        await asyncio.sleep(25)
+        await asyncio.to_thread(_warm_sync, True)
 
+        _tick = 0
         while True:
-            await asyncio.sleep(300)
-            await asyncio.to_thread(_warm_sync)
+            await asyncio.sleep(60)
+            _tick += 1
+            # Lightweight 60s memory trim + large-WAL checkpoint check
+            try:
+                from engine.memory_guard import trim_memory_if_needed
+
+                await asyncio.to_thread(trim_memory_if_needed, False)
+            except Exception as e_mem:
+                logger.debug(f"[web.api] Periodic memory trim check note: {e_mem}")
+            if _tick % 5 == 0:
+                await asyncio.to_thread(_warm_sync, False)
+                # Checkpoint eod_bars.db WAL if idle log exceeds 64 MB
+                try:
+                    _wal = Path("data/eod_bars.db-wal")
+                    if _wal.exists() and _wal.stat().st_size > 67_108_864:
+                        import sqlite3 as _sqlite3
+
+                        def _ckpt():
+                            with _sqlite3.connect("data/eod_bars.db", timeout=5.0) as _c:
+                                _c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
+                        await asyncio.to_thread(_ckpt)
+                except Exception as e_wal:
+                    logger.debug(f"[web.api] Periodic WAL checkpoint note: {e_wal}")
     except asyncio.CancelledError as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     except Exception as e_suppressed:
@@ -219,13 +276,60 @@ async def _background_code_staleness_sentinel():
             logger.debug(f"[web.api] Code staleness sentinel exception: {e_suppressed}")
 
 
+async def _background_broker_health_sentinel():
+    """
+    Background sentinel monitoring configured headless broker connectivity and circuit breaker recovery.
+    Runs every 60s.
+    - If a headless broker (e.g. Fyers) is configured but unauthenticated, attempts automatic session restoration
+      as soon as rate-limit / OTP backoff elapses.
+    - If the Fyers circuit breaker has transitioned to HALF_OPEN, actively dispatches a lightweight live probe
+      (funds check) to verify gateway connectivity and reset the circuit to CLOSED.
+    """
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
+
+    await asyncio.sleep(45)  # Grace window after boot
+    while True:
+        try:
+            await asyncio.sleep(60)
+            cb = get_fyers_circuit_breaker()
+            fyers_brk = get_registered_brokers().get("fyers")
+            is_fyers_auth = bool(fyers_brk and fyers_brk.is_authenticated())
+
+            # 1. Headless auto-restore when unauthenticated and backoff elapsed
+            if _has_fyers() and not is_fyers_auth:
+                try:
+                    from brokers.fyers import _get_auth_backoff_remaining
+
+                    if _get_auth_backoff_remaining() == 0:
+                        logger.info(
+                            "[BrokerHealthSentinel] Fyers unauthenticated with backoff cleared; attempting auto-restore..."
+                        )
+                        await asyncio.to_thread(_auto_restore_brokers_sync)
+                except Exception as e_restore:
+                    logger.debug(f"[BrokerHealthSentinel] Auto-restore attempt note: {e_restore}")
+
+            # 2. Active probe if circuit breaker is HALF_OPEN and broker authenticated
+            if cb.state == CircuitState.HALF_OPEN and fyers_brk and fyers_brk.is_authenticated():
+                try:
+                    await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+                    logger.info(
+                        "[BrokerHealthSentinel] Proactive probe succeeded; circuit breaker returned to CLOSED"
+                    )
+                except Exception as e_probe:
+                    logger.warning(f"[BrokerHealthSentinel] Proactive probe failed: {e_probe}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e_suppressed:
+            logger.debug(f"[BrokerHealthSentinel] Sentinel loop note: {e_suppressed}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
-    # Windows OS Foreground Priority Protection:
-    # Set backend sidecar to BELOW_NORMAL_PRIORITY_CLASS so user's Office, browser,
-    # video conferencing, and UI never experience micro-stutters or competition.
-    if sys.platform == "win32":
+    # Windows OS Priority: keep normal scheduling unless CHANAKYA_LOW_PRIORITY=1 is explicitly opted in,
+    # and expand asyncio's default ThreadPoolExecutor so slow background syncs do not starve API routes.
+    if sys.platform == "win32" and os.environ.get("CHANAKYA_LOW_PRIORITY") == "1":
         try:
             import ctypes
 
@@ -234,10 +338,22 @@ async def lifespan(app: FastAPI):
                 0x00004000,  # BELOW_NORMAL_PRIORITY_CLASS
             )
             logger.info(
-                "[web.api] Background process priority set to BELOW_NORMAL (Foreground office & browser protected)"
+                "[web.api] Background process priority set to BELOW_NORMAL (CHANAKYA_LOW_PRIORITY=1)"
             )
         except Exception as e_pri:
             logger.debug(f"[web.api] Priority class configuration note: {e_pri}")
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(
+                max_workers=min(16, max(8, (os.cpu_count() or 4) * 2)),
+                thread_name_prefix="chanakya-bg",
+            )
+        )
+    except Exception as e_exec:
+        logger.debug(f"[web.api] Custom executor setup note: {e_exec}")
     if os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test"):
         get_csrf_secret()
 
@@ -281,6 +397,7 @@ async def lifespan(app: FastAPI):
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     staleness_task = asyncio.create_task(_background_code_staleness_sentinel())
+    broker_health_task = asyncio.create_task(_background_broker_health_sentinel())
 
     # Start the autonomous periodic data synchronization engine
     try:
@@ -320,6 +437,7 @@ async def lifespan(app: FastAPI):
     warmer_task.cancel()
     maintenance_task.cancel()
     staleness_task.cancel()
+    broker_health_task.cancel()
     try:
         from engine.recovery_worker import stop_recovery_worker
 
@@ -332,8 +450,8 @@ async def lifespan(app: FastAPI):
         get_outbox_worker().stop()
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-    maintenance_task.cancel()
-    staleness_task.cancel()
+    if _price_poll_task is not None and not _price_poll_task.done():
+        _price_poll_task.cancel()
     try:
         from engine.data_sync_scheduler import data_sync_scheduler
 
@@ -1454,6 +1572,11 @@ async def get_system_diagnostics():
     )
 
 
+from concurrent.futures import ThreadPoolExecutor as _HealthHubPool
+
+_HEALTH_HUB_EXECUTOR = _HealthHubPool(max_workers=12, thread_name_prefix="health-hub")
+
+
 @app.get("/api/system/health-hub", tags=["Observability", "Operations"])
 async def get_system_health_hub(
     priority: Optional[str] = None,
@@ -1487,41 +1610,121 @@ async def get_system_health_hub(
     from market.fyers_tbt_manager import fyers_tbt_manager
     from engine.code_provenance import get_code_provenance
 
+    import functools
     import time
 
     _t_hh = time.time()
     logger.info("[HealthHub] Starting health-hub data aggregation")
 
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
-    ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
-    logger.info(f"[HealthHub] cb/ws/rg collected in {time.time() - _t_hh:.3f}s")
-    tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
-    logger.info(f"[HealthHub] tbt collected in {time.time() - _t_hh:.3f}s")
+
     from engine.market_dynamics_governor import get_market_dynamics_governor
 
-    market_dynamics_diag = await asyncio.to_thread(get_market_dynamics_governor().get_diagnostics)
-    logger.info(f"[HealthHub] market_dynamics collected in {time.time() - _t_hh:.3f}s")
-    broker_statuses = await asyncio.to_thread(_compute_status)
-    logger.info(f"[HealthHub] broker_statuses collected in {time.time() - _t_hh:.3f}s")
+    loop = asyncio.get_running_loop()
+    _hh_timings: dict[str, float] = {}
+
+    def _timed_run(label: str, fn, *args, **kwargs):
+        _ts = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _hh_timings[label] = time.perf_counter() - _ts
+
+    (
+        ws_diag,
+        tbt_diag,
+        market_dynamics_diag,
+        broker_statuses,
+        code_prov,
+        storage_bd,
+    ) = await asyncio.gather(
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "ws_diag",
+            get_ws_subscription_manager().get_diagnostics,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "tbt_diag",
+            fyers_tbt_manager.get_active_slots_status,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "market_dynamics",
+            get_market_dynamics_governor().get_diagnostics,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "broker_status",
+            _compute_status,
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "code_provenance",
+            functools.partial(get_code_provenance, force_refresh=False, stale_ok=True),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "storage_breakdown",
+            functools.partial(get_storage_breakdown, stale_ok=True),
+        ),
+    )
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
     telem_summary = get_telemetry_summary()
-    code_prov = await asyncio.to_thread(get_code_provenance, force_refresh=False)
     code_prov_dict = code_prov.to_dict()
     since_ts = code_prov.boot_timestamp if since_boot else None
 
-    incident_counts = get_incident_counts(since_timestamp=since_ts)
-    active_counts = get_incident_counts(window_minutes=15, since_timestamp=since_ts)
-    incidents = get_prioritized_incidents(
-        limit=limit, priority=priority, component=component, since_timestamp=since_ts
+    mem_status_obj = _timed_run("memory_status", get_memory_status)
+    incident_counts, active_counts, incidents = await asyncio.gather(
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "incident_counts",
+            functools.partial(get_incident_counts, since_timestamp=since_ts),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "active_counts",
+            functools.partial(get_incident_counts, window_minutes=15, since_timestamp=since_ts),
+        ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "incidents",
+            functools.partial(
+                get_prioritized_incidents,
+                limit=limit,
+                priority=priority,
+                component=component,
+                since_timestamp=since_ts,
+            ),
+        ),
     )
-    mem_status = get_memory_status().to_dict()
-    storage_bd = await asyncio.to_thread(get_storage_breakdown)
+    _hh_elapsed = time.time() - _t_hh
+    if _hh_elapsed >= 2.0:
+        slow_parts = {k: round(v, 3) for k, v in _hh_timings.items() if v >= 0.5}
+        logger.warning(
+            f"[HealthHub] Slow diagnostics aggregation: {_hh_elapsed:.2f}s (subtasks={slow_parts})"
+        )
+    mem_status = mem_status_obj.to_dict()
 
     from market.streaming import market_streams
-    from brokers.session import get_registered_brokers, get_broker_role
+    from brokers.session import (
+        get_registered_brokers,
+        get_broker_role,
+        get_data_broker_key,
+        get_execution_broker_key,
+    )
     from market.flattrade_rate_gate import get_flattrade_rate_gate
 
     all_brks = get_registered_brokers()
@@ -1535,7 +1738,7 @@ async def get_system_health_hub(
 
     flattrade_diag = {
         "configured": _has_flattrade(),
-        "authenticated": _flattrade_auth(),
+        "authenticated": bool((broker_statuses.get("flattrade") or {}).get("authenticated", False)),
         "role": get_broker_role("flattrade"),
         "user_id": getattr(flat_brk, "user_id", "") if flat_brk else "",
         "account_id": getattr(flat_brk, "account_id", "") if flat_brk else "",
@@ -1599,6 +1802,26 @@ async def get_system_health_hub(
 
     from starlette.responses import Response
 
+    _primary_data_key = get_data_broker_key()
+    _exec_brk_key = get_execution_broker_key()
+    _fyers_cb_state = cb_diag.get("state", "CLOSED")
+    _ft_ready = bool(flattrade_diag.get("authenticated"))
+    _tbt_active_total = (
+        int(tbt_diag.get("active_total", 0) or 0) if isinstance(tbt_diag, dict) else 0
+    )
+    broker_failover = {
+        "primary_data_broker": _primary_data_key,
+        "execution_broker": _exec_brk_key,
+        "fyers_circuit_state": _fyers_cb_state,
+        "flattrade_standby_ready": _ft_ready,
+        "failover_active": bool(
+            (_fyers_cb_state == "OPEN" and _ft_ready) or _primary_data_key == "flattrade"
+        ),
+        "active_depth_tier": (
+            "50-DEPTH" if (_tbt_active_total > 0 and _fyers_cb_state != "OPEN") else "5-DEPTH"
+        ),
+    }
+
     payload = {
         "overall_status": overall_status,
         "incident_counts": incident_counts,
@@ -1606,6 +1829,7 @@ async def get_system_health_hub(
         "circuit_breaker": cb_diag,
         "rate_gate": rate_gate_diag,
         "tbt": tbt_diag,
+        "broker_failover": broker_failover,
         "market_dynamics": market_dynamics_diag,
         "websocket": ws_diag,
         "brokers": broker_statuses,
@@ -1694,15 +1918,38 @@ async def reset_circuit_breaker_endpoint():
 
 @app.post("/api/maintenance/circuit-breaker/probe", tags=["Maintenance", "Operations"])
 async def probe_circuit_breaker_endpoint():
-    """Manually transition the Fyers API circuit breaker to HALF_OPEN to permit immediate probe call."""
-    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    """Manually transition the Fyers API circuit breaker to HALF_OPEN and immediately dispatch an active probe."""
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker, CircuitState
+    from brokers.session import get_registered_brokers
 
     cb = get_fyers_circuit_breaker()
     cb.probe()
+
+    msg = "Circuit breaker set to HALF_OPEN for probing"
+    fyers_brk = get_registered_brokers().get("fyers")
+    if fyers_brk and fyers_brk.is_authenticated():
+        try:
+            await asyncio.to_thread(fyers_brk.get_funds, bypass_cache=True)
+            msg = "Live probe succeeded: funds verified and circuit breaker reset to CLOSED"
+        except Exception as exc:
+            msg = f"Live probe call failed: {exc}"
+            logger.warning("[probe_circuit_breaker] Live probe failed: %s", exc)
+    elif _has_fyers():
+        try:
+            await asyncio.to_thread(_auto_restore_brokers_sync)
+            b2 = get_registered_brokers().get("fyers")
+            if b2 and b2.is_authenticated():
+                cb.record_auth_success()
+                msg = "Fyers session auto-restored successfully and circuit breaker reset to CLOSED"
+            else:
+                msg = "Fyers unauthenticated: auto-restore attempted but session could not be established"
+        except Exception as exc:
+            msg = f"Auto-restore failed: {exc}"
+
     return JSONResponse(
         {
-            "status": "SUCCESS",
-            "message": "Circuit breaker set to HALF_OPEN for probing",
+            "status": "SUCCESS" if cb.state == CircuitState.CLOSED else "HALF_OPEN",
+            "message": msg,
             "diagnostics": cb.get_diagnostics(),
         }
     )
@@ -1866,7 +2113,7 @@ async def get_data_sync_status():
 
 
 @app.post("/api/maintenance/sync-premarket", tags=["Maintenance"])
-async def trigger_premarket_sync(force: bool = False):
+async def trigger_premarket_sync(force: bool = False, session_date: Optional[str] = None):
     """
     On-demand or scheduled Pre-Market Level Priming (CPR, Camarilla, Classic Pivots, ATR-14, Straddle Bounds).
     Pre-computes and caches levels across benchmark indices and F&O universe into L1 RAM and disk.
@@ -1874,7 +2121,9 @@ async def trigger_premarket_sync(force: bool = False):
     import asyncio
     from engine.data_sync_scheduler import data_sync_scheduler
 
-    result = await asyncio.to_thread(data_sync_scheduler.sync_premarket_levels, force=force)
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_premarket_levels, force=force, session_date=session_date
+    )
     return JSONResponse(result)
 
 
@@ -1882,17 +2131,23 @@ async def trigger_premarket_sync(force: bool = False):
 async def get_benchmark_daily_levels(session_date: Optional[str] = None):
     """
     Returns pre-computed Daily Levels for all 5 core benchmark indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX).
-    Sub-millisecond retrieval from L1 RAM.
+    Sub-millisecond retrieval from L1 RAM. Computes missing benchmark levels on-demand.
     """
+    import asyncio
     from engine.daily_levels import get_daily_levels_store
 
     store = get_daily_levels_store()
     indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-    res = {}
-    for idx in indices:
-        dl = store.get_levels(idx, session_date=session_date, compute_if_missing=False)
-        if dl:
-            res[idx] = dl.to_dict()
+
+    def _fetch_all():
+        out = {}
+        for idx in indices:
+            dl = store.get_levels(idx, session_date=session_date, compute_if_missing=True)
+            if dl:
+                out[idx] = dl.to_dict()
+        return out
+
+    res = await asyncio.to_thread(_fetch_all)
     return JSONResponse(
         {"session_date": session_date or store._get_today_session_date(), "indices": res}
     )
@@ -4488,19 +4743,320 @@ async def api_paper_square_off(req: PaperSquareOffRequest, request: Request):
 @app.get("/api/v1/market/rrg", tags=["Analysis"])
 async def get_market_rrg():
     """
-    Get Relative Rotation Graph (RRG) sector momentum matrix for all NSE sectors.
+    Get Relative Rotation Graph (RRG) sector momentum matrix for all NSE sectors
+    with bidirectional constituents classification.
     """
     try:
-        from analysis.sector_rotation import get_sector_rrg_matrix
+        from analysis.sector_rotation import (
+            get_directional_sector_constituents,
+            get_sector_rrg_matrix,
+        )
 
         points = await asyncio.to_thread(get_sector_rrg_matrix)
+        dir_const = await asyncio.to_thread(get_directional_sector_constituents, points)
         return {
             "status": "success",
             "sectors": [p.as_dict() for p in points],
             "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
             "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
+            "lagging_sectors": [p.sector for p in points if p.quadrant == "LAGGING"],
+            "weakening_sectors": [p.sector for p in points if p.quadrant == "WEAKENING"],
+            "directional_constituents": {
+                "BULLISH": sorted(list(dir_const.get("BULLISH", set()))),
+                "BEARISH": sorted(list(dir_const.get("BEARISH", set()))),
+            },
         }
     except Exception as exc:
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/rs-rw-radar", tags=["Analysis", "Market"])
+async def get_rs_rw_radar(
+    universe: Optional[str] = None,
+    benchmark: str = "NSE:NIFTY50-INDEX",
+    top_n: int = 15,
+    bypass_cache: bool = False,
+):
+    """
+    Get real-time Intraday Relative Strength (RS) and Relative Weakness (RW) Radar
+    comparing liquid underlying stocks against the benchmark index.
+    """
+    try:
+        from analysis.relative_strength import compute_intraday_rs_rw
+        from analysis.universe import resolve_dynamic_universe
+
+        univ_list = None
+        if universe:
+            univ_list, _ = resolve_dynamic_universe(universe)
+
+        report = await asyncio.to_thread(
+            compute_intraday_rs_rw,
+            universe=univ_list,
+            benchmark_symbol=benchmark,
+            top_n=top_n,
+            bypass_cache=bypass_cache,
+        )
+        return {"status": "success", "data": report.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute RS/RW radar: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/confluence-radar", tags=["Analysis", "Market"])
+async def get_confluence_radar(
+    min_score: float = 65.0,
+    top_n: int = 20,
+    universe: Optional[str] = "FNO",
+):
+    """
+    Get real-time Multi-Factor Confluence Radar (0-100 Scoreboard)
+    with Pullback-to-Value Limit Entry Bands and Asymmetric R:R.
+    """
+    try:
+        from engine.confluence_engine import evaluate_confluence
+        from market.quotes import get_quote
+        from analysis.universe import resolve_dynamic_universe
+
+        univ_list, _ = resolve_dynamic_universe(universe or "FNO")
+        symbols_to_check = univ_list[: min(len(univ_list), 30)]
+        formatted = [f"NSE:{s}" if ":" not in s else s for s in symbols_to_check]
+        quotes_map = await asyncio.to_thread(get_quote, formatted)
+
+        results = []
+        for s in symbols_to_check:
+            clean_s = s.replace("NSE:", "").replace("BSE:", "").strip()
+            q = quotes_map.get(f"NSE:{clean_s}") or quotes_map.get(clean_s)
+            if not q or not getattr(q, "last_price", 0.0):
+                continue
+            ltp = float(q.last_price)
+            vwap = float(getattr(q, "vwap", 0.0) or ltp)
+            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+            high = float(getattr(q, "high", ltp) or ltp)
+            low = float(getattr(q, "low", ltp) or ltp)
+
+            # Directional bias based on price vs VWAP & session move
+            direction = "BULLISH" if (chg >= 0 and ltp >= vwap * 0.999) else "BEARISH"
+            rvol = float(
+                getattr(q, "rvol", 0.0)
+                or getattr(q, "tod_rvol", 0.0)
+                or (1.8 if abs(chg) >= 1.5 else 1.2)
+            )
+            gap = float(getattr(q, "pre_open_gap_pct", 0.0) or getattr(q, "gap_pct", 0.0) or 0.0)
+            sec_q = getattr(q, "sector_quadrant", None)
+            rep = evaluate_confluence(
+                symbol=clean_s,
+                direction=direction,
+                ltp=ltp,
+                vwap=vwap,
+                rvol=rvol,
+                change_pct=chg,
+                pre_open_gap_pct=gap,
+                sector_quadrant=sec_q,
+                day_high=high,
+                day_low=low,
+            )
+            if rep.total_score >= min_score or not min_score:
+                results.append(
+                    {
+                        "symbol": rep.symbol,
+                        "direction": rep.direction,
+                        "total_score": rep.total_score,
+                        "is_qualified": rep.is_qualified,
+                        "ltp": ltp,
+                        "vwap": vwap,
+                        "change_pct": chg,
+                        "headline": rep.headline,
+                        "summary": rep.summary,
+                        "entry_zone_min": rep.pullback_plan.entry_zone_min
+                        if rep.pullback_plan
+                        else None,
+                        "entry_zone_max": rep.pullback_plan.entry_zone_max
+                        if rep.pullback_plan
+                        else None,
+                        "entry_zone_mid": rep.pullback_plan.entry_zone_mid
+                        if rep.pullback_plan
+                        else None,
+                        "stop_loss": rep.pullback_plan.stop_loss if rep.pullback_plan else None,
+                        "target_1": rep.pullback_plan.target_1 if rep.pullback_plan else None,
+                        "target_2": rep.pullback_plan.target_2 if rep.pullback_plan else None,
+                        "rr_t1": rep.pullback_plan.rr_t1 if rep.pullback_plan else None,
+                        "rr_t2": rep.pullback_plan.rr_t2 if rep.pullback_plan else None,
+                        "no_chase_price": rep.pullback_plan.no_chase_price
+                        if rep.pullback_plan
+                        else None,
+                        "opt_symbol": rep.pullback_plan.opt_symbol if rep.pullback_plan else None,
+                        "opt_entry_limit": rep.pullback_plan.opt_entry_limit
+                        if rep.pullback_plan
+                        else None,
+                        "opt_sl": rep.pullback_plan.opt_sl if rep.pullback_plan else None,
+                        "opt_t1": rep.pullback_plan.opt_t1 if rep.pullback_plan else None,
+                        "factors": [
+                            {
+                                "name": f.name,
+                                "score": f.score,
+                                "max": f.max_score,
+                                "status": f.status,
+                                "details": f.details,
+                            }
+                            for f in rep.factors
+                        ],
+                    }
+                )
+
+        results.sort(key=lambda r: r["total_score"], reverse=True)
+        return {"status": "success", "count": len(results), "data": results[:top_n]}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute confluence radar: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/confluence/{symbol}", tags=["Analysis", "Market"])
+async def get_symbol_confluence(symbol: str, direction: Optional[str] = None):
+    """
+    Get detailed 0-100 Multi-Factor Confluence evaluation & Pullback Limit Entry plan for a specific symbol.
+    """
+    try:
+        from engine.confluence_engine import evaluate_confluence
+        from market.quotes import get_quote
+
+        clean_s = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        q_map = await asyncio.to_thread(get_quote, [f"NSE:{clean_s}"])
+        q = q_map.get(f"NSE:{clean_s}") or q_map.get(clean_s)
+        if not q or not getattr(q, "last_price", 0.0):
+            raise _HTTPException(status_code=404, detail=f"Live quote unavailable for {symbol}")
+
+        ltp = float(q.last_price)
+        vwap = float(getattr(q, "vwap", 0.0) or ltp)
+        chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+        high = float(getattr(q, "high", ltp) or ltp)
+        low = float(getattr(q, "low", ltp) or ltp)
+
+        dir_choice = (
+            direction.upper().strip()
+            if direction
+            else ("BULLISH" if (chg >= 0 and ltp >= vwap * 0.999) else "BEARISH")
+        )
+        rvol = float(
+            getattr(q, "rvol", 0.0)
+            or getattr(q, "tod_rvol", 0.0)
+            or (1.8 if abs(chg) >= 1.5 else 1.2)
+        )
+        gap = float(getattr(q, "pre_open_gap_pct", 0.0) or getattr(q, "gap_pct", 0.0) or 0.0)
+        sec_q = getattr(q, "sector_quadrant", None)
+        rep = evaluate_confluence(
+            symbol=clean_s,
+            direction=dir_choice,
+            ltp=ltp,
+            vwap=vwap,
+            rvol=rvol,
+            change_pct=chg,
+            pre_open_gap_pct=gap,
+            sector_quadrant=sec_q,
+            day_high=high,
+            day_low=low,
+        )
+        return {
+            "status": "success",
+            "symbol": rep.symbol,
+            "direction": rep.direction,
+            "total_score": rep.total_score,
+            "is_qualified": rep.is_qualified,
+            "headline": rep.headline,
+            "summary": rep.summary,
+            "pullback_plan": rep.pullback_plan.__dict__ if rep.pullback_plan else None,
+            "factors": [
+                {
+                    "name": f.name,
+                    "score": f.score,
+                    "max": f.max_score,
+                    "status": f.status,
+                    "details": f.details,
+                }
+                for f in rep.factors
+            ],
+        }
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[API] Failed to evaluate confluence for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/options/optimize-strike", tags=["Analysis", "Options"])
+async def get_options_optimization(
+    symbol: str,
+    direction: str = "BULLISH",
+    spot: Optional[float] = None,
+    regime: str = "MOMENTUM_BREAKOUT",
+    iv: Optional[float] = None,
+    iv_percentile: Optional[float] = None,
+    dte_days: float = 6.0,
+    target_delta: Optional[float] = None,
+    lot_size: int = 1,
+):
+    """
+    Dynamically optimize options strike, Greeks surface (Delta, Gamma, Vega, Theta),
+    and spread structure (Naked Buy vs Vertical Debit Spread) based on live spot & IV regime.
+    """
+    try:
+        from engine.options_optimizer import optimize_option_contract
+        from market.quotes import get_ltp
+
+        ref_spot = float(spot or 0.0)
+        if ref_spot <= 0:
+            ref_spot = float(await asyncio.to_thread(get_ltp, symbol) or 0.0)
+        if ref_spot <= 0:
+            raise _HTTPException(
+                status_code=400, detail=f"Valid underlying spot price required for {symbol}"
+            )
+
+        plan = optimize_option_contract(
+            symbol=symbol,
+            direction=direction,
+            spot=ref_spot,
+            regime=regime,
+            iv=iv,
+            iv_percentile=iv_percentile,
+            dte_days=dte_days,
+            target_delta=target_delta,
+            lot_size=lot_size,
+        )
+        return {"status": "success", "data": plan.to_dict()}
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[API] Options strike optimization failed for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/cvd/{symbol}", tags=["Market", "Microstructure"])
+async def get_symbol_cvd(symbol: str):
+    """
+    Get real-time Cumulative Volume Delta (CVD) footprint metrics, slope, and institutional absorption traps.
+    """
+    try:
+        from engine.cvd_engine import get_cvd_metrics
+
+        metrics = get_cvd_metrics(symbol)
+        return {"status": "success", "data": metrics.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to get CVD metrics for {symbol}: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/index-internals", tags=["Market", "Analysis"])
+async def get_index_market_internals(index: str = "NIFTY"):
+    """
+    Get real-time index market internals: Advance/Decline (A/D) ratio, % > VWAP breadth,
+    weighted heavyweight point contributions, and regime classification (Broad vs Head-Fake).
+    """
+    try:
+        from engine.market_internals import compute_index_internals
+
+        report = await asyncio.to_thread(compute_index_internals, index)
+        return {"status": "success", "data": report.to_dict()}
+    except Exception as exc:
+        logger.error(f"[API] Failed to compute index internals for {index}: {exc}", exc_info=True)
         raise _HTTPException(status_code=500, detail=str(exc))
 
 
@@ -4542,8 +5098,9 @@ async def get_coiling_squeezes():
     try:
         import json
         from pathlib import Path
+        from config.paths import app_data_path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             repo_cal = (
                 Path(__file__).resolve().parent.parent
@@ -4580,8 +5137,9 @@ async def get_calibration_metrics():
     try:
         import json
         from pathlib import Path
+        from config.paths import app_data_path
 
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             repo_cal = (
                 Path(__file__).resolve().parent.parent
@@ -4755,15 +5313,20 @@ async def stream_prices(symbols: str = ""):
 
 
 @app.get("/stream/alerts", tags=["SSE"])
-async def stream_alerts():
+async def stream_alerts(request: _Request):
     """
-    SSE stream of triggered alerts.
+    SSE stream of triggered alerts with monotonic Last-Event-ID replay support.
 
     Event format:
+        id: <seq>
         data: {"alert_id": "...", "symbol": "INFY", "message": "RSI > 70", "ts": "..."}
     """
+    raw_last_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
+    last_id: Optional[int] = None
+    if raw_last_id and raw_last_id.strip().isdigit():
+        last_id = int(raw_last_id.strip())
     return StreamingResponse(
-        _event_bus.subscribe("alert"),
+        _event_bus.subscribe("alert", last_event_id=last_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

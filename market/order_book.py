@@ -45,7 +45,9 @@ def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
     canonical = canonical_symbol(str(symbol))
     with _DEPTH_LOCK:
         if canonical not in _DEPTH_BOOKS:
-            _DEPTH_BOOKS[canonical] = BisectDepthBook(max_depth=max_depth)
+            book_inst = BisectDepthBook(max_depth=max_depth)
+            book_inst.symbol = canonical
+            _DEPTH_BOOKS[canonical] = book_inst
         book = _DEPTH_BOOKS[canonical]
         # Benchmark Spot Indices (-INDEX) do not have limit order books on any exchange.
         # If the spot index book is empty, transparently link to its active near-month Futures book.
@@ -236,6 +238,44 @@ class BisectDepthBook:
             return 0.0
         return round((b_vol - a_vol) / tot, 4)
 
+    def multi_layer_obi(self) -> dict[str, float]:
+        """Compute multi-layer OBI across L1-5, L6-25, L26-50 plus weighted microprice.
+
+        Helps distinguish top-of-book spoofing from deep institutional resting walls on 50-depth TBT.
+        """
+
+        def _slice_obi(start: int, end: int) -> float:
+            b_vol = sum(b[2] for b in self._bids[start:end])
+            a_vol = sum(a[1] for a in self._asks[start:end])
+            tot = b_vol + a_vol
+            return round((b_vol - a_vol) / tot, 4) if tot > 0 else 0.0
+
+        l1_5 = _slice_obi(0, 5)
+        l6_25 = _slice_obi(5, 25)
+        l26_50 = _slice_obi(25, 50)
+        deep_available = len(self._bids) > 5 or len(self._asks) > 5
+
+        # Depth-weighted multi-level microprice across top 5 levels
+        w_sum = 0.0
+        v_sum = 0.0
+        for lvl in range(min(5, len(self._bids), len(self._asks))):
+            decay = 1.0 / (lvl + 1.0)
+            bp, bq = self._bids[lvl][1], self._bids[lvl][2]
+            ap, aq = self._asks[lvl][0], self._asks[lvl][1]
+            if bq + aq > 0:
+                w_sum += decay * (bp * aq + ap * bq)
+                v_sum += decay * (bq + aq)
+        weighted_mp = round(w_sum / v_sum, 4) if v_sum > 0 else self.micro_price
+
+        return {
+            "obi_l1_5": l1_5,
+            "obi_l6_25": l6_25,
+            "obi_l26_50": l26_50,
+            "weighted_micro_price": weighted_mp,
+            "deep_wall_skew": round(l6_25 - l1_5, 4) if deep_available else 0.0,
+            "has_50_depth": bool(deep_available),
+        }
+
     def get_imbalance(self, n: int = 5) -> float:
         """Alias for obi(n) to maintain backward-compatibility with OMS order preview."""
         return self.obi(n=n)
@@ -357,9 +397,24 @@ class BisectDepthBook:
         return self.simulate_sweep(side=side, quantity=quantity)
 
     def record_tick(self, price: float, volume: int = 1, timestamp: Optional[float] = None) -> None:
-        """Record a price/volume tick into the internal circular ring buffer in O(1)."""
+        """Record a price/volume tick into the internal circular ring buffer and CVD engine in O(1)."""
         if price > 0:
             self._tick_buffer.append(price, volume, timestamp)
+            sym = getattr(self, "symbol", "")
+            if sym:
+                try:
+                    from engine.cvd_engine import record_market_trade
+
+                    record_market_trade(
+                        symbol=sym,
+                        price=price,
+                        volume=volume,
+                        best_bid=self.best_bid,
+                        best_ask=self.best_ask,
+                        timestamp=timestamp,
+                    )
+                except Exception as _e_cvd:
+                    logger.debug(f"[record_tick] CVD ingestion note for {sym}: {_e_cvd}")
 
     @property
     def rolling_tick_vwap(self) -> float:
@@ -408,6 +463,9 @@ class OrderBookSnapshot:
     wall_qty: int = 0
     wall_ratio: float = 1.0
     greeks: Optional[dict[str, Any]] = None
+    tbt_supported: bool = True
+    depth_levels: int = 5
+    depth_capability: str = "L2_5_DEPTH"
 
     def simulate_sweep(self, side: str, quantity: int) -> dict[str, Any]:
         """Simulate pre-trade slippage and market sweep across snapshot depth."""
@@ -463,13 +521,14 @@ def resolve_option_greeks(symbol: str, ltp: float = 0.0) -> Optional[dict[str, A
         except Exception as e_suppressed:
             logger.debug(f"[market.order_book] Spot quote lookup suppressed: {e_suppressed}")
 
-        from datetime import date, timedelta
+        from datetime import date
+
+        from market.calendar import get_active_derivative_expiry
 
         today = date.today()
-        days_to_thu = (3 - today.weekday()) % 7
-        if days_to_thu == 0:
-            days_to_thu = 7
-        exp_date = (today + timedelta(days=days_to_thu)).isoformat()
+        exp_d = get_active_derivative_expiry(clean, ref_date=today)
+        exp_date = exp_d.isoformat()
+        days_to_thu = max(0, (exp_d - today).days)
 
         eval_ltp = (
             ltp
@@ -659,6 +718,21 @@ def compute_order_book_metrics(
     if greeks is None:
         greeks = resolve_option_greeks(symbol, calc_ltp)
 
+    sym_u = str(symbol or "").upper()
+    is_bse_cap = sym_u.startswith(("BSE:", "BFO:")) or any(k in sym_u for k in ("SENSEX", "BANKEX"))
+    is_tbt_prov = "TBT" in str(provenance or "").upper()
+    visible_levels = max(len(bids), len(asks))
+    tbt_supported = not is_bse_cap
+    if is_bse_cap:
+        cap_label = "BSE_DATA_SOCKET_5_DEPTH"
+        depth_levels = min(5, visible_levels) if visible_levels > 0 else 5
+    elif is_tbt_prov or visible_levels > 5:
+        cap_label = "NSE_TBT_50_DEPTH"
+        depth_levels = max(visible_levels, 50 if is_tbt_prov else visible_levels)
+    else:
+        cap_label = "L2_5_DEPTH"
+        depth_levels = visible_levels if visible_levels > 0 else 5
+
     return OrderBookSnapshot(
         symbol=symbol,
         ltp=calc_ltp,
@@ -686,6 +760,9 @@ def compute_order_book_metrics(
         wall_qty=wall_qty,
         wall_ratio=wall_ratio,
         greeks=greeks,
+        tbt_supported=tbt_supported,
+        depth_levels=depth_levels,
+        depth_capability=cap_label,
     )
 
 
@@ -748,6 +825,10 @@ def analyze_symbol_order_book(
             from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
 
             fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+            if not fut_sym and clean_sym in ("SENSEX", "BANKEX"):
+                from market.symbol_master import resolve_active_future
+
+                fut_sym = resolve_active_future(clean_sym, exch="BSE")
             if fut_sym and fut_sym != symbol and fut_sym != clean_sym:
                 snap = analyze_symbol_order_book(fut_sym, allow_rest_fallback=allow_rest_fallback)
                 snap.symbol = clean_sym

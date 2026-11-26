@@ -176,9 +176,15 @@ def test_orb_detector_calibrated_multipliers():
         ignore_time_gate=True,
     )
     assert alert is not None
-    risk_pts = alert.ltp - alert.stop_loss
-    # T1 must be >= ltp + 1.8 * risk_pts (ORB institutional calibration)
-    assert alert.target_level >= round(alert.ltp + 1.75 * risk_pts, 1)
+    if alert.contract_symbol:
+        # F&O intraday option calibration caps T1 >= +20% above option LTP and preserves underlying spot wave targets
+        assert alert.stop_loss < alert.ltp < alert.target_level
+        assert alert.target_level >= round(alert.ltp * 1.18, 1)
+        assert alert.metrics["target_2"] > alert.metrics["spot"]
+        assert alert.metrics["target_3"] > alert.metrics["target_2"]
+    else:
+        risk_pts = alert.ltp - alert.stop_loss
+        assert alert.target_level >= round(alert.ltp + 1.75 * risk_pts, 1)
 
 
 def test_detection_context_adapters_include_afternoon_and_scalp():

@@ -151,7 +151,7 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
               is_archived: true,
               is_active: false,
               stage: 'EXPIRED',
-              invalidation_reason: oldItem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+              invalidation_reason: oldItem.invalidation_reason || `Intraday session expired (${oldItem.session_close_ist || 'session close'} cutoff reached). Trade closed.`
             })
             continue
           }
@@ -901,6 +901,33 @@ const AutoAlertCard = memo(function AutoAlertCard({
           <span className="font-bold flex-shrink-0 text-purple-800 dark:text-purple-300">💎 Apex Confluence:</span>
           <span className="truncate flex-1 font-sans" title="Multiple quantitative detectors confirmed identical setup within active window">
             Institutional multi-model confirmation (+10% conviction boost).
+          </span>
+        </div>
+      )}
+
+      {/* ── Order Flow Cumulative Volume Delta (CVD) Absorption Banner ── */}
+      {(alert.cvd_divergence || alert.metrics?.cvd_divergence) && !isInvalidated && (
+        <div
+          className={`flex items-center gap-2 px-2.5 py-1 rounded-lg border text-[11px] ${
+            (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BULLISH_ABSORPTION'
+              ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-300 dark:border-emerald-500/35 text-emerald-900 dark:text-emerald-200'
+              : (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BEARISH_EXHAUSTION'
+              ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-300 dark:border-rose-500/35 text-rose-900 dark:text-rose-200'
+              : 'bg-blue-50 dark:bg-blue-500/15 border-blue-300 dark:border-blue-500/35 text-blue-900 dark:text-blue-200'
+          }`}
+        >
+          <span className="font-bold flex-shrink-0">
+            {(alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BULLISH_ABSORPTION'
+              ? '🛡️ CVD Absorption (Passive Buyers):'
+              : (alert.cvd_divergence || alert.metrics?.cvd_divergence) === 'BEARISH_EXHAUSTION'
+              ? '⚠️ CVD Exhaustion (Bull Trap):'
+              : '⚡ CVD Order Flow Delta:'}
+          </span>
+          <span
+            className="truncate flex-1 font-sans"
+            title={alert.cvd_note || alert.metrics?.cvd_note || 'Order flow delta confirms institutional participation'}
+          >
+            {alert.cvd_note || alert.metrics?.cvd_note || `Institutional flow confirms ${alert.direction} momentum.`}
           </span>
         </div>
       )}
@@ -2253,6 +2280,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }
 
+  // Dedicated Institutional F&O Stock Swing & Positional scan (resolves monthly options & futures)
+  const handleScanFNOSwing = async () => {
+    setScanningSwing(true)
+    try {
+      const res = await callRef.current('/skills/alerts/auto/scan_fno_swing', {
+        min_score: 65,
+        limit: 25,
+      })
+      const fresh = res?.data ?? []
+      if (Array.isArray(fresh) && fresh.length > 0) {
+        setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
+      }
+      setHorizonFilter('SWING_ALL')
+      setViewMode('ACTIVE')
+    } catch (_) {
+    } finally {
+      setScanningSwing(false)
+    }
+  }
+
   // Trigger test alert (clearly marked as TEST)
   const handleTriggerTest = async (isInvalidation = false) => {
     setTesting(true)
@@ -2639,11 +2686,25 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     const slLimitTrigger = actPlan.sl_limit_trigger != null ? Number(actPlan.sl_limit_trigger) : undefined
     const slLimitPrice = actPlan.sl_limit_price != null ? Number(actPlan.sl_limit_price) : undefined
 
+    const thUpper = String(alt.time_horizon || actPlan.time_horizon || 'INTRADAY').toUpperCase()
+    const isSwing = ['SWING_SHORT', 'SWING_MID', 'SWING', 'POSITIONAL', 'LONG_TERM', 'MULTIBAGGER'].includes(thUpper)
+    const isDerivative = Boolean(
+      alt.option_type ||
+      alt.contract_symbol ||
+      ['FNO', 'OPTIONS', 'FUTURES'].includes(seg) ||
+      actPlan.instrument_type === 'OPTION' ||
+      actPlan.instrument_type === 'FUTURE' ||
+      String(targetSym).toUpperCase().endsWith('CE') ||
+      String(targetSym).toUpperCase().endsWith('PE')
+    )
+    const resolvedProduct = execTicket?.product || actPlan.product || (isSwing ? (isDerivative ? 'NRML' : 'CNC') : 'MIS')
+
     const ticketData = {
       symbol: execTicket?.symbol || targetSym,
       contract_symbol: execTicket?.symbol || targetSym,
       exchange: targetExchange,
       orderType: isPrimed ? 'SL_LIMIT' : (execTicket?.order_type || 'LIMIT'),
+      product: resolvedProduct,
       triggerPrice: slLimitTrigger,
       price: slLimitPrice != null ? slLimitPrice : (execTicket?.limit_price != null ? Number(execTicket.limit_price) : (targetPrice != null && !isNaN(targetPrice) ? Number(targetPrice) : undefined)),
       target: execTicket?.target_price != null ? Number(execTicket.target_price) : (targetTP != null && !isNaN(targetTP) ? Number(targetTP) : undefined),
@@ -3491,6 +3552,15 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
 
                 <button
+                  onClick={handleScanFNOSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-xs text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 flex items-center gap-1 font-bold shadow-sm py-1 px-2.5 transition-all"
+                  title="Institutional scan for F&O underlying stock setups with resolved monthly options & futures (NRML)"
+                >
+                  {scanningSwing ? '⚡ Scanning F&O…' : '⚡ F&O Swings'}
+                </button>
+
+                <button
                   onClick={() => handleCleanupOld(3)}
                   disabled={cleaning}
                   className="btn btn-sm btn-ghost text-xs text-muted hover:text-amber-300 border border-border flex items-center gap-1 py-1 px-2.5"
@@ -3953,6 +4023,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Deep sweep across NSE & BSE for swing and positional trades"
                 >
                   {scanningSwing ? '🌊 Scanning Swings…' : '🌊 Scan Swings (NSE+BSE)'}
+                </button>
+                <button
+                  onClick={handleScanFNOSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 font-bold"
+                  title="Institutional scan for F&O underlying stock setups with resolved monthly options & futures"
+                >
+                  {scanningSwing ? '⚡ Scanning F&O…' : '⚡ F&O Swings (NRML)'}
                 </button>
                 {(selectedSegment !== 'ALL' || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || searchQuery) && (
                   <button onClick={handleResetFilters} className="btn btn-sm btn-ghost text-gold border border-gold/30">

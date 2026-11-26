@@ -132,14 +132,18 @@ class TestTimeOfDayRvol:
 
         # At 09:30 IST, current volume is 240,000 shares (24% of daily volume)
         dt_0930 = datetime(2026, 9, 15, 9, 30, tzinfo=IST)
-        rvol_0930 = compute_time_of_day_rvol(240_000, avg_daily_vol, ref_dt=dt_0930)
+        rvol_0930 = compute_time_of_day_rvol(
+            240_000, avg_daily_vol, ref_dt=dt_0930, is_derivative=False, exchange="NSE"
+        )
         # Expected volume fraction at 09:30 is 12% (120,000 shares)
         # Therefore, TOD-RVOL = 240,000 / 120,000 = 2.0x!
         assert rvol_0930 == 2.0
 
         # At 15:30 IST, current volume is 2,000,000 shares (200% of daily volume)
         dt_1530 = datetime(2026, 9, 15, 15, 30, tzinfo=IST)
-        rvol_1530 = compute_time_of_day_rvol(2_000_000, avg_daily_vol, ref_dt=dt_1530)
+        rvol_1530 = compute_time_of_day_rvol(
+            2_000_000, avg_daily_vol, ref_dt=dt_1530, is_derivative=False, exchange="NSE"
+        )
         assert rvol_1530 == 2.0
 
 

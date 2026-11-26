@@ -32,6 +32,37 @@ class _AutoDaemonThread(threading.Thread):
         super().__init__(*args, **kwargs)
 
 
+class _SafeSymbolTokenDict(dict):
+    """
+    Subclass of dict that prevents KeyError when FyersDataSocket decodes in-flight or unsubscribed ticks.
+
+    Root Cause Solved:
+    fyers_apiv3's __datafeed_resp does: self.resp[topic_name]["symbol"] = self.symbol_token[topic_name]
+    When a contract is unsubscribed (or rotates at 15:30 IST), self.symbol_token.pop(token) removes it.
+    Buffered in-flight socket packets arriving after unsubscription then crash with KeyError: 'sf|bse_fo|1165066',
+    emitting an unhandled exception in FyersDataSocket.
+
+    This dict maintains a bounded tombstone cache of recently popped/deregistered tokens and overrides
+    __missing__ to return the tombstoned symbol (or topic_name as fallback) without raising KeyError.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._tombstones: dict[str, str] = {}
+
+    def pop(self, k: Any, *d: Any) -> Any:
+        if k in self:
+            val = self[k]
+            if len(self._tombstones) > 10000:
+                self._tombstones.clear()
+            self._tombstones[str(k)] = str(val)
+        return super().pop(k, *d)
+
+    def __missing__(self, key: Any) -> Any:
+        str_key = str(key)
+        return self._tombstones.get(str_key, str_key)
+
+
 class _ThreadingProxy:
     """Proxy object that routes Thread to _AutoDaemonThread while preserving threading module attrs."""
 
@@ -71,10 +102,32 @@ def patch_fyers_websocket_daemon_threads() -> None:
             mod.Thread = _AutoDaemonThread
             mod.threading = proxy
 
-        # Patch FyersDataSocket to fix official SDK bug:
-        # SDK hardcodes len(index_val) == 8, but Fyers Full Mode (type 85) datafeed sends
-        # field_count > 8, which throws IndexError: list index out of range in __datafeed_resp.
-        # Defensively pad index_val, data_val, and depthvalue to 64 items so ticks never crash.
+        # Patch FyersDataSocket to fix official SDK bugs:
+        # 1. SDK hardcodes len(index_val) == 8, but Fyers Full Mode (type 85) datafeed sends
+        #    field_count > 8, which throws IndexError: list index out of range in __datafeed_resp.
+        #    Defensively pad index_val, data_val, and depthvalue to 64 items so ticks never crash.
+        # 2. SDK does self.resp[topic_name]["symbol"] = self.symbol_token[topic_name] which crashes with
+        #    KeyError on in-flight ticks after unsubscription. We wrap symbol_token in _SafeSymbolTokenDict.
+        def _get_symbol_token(self):
+            val = getattr(self, "_safe_symbol_token", None)
+            if val is None:
+                val = _SafeSymbolTokenDict()
+                self._safe_symbol_token = val
+            return val
+
+        def _set_symbol_token(self, val):
+            tombstones = getattr(getattr(self, "_safe_symbol_token", None), "_tombstones", {})
+            if isinstance(val, _SafeSymbolTokenDict):
+                self._safe_symbol_token = val
+                self._safe_symbol_token._tombstones.update(tombstones)
+            elif isinstance(val, dict):
+                self._safe_symbol_token = _SafeSymbolTokenDict(val)
+                self._safe_symbol_token._tombstones.update(tombstones)
+            else:
+                self._safe_symbol_token = _SafeSymbolTokenDict()
+
+        data_ws.FyersDataSocket.symbol_token = property(_get_symbol_token, _set_symbol_token)
+
         _orig_data_init = data_ws.FyersDataSocket.__init__
 
         def _patched_data_init(self, *args, **kwargs):
@@ -91,6 +144,8 @@ def patch_fyers_websocket_daemon_threads() -> None:
                 self.depthvalue = list(self.depthvalue) + [
                     f"extra_{i}" for i in range(len(self.depthvalue), 64)
                 ]
+            if not isinstance(getattr(self, "symbol_token", None), _SafeSymbolTokenDict):
+                self.symbol_token = _SafeSymbolTokenDict(getattr(self, "symbol_token", {}))
 
         data_ws.FyersDataSocket.__init__ = _patched_data_init
 
@@ -218,6 +273,24 @@ def patch_fyers_websocket_daemon_threads() -> None:
 
         data_ws.FyersDataSocket.unsubscribe = _patched_data_unsubscribe
         data_ws.FyersDataSocket.subscribe = _patched_data_subscribe
+
+        # 4. Patch FyersDataSocket.__send_message to catch WebSocketConnectionClosedException / OSError
+        # Prevents thread crash in __process_message_queue when messages are queued during socket teardown
+        _orig_data_send_msg = getattr(
+            data_ws.FyersDataSocket, "_FyersDataSocket__send_message", None
+        )
+        if _orig_data_send_msg:
+
+            def _patched_data_send_msg(self, message: str) -> None:
+                try:
+                    _orig_data_send_msg(self, message)
+                except Exception as e_send:
+                    logger.debug(
+                        "[FyersSocketPatch] FyersDataSocket.__send_message error suppressed on closed socket: %s",
+                        e_send,
+                    )
+
+            data_ws.FyersDataSocket._FyersDataSocket__send_message = _patched_data_send_msg
 
         # Patch FyersTbtSocket to fix official SDK bugs:
         # 1. SDK clobbers self.onopen = on_connect with self.onopen = on_open (where on_open defaults to None)

@@ -10,7 +10,7 @@ description: >-
 
 # Alert System Runbook
 
-> The alert system spans 7+ modules and 16 detector files. Read this before
+> The alert system spans multiple engines under `engine/` and detectors under `engine/detectors/`. Read this before
 > modifying anything in `engine/alerts.py`, `engine/auto_alert_engine.py`,
 > `engine/alert_scrutiny.py`, `engine/alert_model.py`, `engine/alert_evaluator.py`,
 > `engine/alert_expiry.py`, or `engine/detectors/`.
@@ -77,15 +77,17 @@ expires_at: str        # IST timestamp
 
 | Module | Responsibility |
 |--------|---------------|
-| `engine/alert_identity.py` | Single authority for alert ID generation (`generate_alert_id`), symbol normalization (`canonical_alert_symbol`), and determinism validation (`validate_alert_id`) |
+| `engine/alert_identity.py` | Single authority for alert ID generation (`generate_alert_id`), `semantic_cluster_key()` cross-detector coalescing, and `canonical_alert_symbol()` |
 | `engine/alert_model.py` | `AutoAlert` dataclass, status transitions, defensive invariant setters |
+| `engine/feature_bus.py` & `engine/signal_enrichment.py` | Single-pass cached `SharedFeatureBus`, read-only constituent lead-lag, and live `PRIMED` F&O margin preflight |
 | `engine/alerts.py` | CRUD: save/load/update alerts to JSON storage |
-| `engine/alert_evaluator.py` | Evaluate invalidation, target hits, trailing stop updates |
+| `engine/alert_evaluator.py` | Evaluate invalidation, target hits, `market.rule_schedule` cutoffs, trailing stop updates |
 | `engine/alert_expiry.py` | TTL classification, options expiry detection |
-| `engine/alert_scrutiny.py` | Tier 1 math sanity + Tier 2 LLM devil's advocate |
-| `engine/alert_preferences.py` | User alert preference filters (asset class, type, confidence) |
-| `engine/auto_alert_engine.py` | Main engine loop, detector dispatch, circular buffer, SSE |
-| `engine/detectors/` | 16 individual detector implementations (ALL use `generate_alert_id`) |
+| `engine/alert_scrutiny.py` | Tier 1 math sanity + Tier 2 LLM devil's advocate (preserving `PROBATION` 0.75x multiplier; no score-80 auto-promotion) |
+| `engine/alert_preferences.py` | User alert preference filters + `config.discovery_policy` (`FNO_ONLY` default) |
+| `engine/auto_alert_engine.py` | Main engine loop, detector dispatch, semantic cluster dedup, circular buffer, SSE & transactional outbox staging |
+| `engine/outbox_worker.py` | Durable SQLite outbox dispatcher waiting for Telegram `wait=True` confirmation and `429 Retry-After` backoff |
+| `engine/detectors/` | Modular detector implementations (`FNO_ONLY` index/stock F&O prioritized; ALL use `generate_alert_id`) |
 | `engine/multibagger_alerts.py` | Multibagger-specific alert generation |
 | `engine/precursor_radar.py` | Precursor signal detection (early warning) |
 
@@ -114,8 +116,8 @@ _DEDUP_CACHE[cache_key] = time.time()
 
 ### Stage 3: Deterministic Quantitative Conviction Gate
 ```python
-if minervini_stage != 2:
-    return None  # Wrong stage — reject without LLM
+if not is_fno_or_index and minervini_stage != 2:
+    return None  # Stock equity wrong stage — reject without LLM
 if technical_confidence < 70:
     return None  # Weak setup
 if rr_ratio < 2.0:
@@ -352,19 +354,19 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
 
 ```powershell
 # Alert identity, symbol normalization, and detector static invariants (< 1s)
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_identity_invariants.py -q
+python -m pytest tests/test_alert_identity_invariants.py -q
 
 # Full auto-alert engine tests (dedup, cooldown, lifecycle)
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_auto_alerts.py -q
+python -m pytest tests/test_auto_alerts.py -q
 
 # Crypto alert pipeline tests
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_crypto_alert_pipeline.py -q
+python -m pytest tests/test_crypto_alert_pipeline.py -q
 
 # Alert scrutiny tier 1 and tier 2
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_scrutiny.py -q
+python -m pytest tests/test_alert_scrutiny.py -q
 
 # Alert lifecycle and expiry
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -q
+python -m pytest tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -q
 ```
 
 ---

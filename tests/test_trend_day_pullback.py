@@ -307,17 +307,22 @@ def test_morning_reversal_zone_and_midday_pullback_runway_exemption():
 def test_trend_day_pullback_index_regime_gate(monkeypatch):
     """Verifies that counter-trend pullbacks are suppressed when benchmark index trades counter to setup."""
     from brokers.base import Quote
+    from engine.daily_levels import CPRGateResult
     import market.quotes
 
     df_bull = _generate_synthetic_trend_df("BULLISH")
     ltp_bull = float(df_bull["close"].iloc[-1])
     dt = df_bull.index[-1]
 
+    # Isolate from persisted/stale RELIANCE DailyLevels so CPR/midday checks remain hermetic
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *a, **kw: None)
+    monkeypatch.setattr("engine.daily_levels.evaluate_cpr_gate", lambda *a, **kw: CPRGateResult())
+
     # Case 1: Stock is Bullish, but NIFTY 50 is below VWAP (bearish market)
     monkeypatch.setattr(
         market.quotes,
         "get_quote",
-        lambda sym: {
+        lambda sym, **kw: {
             "NSE:NIFTY 50": Quote(symbol="NSE:NIFTY 50", last_price=24200.0, vwap=24350.0)
         },
     )
@@ -325,7 +330,7 @@ def test_trend_day_pullback_index_regime_gate(monkeypatch):
     monkeypatch.setenv("CHANAKYA_TESTING", "0")
 
     alert = detect_trend_day_pullback(
-        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY"
+        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY", rvol_val=1.6
     )
     assert alert is None, "Bullish continuation should be suppressed when NIFTY 50 is below VWAP"
 
@@ -333,12 +338,12 @@ def test_trend_day_pullback_index_regime_gate(monkeypatch):
     monkeypatch.setattr(
         market.quotes,
         "get_quote",
-        lambda sym: {
+        lambda sym, **kw: {
             "NSE:NIFTY 50": Quote(symbol="NSE:NIFTY 50", last_price=24400.0, vwap=24350.0)
         },
     )
     alert = detect_trend_day_pullback(
-        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY"
+        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY", rvol_val=1.6
     )
     assert alert is not None, "Bullish continuation should trigger when NIFTY 50 is above VWAP"
     assert alert.direction == "BULLISH"

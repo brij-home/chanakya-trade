@@ -368,6 +368,9 @@ def test_intraday_spark_sector_rrg_tailwind_integration(monkeypatch):
     # Case 1: Stock is in a LAGGING sector with moderate RVOL (1.8x < 2.5x) -> must be suppressed
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 1.8)
     monkeypatch.setattr(
+        "engine.detectors.intraday_spark.compute_time_of_day_rvol", lambda *a, **kw: 1.8
+    )
+    monkeypatch.setattr(
         "analysis.sector_rotation.get_stock_tailwind",
         lambda sym: DummyTailwind(quadrant="LAGGING", sector="NIFTY DEFENCE"),
     )
@@ -379,6 +382,9 @@ def test_intraday_spark_sector_rrg_tailwind_integration(monkeypatch):
 
     # Case 2: Stock is in a LEADING sector -> must pass and receive conviction bonus
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 2.0)
+    monkeypatch.setattr(
+        "engine.detectors.intraday_spark.compute_time_of_day_rvol", lambda *a, **kw: 2.0
+    )
     monkeypatch.setattr(
         "analysis.sector_rotation.get_stock_tailwind",
         lambda sym: DummyTailwind(quadrant="LEADING", sector="NIFTY DEFENCE"),
@@ -412,6 +418,9 @@ def test_intraday_spark_upper_circuit_proximity_rejection(monkeypatch):
 
     monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **kw: df_daily)
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 2.5)
+    monkeypatch.setattr(
+        "engine.detectors.intraday_spark.compute_time_of_day_rvol", lambda *a, **kw: 2.5
+    )
 
     # Stock at 104.5, Upper Circuit is 105.0 (0.47% away, < 0.8% threshold)
     q_stock = Quote(

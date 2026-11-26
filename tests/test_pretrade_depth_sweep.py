@@ -52,9 +52,9 @@ def test_validate_pretrade_auto_resolves_bisect_depth_book():
     """Verify validate_pretrade queries BisectDepthBook and computes depth sweep VWAP automatically."""
     sym = "TEST_SWEEP_RELIANCE"
     book = get_depth_book(sym)
-    # Configure asks: 10 units @ 100.0, 90 units @ 110.0
+    # Configure tight normal inside bid-ask (0.10% spread <= 0.40% Gate 11 cap) and asks: 10@100, 90@110
     book.batch_update(
-        bids=[{"price": 99.5, "quantity": 50, "orders": 5}],
+        bids=[{"price": 99.9, "quantity": 50, "orders": 5}],
         asks=[
             {"price": 100.0, "quantity": 10, "orders": 1},
             {"price": 110.0, "quantity": 90, "orders": 3},

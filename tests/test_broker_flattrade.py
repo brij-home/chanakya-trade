@@ -28,6 +28,32 @@ class _Response:
 def _isolate_flattrade_token(tmp_path, monkeypatch):
     test_token_file = tmp_path / "flattrade.json"
     monkeypatch.setattr(flattrade, "TOKEN_FILE", test_token_file)
+    flattrade._reset_auth_backoff()
+    yield
+    flattrade._reset_auth_backoff()
+
+
+def test_is_authenticated_applies_backoff_on_invalid_ip(monkeypatch):
+    """Repeated is_authenticated() polls must respect cooldown after INVALID_IP rejection."""
+    broker = FlattradeAPI(
+        user_id="FT100",
+        password="pwd",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+        api_key="FT_API_KEY",
+        api_secret="FT_API_SECRET",
+    )
+    calls = 0
+
+    def fail_login():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("Flattrade token exchange rejected: Invalid Input : INVALID_IP")
+
+    monkeypatch.setattr(broker, "complete_login", fail_login)
+    assert broker.is_authenticated() is False
+    assert broker.is_authenticated() is False
+    assert broker.is_authenticated() is False
+    assert calls == 1
 
 
 def test_missing_credentials_fails_closed(monkeypatch):
@@ -64,7 +90,7 @@ def test_headless_login_persists_session_and_normalizes_profile(tmp_path, monkey
     broker = FlattradeAPI(
         user_id="FT100",
         password="pwd",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         api_key="FT_API_KEY",
         api_secret="FT_API_SECRET",
     )
@@ -122,7 +148,7 @@ def test_login_rejected_by_authapi(monkeypatch):
     broker = FlattradeAPI(
         user_id="FT100",
         password="pwd",
-        totp_secret="JBSWY3DPEHPK3PXP",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         api_key="FT_API_KEY",
         api_secret="FT_API_SECRET",
     )

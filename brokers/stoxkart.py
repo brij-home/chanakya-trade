@@ -26,7 +26,6 @@ import json
 import os
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -45,7 +44,9 @@ from brokers.base import (
     Order,
 )
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "stoxkart.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("stoxkart.json")
 
 STOXKART_BASE_URL = os.environ.get("STOXKART_BASE_URL", "https://api.stoxkart.com")
 STOXKART_MARKET_URL = os.environ.get("STOXKART_MARKET_URL", "https://marketdata.stoxkart.com")

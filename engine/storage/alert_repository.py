@@ -13,14 +13,15 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.storage.alert_repository")
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def get_auto_alerts_file() -> Path:
@@ -39,11 +40,7 @@ def get_auto_alerts_file() -> Path:
             if hasattr(aae, "AUTO_ALERTS_FILE"):
                 override = getattr(aae, "AUTO_ALERTS_FILE")
                 if override is not None:
-                    base = Path(
-                        os.environ.get("TRADING_PLATFORM_DATA")
-                        or (Path.home() / ".trading_platform")
-                    )
-                    default_path = base / "auto_alerts.json"
+                    default_path = app_data_path("auto_alerts.json")
                     if Path(override) != default_path:
                         return Path(override)
     except Exception as e:
@@ -51,8 +48,7 @@ def get_auto_alerts_file() -> Path:
 
     # 2. Check local module override if present
     override_local = globals().get("AUTO_ALERTS_FILE")
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    default_path = base / "auto_alerts.json"
+    default_path = app_data_path("auto_alerts.json")
     if override_local is not None and Path(override_local) != default_path:
         return Path(override_local)
 
@@ -84,7 +80,7 @@ class AlertRepository:
         with self._io_lock:
             try:
                 target_path = self.get_target_file()
-                base_prod = Path.home() / ".trading_platform" / "auto_alerts.json"
+                base_prod = app_data_path("auto_alerts.json")
                 is_test_env = bool(
                     os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
                 )
@@ -176,6 +172,13 @@ class AlertRepository:
 
             return alert_sqlite_store.get_latest_outbox_version(alert_id)
 
+    def acknowledge_outbox_by_alert_channel(self, alert_id: str, channel: str = "TELEGRAM") -> int:
+        """Marks pending/claimed outbox entries for (alert_id, channel) as ACKNOWLEDGED."""
+        with self._io_lock:
+            from engine.sqlite_store import alert_sqlite_store
+
+            return alert_sqlite_store.acknowledge_outbox_by_alert_channel(alert_id, channel)
+
     def clear(self) -> None:
         """Clears SQLite alert store records."""
         with self._io_lock:
@@ -206,19 +209,22 @@ class AlertRepository:
 
     def load(self) -> list[AutoAlert]:
         """
-        Loads alerts from storage. Handles corrupt JSON recovery from SQLite WAL store
-        and deserializes alerts with post-T1 rehabilitation.
+        Loads alerts cleanly without in-line startup migrations (Rule 18).
+        In production, merges SQLite WAL rows as primary state authority so tick-path
+        save_single_alert() upserts survive restarts even if JSON snapshot lags.
         """
         target_path = self.get_target_file()
-        data = None
+        data: list[dict[str, Any]] = []
         if target_path.exists():
             content = target_path.read_text(encoding="utf-8").strip()
             if content:
                 try:
-                    data = json.loads(content)
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        data = parsed
                 except Exception as parse_err:
                     logger.warning(
-                        f"[AlertRepository] Corrupted auto_alerts.json detected ({parse_err}); backing up and restoring from SQLite."
+                        f"[AlertRepository] Corrupted auto_alerts.json detected ({parse_err}); backing up and restoring from SQLite WAL."
                     )
                     try:
                         backup_path = target_path.with_name(
@@ -230,26 +236,37 @@ class AlertRepository:
                             f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
                         )
 
-        if not data:
-            is_test_env = (
-                "PYTEST_CURRENT_TEST" in os.environ
-                or "pytest" in sys.modules
-                or os.environ.get("CHANAKYA_TESTING") == "1"
-                or "test" in str(target_path).lower()
-                or "tmp" in str(target_path).lower()
-            )
-            if not is_test_env:
-                try:
-                    from engine.sqlite_store import alert_sqlite_store
+        is_test_env = (
+            "PYTEST_CURRENT_TEST" in os.environ
+            or "pytest" in sys.modules
+            or os.environ.get("CHANAKYA_TESTING") == "1"
+            or "test" in str(target_path).lower()
+            or "tmp" in str(target_path).lower()
+        )
+        if not is_test_env and target_path == app_data_path("auto_alerts.json"):
+            try:
+                from engine.sqlite_store import alert_sqlite_store
 
-                    rows = alert_sqlite_store.get_alerts(limit=500)
-                    if rows:
-                        logger.info(
-                            f"[AlertRepository] Restored {len(rows)} alerts from SQLite WAL store."
-                        )
-                        data = rows
-                except Exception as sql_err:
-                    logger.debug(f"[AlertRepository] SQLite fallback read error: {sql_err}")
+                wal_rows = alert_sqlite_store.get_alerts(limit=500)
+                if wal_rows:
+                    merged_by_id: dict[str, dict[str, Any]] = {}
+                    for item in data:
+                        if isinstance(item, dict) and item.get("alert_id"):
+                            merged_by_id[str(item["alert_id"])] = item
+                    for wal_item in wal_rows:
+                        if isinstance(wal_item, dict) and wal_item.get("alert_id"):
+                            aid = str(wal_item["alert_id"])
+                            cur = merged_by_id.get(aid)
+                            if cur is None or str(wal_item.get("updated_at") or "") >= str(
+                                cur.get("updated_at") or ""
+                            ):
+                                merged_by_id[aid] = wal_item
+                    data = list(merged_by_id.values())
+                    logger.info(
+                        f"[AlertRepository] Merged {len(wal_rows)} SQLite WAL alerts cleanly."
+                    )
+            except Exception as sql_err:
+                logger.debug(f"[AlertRepository] SQLite WAL merge skipped: {sql_err}")
 
         if not data:
             return []
@@ -269,52 +286,6 @@ class AlertRepository:
                     logger.warning(
                         f"[AlertRepository] Failed to deserialize alert {aid}: {item_err}"
                     )
-
-        # Rehabilitate alerts falsely marked as INVALIDATED after hitting T1 or breaching ratcheted trailing stop
-        rehab_count = 0
-        for a in alerts:
-            if a.is_invalidated and a.invalidation_reason:
-                inv_r = a.invalidation_reason.lower()
-                has_t1 = (
-                    "T1_ACHIEVED" in (a.achieved_milestones or [])
-                    or a.target_status
-                    in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED", "RUNNER_CLOSED")
-                    or "target 1" in inv_r
-                    or "trailing stop triggered" in inv_r
-                    or "trailing runner stop" in inv_r
-                    or "profit secured" in inv_r
-                )
-                if has_t1:
-                    logger.info(
-                        f"[AlertRepository] Rehabilitating post-T1 falsely invalidated alert {a.symbol} ({a.alert_id}) to RUNNER_EXIT"
-                    )
-                    a.is_invalidated = False
-                    a.stage = "RUNNER_EXIT"
-                    a.target_status = "RUNNER_CLOSED"
-                    a.is_active = False  # Terminal closed status
-                    a.is_archived = True
-                    a.invalidation_reason = None
-                    if a.achieved_milestones is None:
-                        a.achieved_milestones = []
-                    if "RUNNER_EXIT" not in a.achieved_milestones:
-                        a.achieved_milestones.append("RUNNER_EXIT")
-                    inst_label = (
-                        a.contract_symbol
-                        or f"{a.symbol} {getattr(a, 'strike', '') or ''} {getattr(a, 'option_type', '') or ''}".strip()
-                    )
-                    a.headline = f"🏁 [LIVE] RUNNER CLOSED (PROFIT SECURED): {inst_label}"
-                    rehab_count += 1
-                    try:
-                        from engine.learning_engine import pattern_learning_engine
-
-                        pattern_learning_engine.clear_symbol_lockout(a.symbol)
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-
-        if rehab_count > 0:
-            self.save(alerts)
 
         return alerts
 

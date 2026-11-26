@@ -30,9 +30,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -45,10 +44,7 @@ from engine.dynamic_risk import resolve_price_tier
 logger = logging.getLogger("chanakya.detectors.orb")
 
 
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def extract_opening_range(
@@ -193,6 +189,9 @@ def detect_opening_range_breakout(
 
     # Dynamic Calibration from Governor
     min_rvol = 1.30 if is_index else 1.45
+    # Midday Dead-Zone Throttle (11:45 to 13:15 IST): Require institutional volume >= 2.2x to prevent false breakouts
+    if dtime(11, 45) <= curr_t <= dtime(13, 15) and not ignore_time_gate:
+        min_rvol = max(min_rvol, 2.20)
     no_chase_buffer = round(0.35 * orb_range, 2)
     is_breakout_allowed = True
     try:
@@ -324,6 +323,12 @@ def detect_opening_range_breakout(
 
         if dl and is_index and dl.camarilla:
             if is_bearish or (is_primed and primed_direction == "BEARISH"):
+                l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
+                if l5 > 0 and ltp <= (l5 * 1.002):
+                    logger.info(
+                        f"[ORB] Suppressed Bearish ORB on {symbol}: Spot ₹{ltp:,.1f} reached Camarilla L5 Floor ₹{l5:,.1f} (Exhaustion)."
+                    )
+                    return None
                 l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
                 if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
                     logger.info(
@@ -331,6 +336,12 @@ def detect_opening_range_breakout(
                     )
                     return None
             elif is_bullish or (is_primed and primed_direction == "BULLISH"):
+                h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
+                if h5 > 0 and ltp >= (h5 * 0.998):
+                    logger.info(
+                        f"[ORB] Suppressed Bullish ORB on {symbol}: Spot ₹{ltp:,.1f} reached Camarilla H5 Ceiling ₹{h5:,.1f} (Exhaustion)."
+                    )
+                    return None
                 h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
                 if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
                     logger.info(
@@ -339,6 +350,21 @@ def detect_opening_range_breakout(
                     return None
     except Exception as e_dl:
         logger.debug(f"[ORB] Daily levels & CPR check skipped for {symbol}: {e_dl}")
+
+    # ── Index Heavyweight Locomotive Polarization Gate ────────────
+    if is_index:
+        try:
+            from market.indices import get_index_polarization
+
+            idx_pol = get_index_polarization(symbol)
+            if idx_pol.is_polarized:
+                logger.info(
+                    f"[ORB] Suppressed ORB on {symbol}: Heavyweight Locomotive Tug-of-War Polarization "
+                    f"({idx_pol.summary}). Disallowing index ORB breakout in conflict gridlock."
+                )
+                return None
+        except Exception as e_pol:
+            logger.debug(f"[ORB] Index polarization check notice: {e_pol}")
 
     # 4.05 Directional Momentum & Velocity Veto for Index ORB
     if is_index and df is not None:
@@ -705,6 +731,10 @@ def detect_opening_range_breakout(
 
     clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
+    from engine.position_sizer import get_lot_size
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_idx or (stock_lot_size > 1)
     opt_plan = (
         resolve_option_contract(
             symbol=clean_sym,
@@ -712,16 +742,45 @@ def detect_opening_range_breakout(
             direction=direction,
             underlying_sl=stop_loss,
             underlying_target=target_1,
+            prefer_options=should_prefer_opt,
         )
-        if is_idx
+        if should_prefer_opt
         else None
     )
 
+    fractal_meta = None
+    if df is not None and len(df) >= 3:
+        try:
+            from engine.fractal_entry_coordinator import coordinate_fractal_entry
+
+            z_high = orb_high if is_bull_setup else orb_mid
+            z_low = orb_mid if is_bull_setup else orb_low
+            f_res = coordinate_fractal_entry(
+                symbol=clean_sym,
+                htf_zone_high=z_high,
+                htf_zone_low=z_low,
+                direction="BULLISH" if is_bull_setup else "BEARISH",
+                df_ltf=df,
+                primary_rvol=rvol_val,
+            )
+            if f_res:
+                fractal_meta = f_res.to_dict()
+        except Exception as _e_fr:
+            logger.debug(f"[ORB] Fractal coordination non-fatal: {_e_fr}")
+
     if opt_plan:
         opt_no_chase = round(opt_plan.entry_premium * 1.045, 2)
-        opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        if is_primed:
+            opt_headline = f"🎯 [ORB PRIMED WATCHLIST] {opt_plan.contract_symbol} Coiling Near Range {'High' if direction == 'BULLISH' else 'Low'} (Spot ₹{ltp:,.1f})"
+        else:
+            opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
         act_plan = {
-            "action": f"BUY {opt_plan.option_type}",
+            "action": f"WATCH {opt_plan.option_type}"
+            if is_primed
+            else f"BUY {opt_plan.option_type}",
+            "autoSubmit": False if is_primed else True,
+            "is_watch_only": bool(is_primed),
+            "execution_ready": not is_primed,
             "contract": opt_plan.contract_symbol,
             "instrument": opt_plan.contract_symbol,
             "instrument_type": "OPTION",
@@ -751,17 +810,26 @@ def detect_opening_range_breakout(
             "retest_invalidation_sl": round(max(orb_mid, orb_high - 0.28 * orb_range), 1)
             if (is_bullish or (is_primed and direction == "BULLISH"))
             else round(min(orb_mid, orb_low + 0.28 * orb_range), 1),
+            "entry_type": "LIMIT_ON_PULLBACK" if is_primed else "BREAKOUT_STOP",
             "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
-            "when_to_buy": f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if direction == 'BULLISH' else 'below'} ₹{trigger_level:,.1f}.",
+            "when_to_buy": (
+                f"WATCHLIST SURVEILLANCE ONLY. Await 5m candle close {'above ₹' + str(orb_high) if direction == 'BULLISH' else 'below ₹' + str(orb_low)} to trigger ORB_BREAKOUT. Do not front-run."
+                if is_primed
+                else f"Buy {opt_plan.contract_symbol} on retest while {clean_sym} spot holds {'above' if direction == 'BULLISH' else 'below'} ₹{trigger_level:,.1f}."
+            ),
             "when_to_wait": when_wait,
             "profit_rule": "Scale Blueprint: Book 50% at T1 (+2.0R to +3.0R), move Stop-Loss to Breakeven (+0.2% fee cushion). Risk becomes ₹0.00 (Free-Roll). Hold 25% for T2, trail 25% runner on 5m 9-EMA.",
+            "fractal_blueprint": fractal_meta,
+            "scale_out_plan": fractal_meta.get("scale_out_plan") if fractal_meta else None,
         }
         return AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
             stage=stage_val,
             symbol=clean_sym,
-            exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
+            exchange="BFO"
+            if clean_sym in ("SENSEX", "BANKEX")
+            else ("NFO" if (is_idx or opt_plan) else exchange),
             direction=direction,
             headline=opt_headline,
             summary=summary,
@@ -775,15 +843,15 @@ def detect_opening_range_breakout(
             option_premium=opt_plan.entry_premium,
             underlying_spot=ltp,
             lot_size=opt_plan.lot_size,
-            segment="FNO_INDEX",
+            segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if opt_plan else "EQUITY"),
             no_chase_boundary=opt_no_chase,
             spot_no_chase_boundary=no_chase_lvl,
             confidence=confidence,
             created_at=now_iso,
-            is_live=True,
+            is_live=not is_primed,
             environment="LIVE",
             entry_type="BREAKOUT_STOP",
-            setup_style="CONTINUATION",
+            setup_style="SURVEILLANCE" if is_primed else "CONTINUATION",
             metrics={
                 "orb_high": orb_high,
                 "orb_low": orb_low,
@@ -812,6 +880,23 @@ def detect_opening_range_breakout(
                 "avwap_confluence": avwap_confluence,
                 "obv_regime": obv_div,
                 "vsa_signal": vsa_sig,
+                "is_watch_only": bool(is_primed),
+                "execution_ready": not is_primed,
+                **(
+                    {
+                        "scrutiny": {
+                            "status": "QUANT_VERIFIED",
+                            "score": confidence,
+                            "logic_confirmation": f"Tier-1 ORB coil & range geometry verified for {clean_sym} ({direction}).",
+                            "trap_risk_warning": "Coiling surveillance setup; await physical range breakout confirmation.",
+                            "actionable_guidance": f"Pre-stage only. Enter on confirmed breakout beyond {trigger_level}.",
+                            "auditor_model": "TIER1_QUANT",
+                            "audited_at": now_iso,
+                        }
+                    }
+                    if is_primed
+                    else {}
+                ),
             },
             preferred_vehicle="NAKED_OPTION",
             actionable_plan=act_plan,
@@ -831,12 +916,13 @@ def detect_opening_range_breakout(
         target_level=target_1,
         stop_loss=stop_loss,
         no_chase_boundary=no_chase_lvl,
+        segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if stock_lot_size > 1 else "EQUITY"),
         confidence=confidence,
         created_at=now_iso,
-        is_live=True,
+        is_live=not is_primed,
         environment="LIVE",
         entry_type="BREAKOUT_STOP",
-        setup_style="CONTINUATION",
+        setup_style="SURVEILLANCE" if is_primed else "CONTINUATION",
         metrics={
             "orb_high": orb_high,
             "orb_low": orb_low,
@@ -860,12 +946,37 @@ def detect_opening_range_breakout(
             "avwap_confluence": avwap_confluence,
             "obv_regime": obv_div,
             "vsa_signal": vsa_sig,
+            "fractal_blueprint": fractal_meta,
+            "is_watch_only": bool(is_primed),
+            "execution_ready": not is_primed,
+            **(
+                {
+                    "scrutiny": {
+                        "status": "QUANT_VERIFIED",
+                        "score": confidence,
+                        "logic_confirmation": f"Tier-1 ORB coil & range geometry verified for {clean_sym} ({direction}).",
+                        "trap_risk_warning": "Coiling surveillance setup; await physical range breakout confirmation.",
+                        "actionable_guidance": f"Pre-stage only. Enter on confirmed breakout beyond {trigger_level}.",
+                        "auditor_model": "TIER1_QUANT",
+                        "audited_at": now_iso,
+                    }
+                }
+                if is_primed
+                else {}
+            ),
         },
         preferred_vehicle="NAKED_OPTION",
         actionable_plan={
-            "action": f"BUY_{alert_type}"
-            if (is_bullish or (is_primed and direction == "BULLISH"))
-            else f"SELL_{alert_type}",
+            "action": f"WATCH_{alert_type}"
+            if is_primed
+            else (
+                f"BUY_{alert_type}"
+                if (is_bullish or (is_primed and direction == "BULLISH"))
+                else f"SELL_{alert_type}"
+            ),
+            "autoSubmit": False if is_primed else True,
+            "is_watch_only": bool(is_primed),
+            "execution_ready": not is_primed,
             "entry_type": "LIMIT_ON_PULLBACK",
             "optimal_entry_limit": trigger_level,
             "optimal_entry_range": f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}",
@@ -883,5 +994,7 @@ def detect_opening_range_breakout(
             "when_to_buy": when_buy,
             "when_to_wait": when_wait,
             "profit_rule": f"Book 50% at Target 1 (₹{target_1:,.1f}), move Stop-Loss to Breakeven, trail runner to Target 2.",
+            "fractal_blueprint": fractal_meta,
+            "scale_out_plan": fractal_meta.get("scale_out_plan") if fractal_meta else None,
         },
     )

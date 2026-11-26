@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 from market.instruments import format_strike
@@ -103,6 +104,11 @@ class ResolvedOptionPlan:
             "delta": round(self.delta, 4) if self.delta is not None else None,
             "iv": round(self.iv, 2) if self.iv is not None else None,
             "is_next_month_routed": self.is_next_month_routed,
+            "order_type": "LIMIT",
+            "execution_strategy": "LIMIT_WITH_PROTECTION",
+            "limit_price": round(self.entry_premium * 1.005, 1),
+            "protection_ceiling": round(self.entry_premium * 1.025, 1),
+            "tif": "DAY",
         }
         if self.spread_details:
             d["hedged_spread"] = self.spread_details
@@ -196,6 +202,25 @@ def resolve_option_contract(
     is_idx = is_index_symbol(clean_sym)
     tier_upper = (strike_tier or "ATM").upper().strip()
 
+    if not is_idx:
+        try:
+            from market.fno_ban import is_in_fno_ban
+
+            if is_in_fno_ban(clean_sym):
+                logger.info(
+                    "[OptionResolver] Blocking option resolution for %s: underlying is in NSE F&O Ban Period.",
+                    clean_sym,
+                )
+                return None
+        except Exception as e_ban:
+            logger.debug(f"[OptionResolver] F&O ban check skipped for {clean_sym}: {e_ban}")
+
+    def _contract_ltp(contract: Any) -> float:
+        raw_val = getattr(contract, "last_price", None)
+        if raw_val is None or float(raw_val or 0.0) <= 0.0:
+            raw_val = getattr(contract, "ltp", 0.0)
+        return float(raw_val or 0.0)
+
     # Determine Option Type
     is_est = False
     is_bull = direction.upper() in ("BULLISH", "BUY", "LONG")
@@ -206,11 +231,13 @@ def resolve_option_contract(
     try:
         from engine.position_sizer import get_lot_size
 
-        lot_sz = get_lot_size(clean_sym) or (
-            15 if clean_sym == "NIFTY" else (15 if clean_sym == "BANKNIFTY" else 1)
-        )
+        from market.instruments import STANDARD_LOT_SIZES
+
+        lot_sz = get_lot_size(clean_sym) or STANDARD_LOT_SIZES.get(clean_sym, 65 if is_idx else 1)
     except Exception:
-        lot_sz = 15 if is_idx else 1
+        from market.instruments import STANDARD_LOT_SIZES
+
+        lot_sz = STANDARD_LOT_SIZES.get(clean_sym, 65 if is_idx else 1)
 
     # If it's a cash equity with no F&O lot size and not requested, do not force options
     if not is_idx and not prefer_options and lot_sz <= 1:
@@ -224,6 +251,16 @@ def resolve_option_contract(
             if v_float > 0 and math.isfinite(v_float):
                 vix_val = v_float
         except (TypeError, ValueError):
+            vix_val = None
+
+    if vix_val is None and not require_listed_contract:
+        try:
+            from engine.market_dynamics_governor import get_market_dynamics_governor
+
+            cached_vix = get_market_dynamics_governor().get_live_vix()
+            if cached_vix is not None and float(cached_vix) > 0:
+                vix_val = float(cached_vix)
+        except Exception:
             vix_val = None
 
     if vix_val is None:
@@ -269,6 +306,30 @@ def resolve_option_contract(
         vix_regime = "NORMAL_MOMENTUM"
         strategy_type = "NAKED_DIRECTIONAL"
         exec_mandate = "STANDARD"
+
+    # ── 0DTE Afternoon Theta Protection Gate ─────────────────────
+    # On weekly index expiry days past 13:00 IST, OTM options suffer rapid theta collapse.
+    # Force ITM (Delta >= 0.60) or Vertical Defined-Risk Spreads to protect capital.
+    try:
+        from datetime import time as dtime_type
+        from config.constants import IST_ZONE as IST_Z
+        from engine.alert_expiry import is_expiry_day
+
+        now_ist = datetime.now(IST_Z)
+        if is_idx and is_expiry_day(clean_sym, ref_date=now_ist.date()):
+            if now_ist.time() >= dtime_type(13, 0):
+                if tier_upper == "HIGH_GAMMA_ASYMMETRY":
+                    tier_upper = "DEEP_ITM"
+                    logger.info(
+                        f"[OptionResolver] 0DTE Afternoon Theta Gate on {clean_sym}: "
+                        "Upgraded strike selection to DEEP_ITM (Delta >= 0.60) to eliminate OTM decay trap."
+                    )
+                if not prefer_spread and now_ist.time() >= dtime_type(14, 0):
+                    vix_regime = "ELEVATED_VOL_SPREAD"
+                    strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
+                    exec_mandate = "HEDGED_SPREAD_MANDATORY"
+    except Exception as e_0dte:
+        logger.debug(f"[OptionResolver] 0DTE gate non-fatal check: {e_0dte}")
 
     # Step 2: Query Live Options Chain
     chosen_contract = None
@@ -337,7 +398,7 @@ def resolve_option_contract(
                 c
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
-                and float(getattr(c, "last_price", 0.0) or 0.0) >= (1.0 if is_idx else 0.50)
+                and _contract_ltp(c) >= (1.0 if is_idx else 0.50)
                 and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot))
                 <= max_strike_dist_pct
             ]
@@ -348,7 +409,7 @@ def resolve_option_contract(
             for c in matching:
                 b = float(getattr(c, "bid", 0.0) or 0.0)
                 a = float(getattr(c, "ask", 0.0) or 0.0)
-                lp = float(getattr(c, "last_price", 0.0) or 0.0)
+                lp = _contract_ltp(c)
                 if b > 0 and a > 0 and lp > 0:
                     spr = (a - b) / lp
                     if spr <= max_spr_matching:
@@ -376,7 +437,7 @@ def resolve_option_contract(
                         )
                         and getattr(c, "delta", None) is not None
                         and 0.20 <= abs(float(c.delta)) <= 0.45
-                        and float(getattr(c, "last_price", 0.0)) >= (15.0 if is_idx else 3.0)
+                        and _contract_ltp(c) >= (15.0 if is_idx else 3.0)
                     ]
                     if otm_delta_candidates:
                         otm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.35))
@@ -402,9 +463,7 @@ def resolve_option_contract(
 
                         min_viable_ltp = 15.0 if is_idx else 3.0
                         viable_otm = [
-                            c
-                            for c in otm_candidates
-                            if float(getattr(c, "last_price", 0.0)) >= min_viable_ltp
+                            c for c in otm_candidates if _contract_ltp(c) >= min_viable_ltp
                         ]
                         if viable_otm:
                             chosen = viable_otm[0]
@@ -454,23 +513,35 @@ def resolve_option_contract(
                             )
                         chosen = itm_candidates[0] if itm_candidates else matching[0]
                 else:  # Default "ATM"
-                    # Institutional 50-Delta strike selection:
-                    # Prefer contract with |delta| closest to 0.50 (in sweet spot [0.38, 0.62])
-                    atm_delta_candidates = [
+                    # Institutional Delta Sweet-Spot (0.40 - 0.55):
+                    # Prioritize sweet spot contracts, avoiding deep OTM lottery traps (|delta| < 0.35)
+                    sweet_spot_candidates = [
                         c
                         for c in matching
                         if getattr(c, "delta", None) is not None
-                        and 0.38 <= abs(float(c.delta)) <= 0.62
+                        and 0.40 <= abs(float(c.delta)) <= 0.55
                     ]
-                    if atm_delta_candidates:
-                        atm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
-                        chosen = atm_delta_candidates[0]
+                    if sweet_spot_candidates:
+                        sweet_spot_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
+                        chosen = sweet_spot_candidates[0]
                     else:
-                        matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-                        chosen = matching[0]
+                        atm_delta_candidates = [
+                            c
+                            for c in matching
+                            if getattr(c, "delta", None) is not None
+                            and 0.35 <= abs(float(c.delta)) <= 0.65
+                        ]
+                        if atm_delta_candidates:
+                            atm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
+                            chosen = atm_delta_candidates[0]
+                        else:
+                            matching.sort(
+                                key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot)
+                            )
+                            chosen = matching[0]
 
                 opt_sym = chosen.symbol
-                opt_ltp = float(chosen.last_price)
+                opt_ltp = _contract_ltp(chosen)
                 opt_strike = float(chosen.strike)
                 chosen_contract = chosen
 
@@ -595,39 +666,55 @@ def resolve_option_contract(
             "Never chase unconfirmed wicks."
         )
     elif is_idx:
-        # Index Options: disciplined -18% stop-loss floor
-        disciplined_sl_floor = round(max(0.1, opt_ltp * 0.82), 2)
-        if opt_ltp >= 350:
-            # Expensive Index contracts (e.g. Bank Nifty ₹600-₹1200):
-            opt_t0_5 = round(opt_ltp * 1.08, 2)
-            opt_t1 = round(opt_ltp * 1.20, 2)
-            opt_t2 = round(opt_ltp * 1.36, 2)
-            opt_t3 = round(opt_ltp * 1.55, 2)
-            t1_ceiling = round(opt_ltp * 1.22, 2)
-            t2_ceiling = round(opt_ltp * 1.38, 2)
-            t3_ceiling = round(opt_ltp * 1.65, 2)
+        # Index Options: disciplined intraday point + drawdown cap (prevents monthly 34-DTE swing targets)
+        if clean_sym == "MIDCPNIFTY":
+            _mid_risk = (
+                min(18.0, round(opt_ltp * 0.12, 2))
+                if opt_ltp >= 150.0
+                else round(opt_ltp * 0.18, 2)
+            )
+            disciplined_sl_floor = round(max(0.1, opt_ltp - _mid_risk), 2)
+            opt_t0_5 = round(opt_ltp + min(18.0, _mid_risk * 1.0), 2)
+            opt_t1 = round(opt_ltp + min(36.0, _mid_risk * 2.0), 2)
+            opt_t2 = round(opt_ltp + min(58.0, _mid_risk * 3.2), 2)
+            opt_t3 = round(opt_ltp + min(90.0, _mid_risk * 5.0), 2)
+            t1_ceiling = round(min(opt_ltp * 1.14, opt_ltp + 36.0), 2)
+            t2_ceiling = round(min(opt_ltp * 1.24, opt_ltp + 58.0), 2)
+            t3_ceiling = round(min(opt_ltp * 1.38, opt_ltp + 90.0), 2)
         else:
-            # Lower-premium Index contracts (e.g. Nifty ATM ₹80-₹200):
-            opt_t0_5 = round(opt_ltp * 1.10, 2)
-            opt_t1 = round(opt_ltp * 1.28, 2)
-            opt_t2 = round(opt_ltp * 1.55, 2)
-            opt_t3 = round(opt_ltp * 1.90, 2)
-            t1_ceiling = round(opt_ltp * 1.60, 2)
-            t2_ceiling = round(opt_ltp * 2.20, 2)
-            t3_ceiling = round(opt_ltp * 3.00, 2)
+            disciplined_sl_floor = round(max(0.1, opt_ltp * 0.82), 2)
+            if opt_ltp >= 350:
+                # Expensive Index contracts (e.g. Bank Nifty ₹600-₹1200):
+                opt_t0_5 = round(opt_ltp * 1.08, 2)
+                opt_t1 = round(opt_ltp * 1.20, 2)
+                opt_t2 = round(opt_ltp * 1.36, 2)
+                opt_t3 = round(opt_ltp * 1.55, 2)
+                t1_ceiling = round(opt_ltp * 1.22, 2)
+                t2_ceiling = round(opt_ltp * 1.38, 2)
+                t3_ceiling = round(opt_ltp * 1.65, 2)
+            else:
+                # Lower-premium Index contracts (e.g. Nifty ATM ₹80-₹200):
+                opt_t0_5 = round(opt_ltp * 1.10, 2)
+                opt_t1 = round(opt_ltp * 1.28, 2)
+                opt_t2 = round(opt_ltp * 1.55, 2)
+                opt_t3 = round(opt_ltp * 1.90, 2)
+                t1_ceiling = round(opt_ltp * 1.60, 2)
+                t2_ceiling = round(opt_ltp * 2.20, 2)
+                t3_ceiling = round(opt_ltp * 3.00, 2)
         exec_trig = f"CMP_OR_PULLBACK_₹{opt_ltp:,.1f}"
         conf_rule = "STANDARD_EXECUTION"
         exec_notes = f"Enter near ₹{opt_ltp:,.1f} on pullback or confirmation."
     else:
-        # Stock Options: disciplined -22% stop-loss floor
-        disciplined_sl_floor = round(max(0.1, opt_ltp * 0.78), 2)
-        opt_t0_5 = round(opt_ltp * 1.10, 2)
-        opt_t1 = round(opt_ltp * 1.22, 2)
-        opt_t2 = round(opt_ltp * 1.38, 2)
-        opt_t3 = round(opt_ltp * 1.60, 2)
-        t1_ceiling = round(opt_ltp * 1.24, 2)
-        t2_ceiling = round(opt_ltp * 1.42, 2)
-        t3_ceiling = round(opt_ltp * 1.80, 2)
+        # Stock Options: -15% floor for high-premium monthly (>= ₹150), -22% otherwise
+        _stk_dd = 0.85 if opt_ltp >= 150.0 else 0.78
+        disciplined_sl_floor = round(max(0.1, opt_ltp * _stk_dd), 2)
+        opt_t0_5 = round(opt_ltp * (1.08 if opt_ltp >= 150.0 else 1.10), 2)
+        opt_t1 = round(opt_ltp * (1.18 if opt_ltp >= 150.0 else 1.22), 2)
+        opt_t2 = round(opt_ltp * (1.30 if opt_ltp >= 150.0 else 1.38), 2)
+        opt_t3 = round(opt_ltp * (1.48 if opt_ltp >= 150.0 else 1.60), 2)
+        t1_ceiling = round(opt_ltp * (1.20 if opt_ltp >= 150.0 else 1.24), 2)
+        t2_ceiling = round(opt_ltp * (1.35 if opt_ltp >= 150.0 else 1.42), 2)
+        t3_ceiling = round(opt_ltp * (1.60 if opt_ltp >= 150.0 else 1.80), 2)
         exec_trig = f"CMP_OR_PULLBACK_₹{opt_ltp:,.1f}"
         conf_rule = "STANDARD_EXECUTION"
         exec_notes = f"Enter near ₹{opt_ltp:,.1f} on pullback or confirmation."
@@ -699,7 +786,7 @@ def resolve_option_contract(
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
                 and float(getattr(c, "strike", 0.0) or 0.0) == hedge_strike
-                and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                and _contract_ltp(c) > 0
                 and (
                     not prim_exp_str or str(getattr(c, "expiry", "") or "").strip() == prim_exp_str
                 )
@@ -811,9 +898,9 @@ def resolve_option_contract(
                 strategy_type = "NAKED_DIRECTIONAL"
         else:
             # Research / Estimate Mode
-            if chosen_hedge and float(getattr(chosen_hedge, "last_price", 0.0) or 0.0) > 0:
+            if chosen_hedge and _contract_ltp(chosen_hedge) > 0:
                 hedge_contract_sym = chosen_hedge.symbol
-                hedge_prem = float(chosen_hedge.last_price)
+                hedge_prem = _contract_ltp(chosen_hedge)
             else:
                 hedge_contract_sym = f"{clean_sym} {format_strike(hedge_strike)} {opt_type}"
                 hedge_prem = round(max(2.0, opt_ltp * 0.42), 1)
@@ -901,3 +988,57 @@ def resolve_option_contract(
         iv=contract_iv if contract_iv > 0 else None,
         is_next_month_routed=is_next_month,
     )
+
+
+def build_spot_anchored_option_overlay(
+    resolved_opt: Any,
+    *,
+    clean_sym: str,
+    spot: float,
+    spot_sl: float,
+    spot_target: float,
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    """
+    Build unified option-recommendation metrics and dual-coordinate `actionable_plan`
+    for spot-anchored setups (`CHART_*`, `INSTITUTIONAL_*`, `STRAT_*`, `BREAKOUT_RETEST`)
+    without leaking option premiums onto spot `trigger_level`/`stop_loss`/`target_level`.
+    """
+    if resolved_opt is None or float(getattr(resolved_opt, "entry_premium", 0.0) or 0.0) <= 0:
+        return {}, None
+
+    opt_entry = float(resolved_opt.entry_premium)
+    opt_sl = float(resolved_opt.sl_premium)
+    opt_t1 = float(resolved_opt.t1_premium)
+    opt_t2 = getattr(resolved_opt, "t2_premium", None)
+    opt_type = str(getattr(resolved_opt, "option_type", "") or "CE").upper()
+
+    extra_metrics: dict[str, Any] = {
+        "option_contract": resolved_opt.contract_symbol,
+        "option_entry": opt_entry,
+        "option_sl": opt_sl,
+        "option_t1": opt_t1,
+    }
+    if opt_t2 is not None:
+        extra_metrics["option_t2"] = float(opt_t2)
+
+    actionable_plan: dict[str, Any] = {
+        "action": f"BUY {opt_type}",
+        "instrument_type": "OPTION",
+        "preferred_vehicle": "DEFINED_RISK_OPTION",
+        "contract_symbol": resolved_opt.contract_symbol,
+        "strike": getattr(resolved_opt, "strike", None),
+        "option_type": opt_type,
+        "option_entry": f"₹{opt_entry:,.2f}",
+        "option_sl": f"₹{opt_sl:,.2f}",
+        "option_target": f"₹{opt_t1:,.2f}",
+        "option_target_1": f"₹{opt_t1:,.2f}",
+        "option_target_2": f"₹{float(opt_t2):,.2f}" if opt_t2 else None,
+        "lot_size": getattr(resolved_opt, "lot_size", 1),
+        "underlying_symbol": clean_sym,
+        "underlying_spot": f"₹{spot:,.1f}",
+        "spot_stop_loss": spot_sl,
+        "underlying_sl": spot_sl,
+        "underlying_target": spot_target,
+        "option_plan": resolved_opt.as_dict(),
+    }
+    return extra_metrics, actionable_plan

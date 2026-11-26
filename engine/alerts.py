@@ -685,7 +685,11 @@ class AlertManager:
         alert.message = f"[TEST] {alert.describe()}"
         with self._lock:
             self._alerts.append(alert)
-            self._save()
+            is_test_env = bool(
+                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            if is_test_env:
+                self._save()
         self._notify(alert, ltp=threshold)
         return alert
 
@@ -1024,8 +1028,21 @@ class AlertManager:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             from engine.data_sanctity import assert_production_data_sanctity
 
+            is_test_env = bool(
+                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            if not is_test_env:
+                candidates = [
+                    a
+                    for a in self._alerts
+                    if getattr(a, "environment", "") not in ("TEST", "MOCK", "SYNTHETIC")
+                    and not (getattr(a, "id", "") or "").startswith("test-")
+                ]
+            else:
+                candidates = list(self._alerts)
+
             clean_alerts = [
-                a for a in self._alerts if assert_production_data_sanctity(a, "AlertManager")
+                a for a in candidates if assert_production_data_sanctity(a, "AlertManager")
             ]
             data = [asdict(a) for a in clean_alerts]
             payload = json.dumps(data, indent=2)
@@ -1127,10 +1144,11 @@ def _telegram_notify(
     on_success: Optional[Any] = None,
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
+    wait: bool = False,
 ) -> None:
     """
     Send a Telegram push notification.
-    Non-blocking — runs in background thread.
+    Non-blocking by default — pass wait=True when synchronous message_id anchoring is required.
     Never dispatches during test execution or test deployment modes.
     Supports in-thread replies, topic routing, explicit lifecycle typing, and audible vs silent delivery.
     """
@@ -1161,6 +1179,7 @@ def _telegram_notify(
             on_success=on_success,
             alert_id=alert_id,
             is_update=is_update,
+            wait=wait,
         )
     except Exception as e:
         logger.warning(

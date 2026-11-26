@@ -169,6 +169,10 @@ def register_broker(
             _data_key = key
         if not _exec_key:
             _exec_key = key
+    if role is not None:
+        _explicit_role_locks.add(role)
+        if role == "both":
+            _explicit_role_locks.update(("data", "execution"))
 
 
 def unregister_broker(key: str) -> None:
@@ -427,7 +431,10 @@ def is_multi_broker() -> bool:
 # Moving one never affects the other.
 
 
-def apply_env_broker_roles() -> None:
+_explicit_role_locks: set[str] = set()
+
+
+def apply_env_broker_roles(force: bool = True) -> None:
     """
     Apply DATA_BROKER and EXEC_BROKER environment overrides if configured.
     Enables zero-touch institutional dual-broker division of labor:
@@ -435,27 +442,29 @@ def apply_env_broker_roles() -> None:
       - EXEC_BROKER=flattrade (Zero-brokerage execution order routing and session tick stream)
     """
     global _data_key, _exec_key
-    preferred_exec = os.environ.get("EXEC_BROKER") or os.environ.get("EXECUTION_BROKER")
-    if preferred_exec:
-        canon_exec = _BROKER_NAMES.get(
-            preferred_exec.strip().lower(), preferred_exec.strip().lower()
-        )
-        if canon_exec in _brokers:
-            _exec_key = canon_exec
-            logger.info(
-                f"[brokers.session] Execution broker bound to '{canon_exec}' via environment override."
+    if force or "execution" not in _explicit_role_locks:
+        preferred_exec = os.environ.get("EXEC_BROKER") or os.environ.get("EXECUTION_BROKER")
+        if preferred_exec:
+            canon_exec = _BROKER_NAMES.get(
+                preferred_exec.strip().lower(), preferred_exec.strip().lower()
             )
+            if canon_exec in _brokers:
+                _exec_key = canon_exec
+                logger.info(
+                    f"[brokers.session] Execution broker bound to '{canon_exec}' via environment override."
+                )
 
-    preferred_data = os.environ.get("DATA_BROKER") or os.environ.get("MARKET_DATA_BROKER")
-    if preferred_data:
-        canon_data = _BROKER_NAMES.get(
-            preferred_data.strip().lower(), preferred_data.strip().lower()
-        )
-        if canon_data in _brokers:
-            _data_key = canon_data
-            logger.info(
-                f"[brokers.session] Data broker bound to '{canon_data}' via environment override."
+    if force or "data" not in _explicit_role_locks:
+        preferred_data = os.environ.get("DATA_BROKER") or os.environ.get("MARKET_DATA_BROKER")
+        if preferred_data:
+            canon_data = _BROKER_NAMES.get(
+                preferred_data.strip().lower(), preferred_data.strip().lower()
             )
+            if canon_data in _brokers:
+                _data_key = canon_data
+                logger.info(
+                    f"[brokers.session] Data broker bound to '{canon_data}' via environment override."
+                )
 
 
 def get_broker_role(key: str) -> str:
@@ -482,6 +491,7 @@ def set_broker_role(key: str, role: str) -> None:
     global _data_key, _exec_key
     if role not in ("data", "execution", "both"):
         raise ValueError(f"Invalid role {role!r}. Must be 'data', 'execution', or 'both'.")
+    _explicit_role_locks.update(("data", "execution"))
     if role in ("data", "both"):
         _data_key = key
     elif _data_key == key:
@@ -498,7 +508,7 @@ def get_data_broker() -> BrokerAPI:
     """Return the current data broker. Falls back to primary if no explicit data broker."""
     if not _brokers:
         _try_auto_restore_sessions()
-    apply_env_broker_roles()
+    apply_env_broker_roles(force=False)
     if _data_key and _data_key in _brokers:
         return _brokers[_data_key]
     return get_broker()
@@ -508,7 +518,7 @@ def get_data_broker_key() -> str:
     """Return the selected data-provider key without exposing mutable state."""
     if not _brokers:
         _try_auto_restore_sessions()
-    apply_env_broker_roles()
+    apply_env_broker_roles(force=False)
     if _data_key and _data_key in _brokers:
         return _data_key
     return _primary_key
@@ -518,11 +528,11 @@ def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Rejects data-only primary fallback (BRK-17)."""
     if not _brokers:
         _try_auto_restore_sessions()
-    apply_env_broker_roles()
+    apply_env_broker_roles(force=False)
     if _exec_key and _exec_key in _brokers:
         return _brokers[_exec_key]
     # Explicit role validation: if primary was registered as data-only, refuse execution fallback
-    if _primary_key and _data_key == _primary_key and _exec_key is None:
+    if _primary_key and _data_key == _primary_key and not _exec_key:
         raise RuntimeError(
             f"Execution broker not available: Primary broker '{_primary_key}' is configured for role 'data' only."
         )
@@ -612,6 +622,7 @@ def set_data_broker(key: str) -> None:
     if key not in _brokers:
         console.print(f"[red]Could not connect {key.title()}.[/red]")
         return
+    _explicit_role_locks.add("data")
     _data_key = key
     if key == "shoonya":
         try:
@@ -635,6 +646,7 @@ def set_exec_broker(key: str) -> None:
     if key not in _brokers:
         console.print(f"[red]Could not connect {key.title()}.[/red]")
         return
+    _explicit_role_locks.add("execution")
     _exec_key = key
     console.print(f"[green]✓ Execution broker → {key.title()}[/green]")
 
@@ -1601,6 +1613,7 @@ def close_all_brokers() -> None:
     _primary_key = ""
     _data_key = ""
     _exec_key = ""
+    _explicit_role_locks.clear()
 
 
 def logout() -> None:

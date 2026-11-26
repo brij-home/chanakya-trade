@@ -105,12 +105,15 @@ Directory: `components/Modals/`. All modals MUST:
 2. Use Zustand's `create()` with `immer` middleware for complex nested state
 3. For AlertsView sub-components, use the `useNotificationStore` for shared alert state + local `useState` for UI-only state (filters, selected item, etc.)
 
-### API Helper
-Use `getBaseUrl()` from `chatStore.js` for all backend API calls — never hardcode `http://127.0.0.1:8765`:
+### API Helper & Zustand Selector Hygiene
+Use `getBaseUrl(port)` and `DEFAULT_SIDECAR_PORT` from `chatStore.js` for all backend API calls — never hardcode `http://127.0.0.1:8765`:
 ```js
-import { getBaseUrl } from '../store/chatStore'
-const resp = await fetch(`${getBaseUrl()}/skills/quote`, { method: 'POST', ... })
+import { getBaseUrl, useChatStore } from '../store/chatStore'
+const port = useChatStore.getState().port
+const resp = await fetch(`${getBaseUrl(port)}/skills/quote`, { method: 'POST', ... })
 ```
+- **Atomic Selectors**: In root shell components (`App.jsx`), subscribe via granular Zustand selectors (`useChatStore((s) => s.activeSessionId)`) — never call `useChatStore()` without a selector.
+- **Fail-Closed UI Provenance**: `ModeBanner.jsx` renders an explicit degraded `UNKNOWN` state if `/api/mode` fails or returns an unmapped value (never defaulting silently to `PAPER`); `notificationStore.js` must never fabricate `entry * 0.5` fallback targets; `SystemHealthPill.jsx` surfaces live TBT 50-depth slots (`50D x/15`) and `FAILOVER:FT` standby states. Run Vitest on Windows with `npm.cmd --prefix macos-app test -- --run`.
 
 ---
 

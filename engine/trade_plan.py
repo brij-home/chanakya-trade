@@ -1495,8 +1495,8 @@ def calculate_option_execution_plan(
         if tf == "INTRADAY":
             # Cap maximum intraday option drawdown:
             # Indices: disciplined -18% floor (prevents massive Rupee drawdown on ₹500–₹1200 index premiums)
-            # Stocks: -22% floor (disciplined risk on F&O stock options)
-            max_dd = 0.82 if is_index_contract else 0.78
+            # Stocks: -15% floor when >= ₹150 (monthly contracts), -22% floor otherwise
+            max_dd = 0.82 if is_index_contract else (0.85 if option_ltp >= 150.0 else 0.78)
             disciplined_sl_floor = round(max(0.05, option_ltp * max_dd), 2)
             sl_prem = max(raw_sl_prem, disciplined_sl_floor)
         elif tf == "SWING_SHORT":
@@ -1524,10 +1524,13 @@ def calculate_option_execution_plan(
         # Volatility ratio scales with nominal option premium tier and instrument segment.
         if is_index_contract and option_ltp >= 80.0:
             opt_tier = resolve_price_tier(option_ltp)
-            vol_ratio = 0.18 if option_ltp >= 500.0 else (0.16 if option_ltp >= 250.0 else 0.15)
-            min_opt_noise_pts = max(
-                opt_tier.min_opt_premium * 3.0, round(option_ltp * vol_ratio, 1)
-            )
+            if "MIDCPNIFTY" in clean_contract:
+                min_opt_noise_pts = max(12.0, min(18.0, round(option_ltp * 0.08, 1)))
+            else:
+                vol_ratio = 0.18 if option_ltp >= 500.0 else (0.16 if option_ltp >= 250.0 else 0.15)
+                min_opt_noise_pts = max(
+                    opt_tier.min_opt_premium * 3.0, round(option_ltp * vol_ratio, 1)
+                )
 
             effective_sl_floor = max(
                 round(option_ltp - min_opt_noise_pts, 2), round(option_ltp * 0.72, 2)
@@ -1664,7 +1667,11 @@ def calculate_option_execution_plan(
                     # Percentage move must be capped to feasible intraday points (+20% to +30% for T1).
                     # For lower-premium options (LTP < 350, like Nifty weekly/ATM ₹80-₹200):
                     # A standard 2.0R scale-out (+30% to +50%) represents 30-60 points.
-                    if option_ltp >= 350:
+                    if "MIDCPNIFTY" in clean_contract:
+                        t1_max_prem = round(min(option_ltp * 1.12, option_ltp + 36.0), 2)
+                        t2_max_prem = round(min(option_ltp * 1.20, option_ltp + 58.0), 2)
+                        t3_max_prem = round(min(option_ltp * 1.32, option_ltp + 90.0), 2)
+                    elif option_ltp >= 350:
                         t1_max_prem = round(option_ltp * 1.20, 2)
                         t2_max_prem = round(option_ltp * 1.35, 2)
                         t3_max_prem = round(option_ltp * 1.55, 2)
@@ -1730,9 +1737,38 @@ def calculate_option_execution_plan(
                     # T1 (Scale-Out & Free-Roll): +20% to +30% (+1.8R) — achievable on 1.2%–1.8% spot impulse
                     # T2 (Session Wave): +35% to +50% (+2.8R to +3.2R)
                     # T3 (Trend Day Runner): +60% to +80% (+4.0R to +5.0R)
-                    t1_max_prem = round(max(option_ltp + (2.2 * opt_risk), option_ltp * 1.45), 2)
-                    t2_max_prem = round(max(t1_max_prem + (1.5 * opt_risk), option_ltp * 1.70), 2)
-                    t3_max_prem = round(max(t2_max_prem + (2.0 * opt_risk), option_ltp * 2.10), 2)
+                    if option_ltp >= 150:
+                        t1_max_prem = round(
+                            min(
+                                option_ltp * 1.25,
+                                max(option_ltp + (1.8 * opt_risk), option_ltp * 1.20),
+                            ),
+                            2,
+                        )
+                        t2_max_prem = round(
+                            min(
+                                option_ltp * 1.42,
+                                max(t1_max_prem + (1.2 * opt_risk), option_ltp * 1.35),
+                            ),
+                            2,
+                        )
+                        t3_max_prem = round(
+                            min(
+                                option_ltp * 1.65,
+                                max(t2_max_prem + (1.6 * opt_risk), option_ltp * 1.55),
+                            ),
+                            2,
+                        )
+                    else:
+                        t1_max_prem = round(
+                            max(option_ltp + (2.2 * opt_risk), option_ltp * 1.45), 2
+                        )
+                        t2_max_prem = round(
+                            max(t1_max_prem + (1.5 * opt_risk), option_ltp * 1.70), 2
+                        )
+                        t3_max_prem = round(
+                            max(t2_max_prem + (2.0 * opt_risk), option_ltp * 2.10), 2
+                        )
 
                     if raw_t1_prem > t1_max_prem:
                         t1_prem = round(

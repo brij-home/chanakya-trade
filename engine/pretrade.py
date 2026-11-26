@@ -31,8 +31,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Any, Optional
 
+from config.constants import IST
 from engine.kill_switch import get_kill_switch_registry
 from engine.observability import new_correlation_id
 
@@ -209,10 +211,16 @@ def _gate_market_session(segment: str, symbol: Optional[str] = None) -> GateResu
             "CURRENCY": "CDS",
         }.get(segment.upper(), segment.upper())
 
-        # Exchange holiday check
+        # Exchange holiday check (respect BSE/BFO for SENSEX/BANKEX)
         from market.calendar import is_trading_holiday, get_holiday_reason
 
-        exch = "MCX" if seg == "MCX" else ("CDS" if seg == "CDS" else "NSE")
+        sym_u = (symbol or "").upper()
+        is_bse_sym = sym_u.startswith(("BSE:", "BFO:")) or any(
+            idx in sym_u for idx in ("SENSEX", "BANKEX")
+        )
+        exch = (
+            "MCX" if seg == "MCX" else ("CDS" if seg == "CDS" else ("BSE" if is_bse_sym else "NSE"))
+        )
         if is_trading_holiday(check_date=now_ist.date(), exchange=exch, ref_time=now_time):
             h_name = (
                 get_holiday_reason(check_date=now_ist.date(), exchange=exch)
@@ -282,6 +290,50 @@ def _gate_market_session(segment: str, symbol: Optional[str] = None) -> GateResu
         )
 
 
+def _gate_cas_window_transition(
+    symbol: str,
+    segment: str,
+    order_type: str,
+    ref_dt: Optional[datetime] = None,
+) -> GateResult:
+    """Enforce Phase 2 CAS (2027-02-08+) limit-only restriction during late CAS (15:36-15:40 IST)."""
+    try:
+        from datetime import time as dtime
+        from config.constants import IST_ZONE
+        from market.rule_schedule import is_cas_order_transition_active, is_cas_window
+
+        now_ist = ref_dt or datetime.now(IST_ZONE)
+        seg = (segment or "").upper()
+        if seg not in ("EQ", "EQUITY", "EQUITY_DELIVERY", "EQUITY_INTRADAY"):
+            return GateResult(gate="cas_transition", passed=True)
+        if not is_cas_order_transition_active(now_ist.date()) or not is_cas_window(now_ist):
+            return GateResult(gate="cas_transition", passed=True)
+
+        ot = (order_type or "LIMIT").upper().strip()
+        if ot == "MARKET" and now_ist.time() >= dtime(15, 36):
+            return GateResult(
+                gate="cas_transition",
+                passed=False,
+                reason=(
+                    f"Phase 2 CAS (15:36–15:40 IST) permits only LIMIT orders for {symbol}; "
+                    "MARKET orders are rejected."
+                ),
+            )
+        return GateResult(
+            gate="cas_transition",
+            passed=True,
+            details={
+                "warning": "Order placed during SEBI Phase 2 CAS transition window (15:30–15:40 IST)."
+            },
+        )
+    except Exception as exc:
+        return GateResult(
+            gate="cas_transition",
+            passed=True,
+            details={"warning": f"CAS check skipped: {exc}"},
+        )
+
+
 def _expiring_index_contract(symbol: Optional[str], session_date) -> Optional[bool]:
     """Return expiry-day index classification from a listed derivative master row."""
     if not symbol:
@@ -305,6 +357,57 @@ def _expiring_index_contract(symbol: Optional[str], session_date) -> Optional[bo
             "[PreTrade] Could not resolve derivative session cutoff for %s: %s", symbol, exc
         )
         return None
+
+
+def _gate_fno_ban_period(
+    symbol: str,
+    segment: str,
+    side: str = "BUY",
+    held_quantity: Optional[int] = None,
+) -> GateResult:
+    """
+    Gate 2b: Verify security is not in the F&O Ban Period for fresh position initiation.
+
+    SEBI/NCL Mandate:
+      - Securities exceeding 95% MWPL enter the F&O Ban Period.
+      - Fresh positions (opening trades) are strictly prohibited and rejected by exchange RMS.
+      - Position reduction / unwinding (held_quantity > 0 and selling long, or held_quantity < 0 and buying short) is permitted.
+    """
+    seg = segment.upper()
+    if seg not in ("OPT", "FUT", "FNO", "OPTIONS", "FUTURES"):
+        return GateResult(gate="fno_ban_period", passed=True)
+
+    try:
+        from market.fno_ban import is_in_fno_ban
+
+        if not is_in_fno_ban(symbol):
+            return GateResult(gate="fno_ban_period", passed=True)
+
+        # Check if this order is purely reducing an existing position
+        is_closing = False
+        if held_quantity is not None:
+            if held_quantity > 0 and side.upper() == "SELL":
+                is_closing = True
+            elif held_quantity < 0 and side.upper() == "BUY":
+                is_closing = True
+
+        if is_closing:
+            return GateResult(
+                gate="fno_ban_period",
+                passed=True,
+                reason=f"Position unwinding permitted in ban period for {symbol}",
+                details={"held_quantity": held_quantity, "side": side},
+            )
+
+        return GateResult(
+            gate="fno_ban_period",
+            passed=False,
+            reason=f"F&O Ban Veto: Security {symbol} is in NSE Ban Period (MWPL > 95%). Fresh positions prohibited by exchange rules.",
+            details={"symbol": symbol, "segment": seg},
+        )
+    except Exception as exc:
+        logger.debug(f"[pretrade] Ban check bypassed due to exception: {exc}")
+        return GateResult(gate="fno_ban_period", passed=True)
 
 
 def _gate_lot_size(
@@ -825,6 +928,193 @@ def _gate_no_chase(
     )
 
 
+def _gate_bid_ask_spread(
+    symbol: str,
+    order_type: str,
+    side: str,
+    ltp: Optional[float] = None,
+    best_bid: Optional[float] = None,
+    best_ask: Optional[float] = None,
+    segment: str = "EQ",
+    tick_size: float = 0.05,
+    require_depth: bool = False,
+) -> GateResult:
+    """
+    Gate 11: Real-Time Bid-Ask Spread Expansion & Microstructure Liquidity Gate.
+
+    Protects traders from executing market orders into illiquid air pockets,
+    during spread expansion shocks (e.g. market maker quote pullouts before high-impact events),
+    or when wide bid-ask spread causes immediate double-digit slippage drag.
+    """
+    ord_type = (order_type or "MARKET").upper()
+    seg = (segment or "EQ").upper()
+    is_opt = seg in ("OPT", "OPTIONS") or bool(re.search(r"\d+(CE|PE)$", symbol.upper()))
+
+    b = best_bid
+    a = best_ask
+
+    # Auto-resolve bid/ask from in-memory BisectDepthBook if not supplied
+    if b is None or b <= 0 or a is None or a <= 0:
+        try:
+            from market.order_book import get_depth_book
+
+            clean = symbol.split(":")[-1].upper() if ":" in symbol else symbol.upper()
+            book = get_depth_book(symbol)
+            if not (book and book.best_bid > 0 and book.best_ask > 0) and clean != symbol:
+                book = get_depth_book(clean)
+            if book and book.best_bid > 0 and book.best_ask > 0:
+                b = book.best_bid
+                a = book.best_ask
+        except Exception as _e_depth:
+            logger.debug(f"[pretrade] Depth book resolution skipped for spread gate: {_e_depth}")
+
+    if b is None or b <= 0 or a is None or a <= 0:
+        if require_depth and is_opt and ord_type in ("MARKET", "SL-M"):
+            return GateResult(
+                gate="bid_ask_spread",
+                passed=False,
+                reason=(
+                    f"Microstructure Liquidity Gate: Inside bid-ask depth unavailable for live {ord_type} "
+                    f"option order on {symbol}. Specify LIMIT price or await live L2 depth."
+                ),
+            )
+        return GateResult(
+            gate="bid_ask_spread",
+            passed=True,
+            reason="Inside spread unavailable — spread check skipped",
+        )
+
+    spread = round(a - b, 4)
+    if spread < 0:
+        # Crossed book anomaly (bid > ask)
+        return GateResult(
+            gate="bid_ask_spread",
+            passed=False,
+            reason=f"Data Anomaly: Crossed order book detected for {symbol} (Bid ₹{b:.2f} > Ask ₹{a:.2f}). Execution halted.",
+            details={"best_bid": b, "best_ask": a, "spread": spread},
+        )
+
+    calc_ltp = ltp if (ltp and ltp > 0) else ((a + b) / 2.0)
+    spread_pct = round((spread / calc_ltp * 100.0), 3) if calc_ltp > 0 else 0.0
+
+    # Option Spread Checks:
+    # On options, normal spread can be 1-3 ticks (e.g. ₹0.05 - ₹0.15).
+    # Spread expansion shock occurs when spread > max(1.50, 0.04 * ltp) and spread > 6 ticks.
+    if is_opt:
+        max_allowed_spread_pts = max(1.50, 0.04 * calc_ltp)
+        max_allowed_ticks = 6
+        if ord_type in ("MARKET", "SL-M") and (
+            spread > max_allowed_spread_pts and (spread / max(0.01, tick_size)) > max_allowed_ticks
+        ):
+            return GateResult(
+                gate="bid_ask_spread",
+                passed=False,
+                reason=(
+                    f"Microstructure Liquidity Gate: Option spread for {symbol} is blown out to ₹{spread:.2f} "
+                    f"({spread_pct:.1f}% of LTP ₹{calc_ltp:.2f}, {int(spread / tick_size)} ticks). "
+                    f"Market orders prohibited during spread expansion shock. Mandate LIMIT order."
+                ),
+                details={
+                    "best_bid": b,
+                    "best_ask": a,
+                    "spread": spread,
+                    "spread_pct": spread_pct,
+                    "tick_size": tick_size,
+                },
+            )
+    else:
+        # Equity & Futures Spread Checks:
+        # Normal spread in liquid large-cap/mid-cap is 0.02% - 0.10%.
+        # Spread > 0.40% and spread > 5 ticks flags wide illiquidity.
+        if ord_type in ("MARKET", "SL-M") and (
+            spread_pct > 0.40 and (spread / max(0.01, tick_size)) > 5
+        ):
+            return GateResult(
+                gate="bid_ask_spread",
+                passed=False,
+                reason=(
+                    f"Microstructure Liquidity Gate: Spread for {symbol} is ₹{spread:.2f} "
+                    f"({spread_pct:.2f}% of LTP ₹{calc_ltp:.2f}). Market orders prohibited during wide spread shock. Use LIMIT order."
+                ),
+                details={
+                    "best_bid": b,
+                    "best_ask": a,
+                    "spread": spread,
+                    "spread_pct": spread_pct,
+                    "tick_size": tick_size,
+                },
+            )
+
+    return GateResult(
+        gate="bid_ask_spread",
+        passed=True,
+        details={"best_bid": b, "best_ask": a, "spread": spread, "spread_pct": spread_pct},
+    )
+
+
+def _gate_sebi_physical_settlement(
+    symbol: str,
+    segment: str,
+    quantity: int,
+    price: Optional[float] = None,
+    ltp: Optional[float] = None,
+    available_cash: Optional[float] = None,
+    dte: Optional[int] = None,
+) -> tuple[GateResult, list[str]]:
+    """
+    Gate 12: SEBI Compulsory Physical Settlement Risk Sentinel.
+
+    Evaluates whether single-stock derivative contracts are entering their
+    mandatory physical delivery expiry window (DTE <= 4 days to monthly expiry).
+    Enforces SEBI margin escalation and flags physical settlement delivery exposure.
+    """
+    warnings: list[str] = []
+    clean = symbol.split(":")[-1].upper() if ":" in symbol else symbol.upper()
+
+    try:
+        from engine.position_sizer import (
+            is_physical_delivery_fno,
+            check_sebi_physical_settlement_risk,
+        )
+        from market.options import parse_option_symbol
+
+        if not is_physical_delivery_fno(clean):
+            return GateResult(gate="sebi_physical_settlement", passed=True), warnings
+
+        # Auto-resolve DTE if not provided
+        resolved_dte = dte
+        if resolved_dte is None:
+            parsed = parse_option_symbol(clean)
+            if parsed and parsed.get("expiry"):
+                exp_dt = datetime.strptime(parsed["expiry"], "%Y-%m-%d").date()
+                cur_dt = datetime.now(IST).date()
+                resolved_dte = (exp_dt - cur_dt).days
+
+        if resolved_dte is not None and 0 <= resolved_dte <= 4:
+            ref_px = price if (price and price > 0) else (ltp or 0.0)
+            risk_check = check_sebi_physical_settlement_risk(
+                symbol=clean, dte=resolved_dte, capital=available_cash, price=ref_px
+            )
+            if risk_check.get("blocked"):
+                return (
+                    GateResult(
+                        gate="sebi_physical_settlement",
+                        passed=False,
+                        reason=risk_check.get("warning")
+                        or f"Blocked by SEBI physical delivery rule ({resolved_dte} DTE)",
+                        details=risk_check,
+                    ),
+                    warnings,
+                )
+            elif risk_check.get("warning"):
+                warnings.append(risk_check["warning"])
+
+    except Exception as _e_phys:
+        logger.debug(f"[pretrade] Physical settlement check note: {_e_phys}")
+
+    return GateResult(gate="sebi_physical_settlement", passed=True), warnings
+
+
 # ── Main Validation Entry Point ───────────────────────────────────────────────
 
 
@@ -843,6 +1133,8 @@ def validate_pretrade(
     ltp: Optional[float] = None,
     prev_close: Optional[float] = None,
     quote_age_seconds: Optional[float] = None,
+    best_bid: Optional[float] = None,
+    best_ask: Optional[float] = None,
     # Account context
     available_cash: Optional[float] = None,
     portfolio_value: Optional[float] = None,
@@ -851,6 +1143,7 @@ def validate_pretrade(
     lot_size: int = 1,
     tick_size: float = DEFAULT_TICK_SIZE,
     price_band_pct: float = NSE_DEFAULT_PRICE_BAND_PCT,
+    dte: Optional[int] = None,
     # Anti-FOMO & No-Chase context
     no_chase_boundary: Optional[float] = None,
     trigger_price: Optional[float] = None,
@@ -907,6 +1200,30 @@ def validate_pretrade(
     all_warnings: list[str] = []
     gate_results: dict[str, GateResult] = {}
 
+    if not is_expiry_day:
+        try:
+            from market.options import parse_option_symbol
+
+            parsed = parse_option_symbol(symbol)
+            if parsed and parsed.get("expiry"):
+                today_str = datetime.now(IST).strftime("%Y-%m-%d")
+                if parsed["expiry"] == today_str:
+                    is_expiry_day = True
+        except Exception as _e_exp:
+            logger.debug(f"[pretrade] Expiry day auto-resolution note: {_e_exp}")
+
+    if dte is None:
+        try:
+            from market.options import parse_option_symbol
+
+            parsed = parse_option_symbol(symbol)
+            if parsed and parsed.get("expiry"):
+                exp_dt = datetime.strptime(parsed["expiry"], "%Y-%m-%d").date()
+                cur_dt = datetime.now(IST).date()
+                dte = (exp_dt - cur_dt).days
+        except Exception as _e_dte:
+            logger.debug(f"[pretrade] DTE auto-resolution note: {_e_dte}")
+
     # Auto-resolve depth sweep if not explicitly provided and quantity > 0
     if depth_sweep_vwap is None and quantity > 0:
         try:
@@ -944,10 +1261,26 @@ def validate_pretrade(
         gate_results["market_session"] = session_gate
         if session_gate.blocked:
             blocking.append(session_gate.reason or "Market closed")
+        cas_gate = _gate_cas_window_transition(
+            symbol=symbol, segment=segment, order_type=order_type
+        )
+        gate_results["cas_transition"] = cas_gate
+        if cas_gate.details.get("warning"):
+            all_warnings.append(str(cas_gate.details["warning"]))
+        if cas_gate.blocked:
+            blocking.append(cas_gate.reason or "Phase 2 CAS order restriction")
     else:
         gate_results["market_session"] = GateResult(
             gate="market_session", passed=True, reason="Session check skipped"
         )
+
+    # Gate 2b: F&O Ban Period Gate
+    fno_ban_gate = _gate_fno_ban_period(
+        symbol=symbol, segment=segment, side=side, held_quantity=held_quantity
+    )
+    gate_results["fno_ban_period"] = fno_ban_gate
+    if fno_ban_gate.blocked:
+        blocking.append(fno_ban_gate.reason or "Security is in F&O Ban Period")
 
     # Gate 3: Lot size
     lot_gate = _gate_lot_size(quantity, segment, lot_size)
@@ -1027,6 +1360,37 @@ def validate_pretrade(
     gate_results["no_chase"] = no_chase_gate
     if no_chase_gate.blocked:
         blocking.append(no_chase_gate.reason or "No-chase violation")
+
+    # Gate 11: Bid-Ask Spread Expansion & Microstructure Liquidity
+    spread_gate = _gate_bid_ask_spread(
+        symbol=symbol,
+        order_type=order_type,
+        side=side,
+        ltp=ltp,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        segment=segment,
+        tick_size=tick_size,
+        require_depth=require_context,
+    )
+    gate_results["bid_ask_spread"] = spread_gate
+    if spread_gate.blocked:
+        blocking.append(spread_gate.reason or "Bid-ask spread violation")
+
+    # Gate 12: SEBI Compulsory Physical Settlement Risk Sentinel
+    phys_gate, phys_warnings = _gate_sebi_physical_settlement(
+        symbol=symbol,
+        segment=segment,
+        quantity=quantity,
+        price=price,
+        ltp=ltp,
+        available_cash=available_cash,
+        dte=dte,
+    )
+    gate_results["sebi_physical_settlement"] = phys_gate
+    all_warnings.extend(phys_warnings)
+    if phys_gate.blocked:
+        blocking.append(phys_gate.reason or "SEBI physical delivery margin violation")
 
     return PreTradeValidationResult(
         correlation_id=cid,

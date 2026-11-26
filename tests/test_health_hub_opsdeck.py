@@ -188,13 +188,12 @@ def test_telemetry_handler_external_scraper_downgrade():
     )
     handler.emit(rec_ws)
 
-    # Verify neither was recorded as P1
+    # Verify neither was recorded as P1 or P2 (downgraded to informational P3 per engine.telemetry)
     p1_incs = get_prioritized_incidents(priority="P1")
     assert len(p1_incs) == 0
 
-    # Verify both are accessible as operational diagnostics (P2)
-    p2_incs = get_prioritized_incidents(priority="P2")
-    assert len(p2_incs) == 2
+    p3_incs = get_prioritized_incidents(priority="P3")
+    assert len(p3_incs) == 2
 
     clear_telemetry()
 

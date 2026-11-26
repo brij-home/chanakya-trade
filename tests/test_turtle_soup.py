@@ -30,8 +30,9 @@ def _generate_synthetic_base(n_bars: int = 25, base_price: float = 1000.0) -> pd
     return pd.DataFrame(rows)
 
 
-def test_turtle_soup_bullish_spring():
+def test_turtle_soup_bullish_spring(monkeypatch):
     """Verify detection of a Bear Trap (Bullish Spring) at swing low."""
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *args, **kwargs: None)
     df = _generate_synthetic_base(n_bars=22, base_price=1000.0)
 
     # Establish a clear swing low in the prior 20 bars
@@ -96,8 +97,15 @@ def test_turtle_soup_bearish_upthrust():
     assert alert is not None
     assert alert.direction == "BEARISH"
     assert alert.alert_type == "TURTLE_SOUP_SWEEP"
-    assert alert.stop_loss > upthrust_high
-    assert alert.target_level < alert.trigger_level
+    if alert.contract_symbol:
+        assert 0 < alert.stop_loss < alert.trigger_level < alert.target_level
+        spot_sl = float(
+            str(alert.actionable_plan["underlying_sl"]).replace("₹", "").replace(",", "")
+        )
+        assert spot_sl > upthrust_high
+    else:
+        assert alert.stop_loss > upthrust_high
+        assert alert.target_level < alert.trigger_level
     assert alert.actionable_plan is not None
     assert alert.actionable_plan["action"] in ("SELL", "BUY_PUT")
     assert alert.metrics["sweep_type"] == "BEARISH_UPTHRUST"

@@ -140,7 +140,7 @@ function ToastItem({ toast }) {
       exchange: alert.exchange || 'NFO',
       action: act,
       orderType: 'LIMIT',
-      product: alert.segment === 'EQUITY' ? 'MIS' : 'NRML',
+      product: alert.product || (alert.segment === 'EQUITY' ? 'MIS' : 'NRML'),
       price: alert.trigger_level || alert.ltp || alert.entry_price || '',
       stopLoss: alert.stop_loss || alert.initial_stop_loss || '',
       target: alert.target_level || alert.target_1 || '',

@@ -123,15 +123,30 @@ def _get_active_currency_symbols() -> list[str]:
         return [f"CDS:{c}FUT" for c in CORE_CURRENCIES]
 
 
+_ACTIVE_FNO_SYMBOLS_CACHE: tuple[float, list[str]] = (0.0, [])
+_ACTIVE_FNO_SYMBOLS_LOCK = threading.Lock()
+
+
 def _get_active_fno_stock_symbols() -> list[str]:
     """Retrieve active near-month contracts for core F&O stocks with real derivative depth."""
+    global _ACTIVE_FNO_SYMBOLS_CACHE
+    now = time.time()
+    with _ACTIVE_FNO_SYMBOLS_LOCK:
+        ts, cached = _ACTIVE_FNO_SYMBOLS_CACHE
+        if cached and (now - ts) < 3600.0:
+            return list(cached)
+
     try:
         from market.fyers_tbt_manager import resolve_stock_future
 
-        return [resolve_stock_future(s) or f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
+        res = [resolve_stock_future(s) or f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
     except Exception as e:
         logger.debug(f"[universe_depth_radar] Stock future resolution error: {e}")
-        return [f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
+        res = [f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
+
+    with _ACTIVE_FNO_SYMBOLS_LOCK:
+        _ACTIVE_FNO_SYMBOLS_CACHE = (now, res)
+    return list(res)
 
 
 def _get_active_radar_symbols() -> list[str]:

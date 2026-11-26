@@ -97,6 +97,38 @@ def test_hbcm_confluence_failure_rejects():
     assert "Heavyweight breadth unaligned" in res.rejection_reason
 
 
+def test_hbcm_weighted_confluence_pass():
+    """HBCM passes when 3/5 heavyweights align if their combined weight >= 55% of index."""
+    # Top 3 by weight: RELIANCE (9.8) + HDFCBANK (11.5) + ICICIBANK (7.8) = 29.1 / 39.3 = 74%
+    mock_quotes = {
+        "RELIANCE": MagicMock(last_price=2950.0, vwap=2930.0, change_pct=1.2),
+        "HDFCBANK": MagicMock(last_price=1650.0, vwap=1640.0, change_pct=0.8),
+        "ICICIBANK": MagicMock(last_price=1220.0, vwap=1210.0, change_pct=1.0),
+        "INFOSYS": MagicMock(last_price=1835.0, vwap=1835.0, change_pct=0.0),  # Neutral
+        "TCS": MagicMock(last_price=4100.0, vwap=4120.0, change_pct=-0.5),  # Drag (1 opposing)
+    }
+    mock_candles = {
+        "RELIANCE": {"open": 2940.0, "close": 2950.0},
+        "HDFCBANK": {"open": 1645.0, "close": 1650.0},
+        "ICICIBANK": {"open": 1215.0, "close": 1220.0},
+        "INFOSYS": {"open": 1835.0, "close": 1835.0},
+        "TCS": {"open": 4110.0, "close": 4100.0},
+    }
+
+    res = evaluate_hbcm(
+        underlying="NIFTY",
+        direction="BULLISH",
+        mock_quotes=mock_quotes,
+        mock_5m_candles=mock_candles,
+    )
+    assert res.confluence_pass is True
+    assert res.bullish_count == 3
+    assert res.bearish_count == 1
+    assert "RELIANCE" in res.aligned_symbols
+    assert "HDFCBANK" in res.aligned_symbols
+    assert "ICICIBANK" in res.aligned_symbols
+
+
 def test_alert_scrutiny_tier1_hbcm_gate():
     """Alert Scrutiny Tier-1 Sanity Gate vetoes index breakout alerts when HBCM fails."""
     auditor = AlertScrutinyAuditor()

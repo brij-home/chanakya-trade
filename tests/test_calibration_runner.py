@@ -27,16 +27,19 @@ def test_calibration_runner_initial_status():
     assert isinstance(st.to_dict(), dict)
 
 
-def test_calibration_runner_staleness_detection(tmp_path):
+def test_calibration_runner_staleness_detection(tmp_path, monkeypatch):
     """Verify staleness detection for missing, old, or prior-date calibration files."""
     runner = CalibrationRunner()
+    data_root = tmp_path / ".trading_platform"
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(data_root))
+    monkeypatch.setenv("TRADING_PLATFORM_HOME", str(data_root))
 
     # 1. Missing file -> stale
     with patch("pathlib.Path.home", return_value=tmp_path):
         assert runner.is_calibration_stale() is True
 
     # 2. File with today's date -> fresh
-    cal_dir = tmp_path / ".trading_platform" / "calibration"
+    cal_dir = data_root / "calibration"
     cal_dir.mkdir(parents=True, exist_ok=True)
     cal_file = cal_dir / "index_calibration.json"
 

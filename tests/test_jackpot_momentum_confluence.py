@@ -191,7 +191,9 @@ class TestJackpotMomentumConfluence:
         }
 
         # Mock scan_asymmetric_opportunities on radar to return a jackpot opp
-        opp = radar.detect_jackpot_momentum_confluence("BANKNIFTY", quote=quote, df=df)
+        opp = radar.detect_jackpot_momentum_confluence(
+            "BANKNIFTY", quote=quote, df=df, sector_rs=1.2, sector_name="BANKNIFTY"
+        )
         assert opp is not None
 
         monkeypatch.setattr(

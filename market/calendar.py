@@ -249,6 +249,8 @@ def get_holiday_reason(
 def is_market_open(
     exchange: str = "NSE",
     ref_dt: Optional[datetime] = None,
+    symbol: Optional[str] = None,
+    expiring_index: Optional[bool] = None,
 ) -> bool:
     """
     Canonical truth function for market hours across Indian Exchanges.
@@ -257,7 +259,8 @@ def is_market_open(
       - Weekends (Sat/Sun closed, unless special session declared)
       - Trading Holidays (Ganesh Chaturthi, Republic Day, etc.)
       - Normal Market Trading Windows:
-          NSE / BSE / NFO: Mon–Fri, 09:15–15:30 IST.
+          NSE / BSE (Cash): Mon–Fri, 09:15–15:30 IST (15:15 for CAS continuous eligible).
+          NFO / BFO / FNO (Derivatives): Mon–Fri, 09:15–15:40 / 15:45 IST (15:30 for expiring index).
           CDS (Currency):  Mon–Fri, 09:00–17:00 IST.
           MCX (Commodity): Mon–Fri, 09:00–23:30 IST (17:00–23:30 on evening-only holidays).
       - Special Muhurat / DR mock trading windows.
@@ -304,11 +307,49 @@ def is_market_open(
             return False
         return dtime(9, 0) <= current_t <= dtime(17, 0)
 
-    # NSE, BSE, NFO (Domestic Equity & Derivatives)
+    # NFO / BFO / FNO (Equity Derivatives)
+    if exch in ("NFO", "BFO", "FNO", "DERIVATIVES", "FUTURES", "OPTIONS"):
+        if rule and rule.is_equity_closed:
+            return False
+        is_exp_idx = False
+        if expiring_index is not None:
+            is_exp_idx = expiring_index
+        elif symbol:
+            try:
+                from engine.pretrade import _expiring_index_contract
+
+                resolved = _expiring_index_contract(symbol, today)
+                if resolved is not None:
+                    is_exp_idx = resolved
+            except Exception as e_exp_idx:
+                logger.debug(f"[market.calendar] Expiring index resolution skipped: {e_exp_idx}")
+        close_t = derivative_close(today, expiring_index=is_exp_idx)
+        return dtime(9, 15) <= current_t <= close_t
+
+    # NSE / BSE / EQUITY (Cash Equities)
+    if exch in ("NSE", "BSE", "EQUITY"):
+        if rule and rule.is_equity_closed:
+            return False
+        cas_eligible = False
+        if symbol:
+            try:
+                from market.instruments import is_derivative_eligible
+
+                cas_eligible = bool(is_derivative_eligible(symbol))
+            except Exception as e_cas:
+                logger.debug(f"[market.calendar] CAS eligibility check skipped: {e_cas}")
+        from market.rule_schedule import cash_continuous_close
+
+        close_t = cash_continuous_close(today, cas_eligible=cas_eligible)
+        return dtime(9, 15) <= current_t <= close_t
+
+    # Fallback for generic equity-linked venues
     if rule and rule.is_equity_closed:
         return False
 
-    return dtime(9, 15) <= current_t <= dtime(15, 30)
+    from market.rule_schedule import cash_continuous_close
+
+    return dtime(9, 15) <= current_t <= cash_continuous_close(today, cas_eligible=False)
 
 
 def get_current_ist_session(
@@ -317,7 +358,7 @@ def get_current_ist_session(
 ) -> dict[str, bool]:
     """
     Evaluates current IST operational session status per institutional schedule:
-      - 'equity_nfo': Mon–Fri 09:15–15:30 IST (Prime domestic equities & NFO derivatives).
+      - 'equity_nfo': Mon–Fri 09:15–15:30/15:45 IST (Prime domestic equities & NFO derivatives).
       - 'currency':   Mon–Fri 15:30–17:00 IST (Strictly post-equity, active until CDS close)
                       plus 09:00–09:15 IST (Pre-equity opening window).
                       Continuous mode (09:00–17:00 IST) supported via continuous_currency or CONTINUOUS_CURRENCY_SESSION=1.
@@ -341,10 +382,8 @@ def get_current_ist_session(
 
     current_t = now.time()
 
-    # 09:15 to 15:30 IST: Pure Domestic Equity & NFO Desk
-    is_equity_nfo = is_market_open("NSE", ref_dt=now) and (
-        dtime(9, 15) <= current_t <= dtime(15, 30)
-    )
+    # Domestic Equity & NFO Desk: Active if either Equity (NSE) or Derivatives (NFO) is open
+    is_equity_nfo = is_market_open("NSE", ref_dt=now) or is_market_open("NFO", ref_dt=now)
 
     # Currency Desk: Mon–Fri 09:00–09:15 IST (Pre-equity) + 15:30–17:00 IST (Post-equity until CDS close)
     # Continuous mode (09:00–17:00 IST) enabled when continuous_currency=True or in continuous currency test runner.
@@ -432,6 +471,11 @@ def get_market_status(
             remaining_mins = max(0, close_min - now_min)
         elif exch in ("CDS", "CURRENCY"):
             close_min = 17 * 60
+            now_min = now.hour * 60 + now.minute
+            remaining_mins = max(0, close_min - now_min)
+        elif exch in ("NFO", "BFO", "FNO", "DERIVATIVES", "FUTURES", "OPTIONS"):
+            c_time = derivative_close(today)
+            close_min = c_time.hour * 60 + c_time.minute
             now_min = now.hour * 60 + now.minute
             remaining_mins = max(0, close_min - now_min)
         else:
@@ -733,6 +777,14 @@ def get_active_derivative_expiry(
         return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 
     clean = canonical_symbol(underlying)
+    is_idx_underlying = clean in (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
     is_weekly_allowed = clean in ("NIFTY", "SENSEX")
     if not is_weekly_allowed:
         if ref_date is None:
@@ -751,9 +803,10 @@ def get_active_derivative_expiry(
                     if exp_list:
                         today = datetime.now(IST).date()
                         cur_t = ref_time or datetime.now(IST).time()
+                        close_t = derivative_close(today, expiring_index=is_idx_underlying)
                         for exp_s in exp_list:
                             exp_d = date.fromisoformat(exp_s)
-                            if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                            if exp_d > today or (exp_d == today and cur_t < close_t):
                                 return exp_d
             except Exception as e_broker_exp:
                 logger.debug(f"[market.calendar] Broker expiries lookup suppressed: {e_broker_exp}")
@@ -766,8 +819,9 @@ def get_active_derivative_expiry(
                 if exps:
                     today = datetime.now(IST).date()
                     cur_t = ref_time or datetime.now(IST).time()
+                    close_t = derivative_close(today, expiring_index=is_idx_underlying)
                     for exp_d in exps:
-                        if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                        if exp_d > today or (exp_d == today and cur_t < close_t):
                             return exp_d
             except Exception as e_sym_exp:
                 logger.debug(
@@ -792,9 +846,10 @@ def get_active_derivative_expiry(
                 if exp_list:
                     today = datetime.now(IST).date()
                     cur_t = ref_time or datetime.now(IST).time()
+                    close_t = derivative_close(today, expiring_index=is_idx_underlying)
                     for exp_s in exp_list:
                         exp_d = date.fromisoformat(exp_s)
-                        if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                        if exp_d > today or (exp_d == today and cur_t < close_t):
                             return exp_d
         except Exception as e_broker_exp:
             logger.debug(f"[market.calendar] Broker expiries lookup suppressed: {e_broker_exp}")
@@ -807,8 +862,9 @@ def get_active_derivative_expiry(
             if exps:
                 today = datetime.now(IST).date()
                 cur_t = ref_time or datetime.now(IST).time()
+                close_t = derivative_close(today, expiring_index=is_idx_underlying)
                 for exp_d in exps:
-                    if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                    if exp_d > today or (exp_d == today and cur_t < close_t):
                         return exp_d
         except Exception as e_sym_exp:
             logger.debug(

@@ -73,25 +73,33 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       const act = initialData.action || initialData.side || initialData.orderType || 'BUY'
       setAction(act)
 
-      const cleanSym = sym.replace(/^(NSE:|BSE:|MCX:|CDS:)/, '').trim()
+      const cleanSym = sym.replace(/^(NSE:|BSE:|MCX:|CDS:|NFO:|BFO:)/, '').trim()
       const uMatch = INDIAN_UNIVERSE.find(u => u.symbol === cleanSym || cleanSym.startsWith(u.symbol))
-      const resolvedLot = Math.max(
-        1,
-        Number(
-          initialData.lotSize ||
-          initialData.lot_size ||
-          uMatch?.lotSize ||
-          (cleanSym.includes('MIDCPNIFTY') ? 120 :
-           cleanSym.includes('FINNIFTY') ? 60 :
-           cleanSym.includes('BANKNIFTY') ? 30 :
-           cleanSym.includes('SENSEX') ? 20 :
-           cleanSym.includes('BANKEX') ? 30 :
-           cleanSym.includes('NIFTY') ? 65 : 1)
-        )
-      )
+      const initialLot = Number(initialData.lotSize || initialData.lot_size || uMatch?.lotSize || 0)
+      const isDerivativeIntent =
+        ex === 'NFO' ||
+        ex === 'BFO' ||
+        sym.includes(' CE') ||
+        sym.includes(' PE') ||
+        cleanSym.endsWith('CE') ||
+        cleanSym.endsWith('PE') ||
+        ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(cleanSym)
+
+      const resolvedLot = Math.max(1, initialLot || 1)
       setLotSize(resolvedLot)
 
-      const isFO = ex === 'NFO' || resolvedLot > 1 || sym.includes(' CE') || sym.includes(' PE')
+      // Fetch canonical server lot size for derivatives when not explicitly provided in initialData/universe
+      if (isDerivativeIntent && initialLot <= 1) {
+        const underlyingBase = cleanSym.replace(/\d+(?:CE|PE|FUT)$/, '') || cleanSym
+        call(`/api/risk/size/${encodeURIComponent(underlyingBase)}?is_fno=true`, null, 'GET')
+          .then((res) => {
+            const srvLot = Number(res?.data?.lot_size || 0)
+            if (srvLot > 1) setLotSize(srvLot)
+          })
+          .catch(() => {})
+      }
+
+      const isFO = isDerivativeIntent || resolvedLot > 1
       setProduct(initialData.product || (isFO ? 'NRML' : 'MIS'))
 
       const p = Number(initialData.price ?? 0)

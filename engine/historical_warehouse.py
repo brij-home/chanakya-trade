@@ -230,11 +230,11 @@ class HistoricalWarehouse:
         norm_df.columns = [str(c).lower() for c in norm_df.columns]
 
         if "date" in norm_df.columns and not isinstance(norm_df.index, pd.DatetimeIndex):
-            norm_df["date"] = pd.to_datetime(norm_df["date"])
+            norm_df["date"] = pd.to_datetime(norm_df["date"], format="mixed", dayfirst=True)
             norm_df = norm_df.set_index("date")
 
         if not isinstance(norm_df.index, pd.DatetimeIndex):
-            norm_df.index = pd.to_datetime(norm_df.index)
+            norm_df.index = pd.to_datetime(norm_df.index, format="mixed", dayfirst=True)
 
         if norm_df.index.tz is not None:
             norm_df.index = norm_df.index.tz_convert("Asia/Kolkata").tz_localize(None)
@@ -252,6 +252,17 @@ class HistoricalWarehouse:
                 raise ValueError(f"Missing required OHLCV column '{req}' in dataframe")
         if "volume" not in norm_df.columns:
             norm_df["volume"] = 0
+
+        if not norm_df.empty and isinstance(norm_df.index, pd.DatetimeIndex):
+            from config.constants import IST_ZONE as _IST_Z
+
+            today_ist_ts = pd.Timestamp(datetime.now(_IST_Z).date())
+            future_mask = norm_df.index.normalize() > today_ist_ts
+            if future_mask.any():
+                logger.warning(
+                    f"[HistoricalWarehouse] Dropping {int(future_mask.sum())} future-dated bar(s) (> {today_ist_ts.date()})"
+                )
+                norm_df = norm_df[~future_mask]
 
         return norm_df[_BAR_COLUMNS]
 
@@ -400,22 +411,38 @@ class HistoricalWarehouse:
 
                 removed = 0
                 for segment in absorbed:
-                    try:
-                        segment.unlink(missing_ok=True)
-                        removed += 1
-                    except OSError as e_unlink:
-                        logger.warning(
-                            f"[HistoricalWarehouse] Could not delete merged segment "
-                            f"{segment.name}: {e_unlink}"
-                        )
+                    for attempt in range(3):
+                        try:
+                            segment.unlink(missing_ok=True)
+                            removed += 1
+                            break
+                        except OSError as e_unlink:
+                            if attempt < 2 and getattr(e_unlink, "winerror", None) == 32:
+                                import gc
+
+                                gc.collect()
+                                time.sleep(0.05)
+                            else:
+                                logger.warning(
+                                    f"[HistoricalWarehouse] Could not delete merged segment "
+                                    f"{segment.name}: {e_unlink}"
+                                )
                 if merged_path is not None and merged_path != out_path:
-                    try:
-                        merged_path.unlink(missing_ok=True)
-                    except OSError as e_unlink:
-                        logger.warning(
-                            f"[HistoricalWarehouse] Could not delete superseded merged "
-                            f"generation {merged_path.name}: {e_unlink}"
-                        )
+                    for attempt in range(3):
+                        try:
+                            merged_path.unlink(missing_ok=True)
+                            break
+                        except OSError as e_unlink:
+                            if attempt < 2 and getattr(e_unlink, "winerror", None) == 32:
+                                import gc
+
+                                gc.collect()
+                                time.sleep(0.05)
+                            else:
+                                logger.warning(
+                                    f"[HistoricalWarehouse] Could not delete superseded merged "
+                                    f"generation {merged_path.name}: {e_unlink}"
+                                )
                 return removed
 
     def compact_all(self) -> int:

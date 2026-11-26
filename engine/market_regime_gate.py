@@ -43,14 +43,26 @@ class RegimeSnapshot:
 
 
 def _fetch_vix() -> Optional[float]:
+    # Enforce strict fresh live VIX contract (max 30s age) first — never use unverified/stale cache
     try:
-        from market.indices import get_vix
+        from analysis.regime_governor import _fresh_live_vix
 
-        val = get_vix()
-        if val and float(val) > 0:
-            return float(val)
-    except Exception as exc:
-        logger.debug("[MarketRegimeGate] VIX fetch error: %s", exc)
+        strict_vix = _fresh_live_vix(max_age_seconds=30.0)
+        if strict_vix is not None and strict_vix > 0:
+            return float(strict_vix)
+    except Exception as exc_strict:
+        logger.debug("[MarketRegimeGate] Strict live VIX check failed: %s", exc_strict)
+
+    try:
+        from engine.market_dynamics_governor import get_market_dynamics_governor
+
+        gov = get_market_dynamics_governor()
+        vix_val = gov.get_live_vix()
+        if vix_val is not None and vix_val > 0:
+            return float(vix_val)
+    except Exception as exc_gov:
+        logger.debug("[MarketRegimeGate] Governor VIX lookup fallback: %s", exc_gov)
+
     return None
 
 

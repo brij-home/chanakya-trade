@@ -12,7 +12,7 @@ Deterministic regression & invariant tests for:
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytest
 
 from config.constants import IST
@@ -39,7 +39,9 @@ def _build_test_alert(
     time_horizon: str = "INTRADAY",
 ) -> AutoAlert:
     # Use next-month settlement expiry to avoid SEBI physical delivery expiry week veto
-    exp_str = "2026-11-26" if strike else None
+    exp_str = (
+        (datetime.now(IST).date() + timedelta(days=35)).strftime("%Y-%m-%d") if strike else None
+    )
     contract = f"{symbol}{int(strike)}{option_type}" if strike and option_type else None
     m = {
         "underlying": underlying or symbol,
@@ -291,7 +293,7 @@ def test_inflight_index_thesis_shield_confluence_upgrade(alert_engine):
         option_type="CE",
         metrics={
             "confluence_detectors": ["INDEX_CALL_SETUP"],
-            "signals": ["INDEX_CALL_SETUP"],
+            "signals": ["SMC_VWAP_RECLAIM"],
             "oi": 50000,
             "volume": 10000,
             "bid": 149.0,

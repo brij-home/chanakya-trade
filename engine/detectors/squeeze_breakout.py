@@ -117,6 +117,10 @@ def _format_squeeze_alert(
         logger.debug(f"[SqueezeBreakout] CPR lookup in _build_alert skipped: {e_cpr}")
 
     is_idx = is_index_symbol(clean_sym)
+    from engine.position_sizer import get_lot_size
+
+    stock_lot_size = get_lot_size(clean_sym)
+    should_prefer_opt = is_idx or (stock_lot_size > 1)
     opt_plan = (
         resolve_option_contract(
             symbol=clean_sym,
@@ -124,8 +128,9 @@ def _format_squeeze_alert(
             direction=direction,
             underlying_sl=sl,
             underlying_target=target,
+            prefer_options=should_prefer_opt,
         )
-        if is_idx
+        if should_prefer_opt
         else None
     )
 
@@ -199,7 +204,9 @@ def _format_squeeze_alert(
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
             stage=effective_stage,
             symbol=clean_sym,
-            exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
+            exchange="BFO"
+            if clean_sym in ("SENSEX", "BANKEX")
+            else ("NFO" if (is_idx or opt_plan) else exchange),
             direction=direction,
             headline=opt_headline,
             summary=summary,
@@ -214,7 +221,7 @@ def _format_squeeze_alert(
             option_premium=opt_plan.entry_premium,
             underlying_spot=ltp,
             lot_size=opt_plan.lot_size,
-            segment="FNO_INDEX",
+            segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if opt_plan else "EQUITY"),
             confidence=conf,
             created_at=now_iso,
             time_horizon=time_horizon,
@@ -293,6 +300,7 @@ def _format_squeeze_alert(
         target_level=target,
         stop_loss=sl,
         no_chase_boundary=cash_no_chase,
+        segment="FNO_INDEX" if is_idx else ("FNO_STOCK" if stock_lot_size > 1 else "EQUITY"),
         time_horizon=time_horizon,
         preferred_vehicle=preferred_vehicle,
         metrics=metrics,

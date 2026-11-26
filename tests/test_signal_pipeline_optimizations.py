@@ -51,7 +51,7 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
     synthetic_df.attrs["provenance"] = {"data_source": "TEST", "provider": "mock"}
 
     test_sym = "TESTSYM_NORM"
-    norm_key = f"{test_sym}_NSE_5minute_intraday_norm"
+    norm_key = f"fyers_{test_sym}_NSE_5minute_intraday_norm"
 
     with _df_memory_cache_lock:
         _df_memory_cache[norm_key] = (time.time(), synthetic_df)
@@ -59,6 +59,7 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
     try:
         # Call get_ohlcv for 1 day - should hit normalized cache and slice
         with (
+            patch("brokers.session.get_data_broker_key", return_value="fyers"),
             patch("market.history._yfinance_fallback") as mock_yf,
             patch("brokers.session.get_data_broker") as mock_broker,
         ):
@@ -75,6 +76,7 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
 
         # Call get_ohlcv for 2 days - should also hit normalized cache
         with (
+            patch("brokers.session.get_data_broker_key", return_value="fyers"),
             patch("market.history._yfinance_fallback") as mock_yf,
             patch("brokers.session.get_data_broker") as mock_broker,
         ):

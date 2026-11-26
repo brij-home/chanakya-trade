@@ -16,8 +16,11 @@ logger = logging.getLogger("engine.preflight")
 import os
 import socket
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal
+
+_last_db_integrity_check: tuple[float, list[str]] = (0.0, [])
 
 
 @dataclass
@@ -73,7 +76,7 @@ def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
             return False
 
 
-def run_preflight(verbose: bool = True) -> PreflightReport:
+def run_preflight(verbose: bool = True, force_db_check: bool = False) -> PreflightReport:
     """Run all system preflight checks and return a structured report."""
     checks: List[PreflightCheckResult] = []
     healthy = True
@@ -257,42 +260,53 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
             )
         )
 
-    # 7. Database Integrity Checks (PRAGMA quick_check)
+    # 7. Database Integrity Checks (PRAGMA quick_check with 300s TTL cache)
     try:
         import sqlite3
         from pathlib import Path
         from config.paths import app_data_path
 
-        dbs_to_check = [
-            app_data_path("users.db"),
-            app_data_path("orders.db"),
-            app_data_path("audit.db"),
-            app_data_path("market_data.db"),
-            app_data_path("analysis_cache.db"),
-            app_data_path("analysis_search.db"),
-            app_data_path("chanakya_ledger.db"),
-            app_data_path("risk_limits.db"),
-            Path("data/eod_bars.db"),
-        ]
+        global _last_db_integrity_check
+        now_ts = time.time()
         corrupt_dbs = []
-        for db_p in dbs_to_check:
-            if db_p.exists():
-                conn = None
-                try:
-                    conn = sqlite3.connect(str(db_p), timeout=5.0)
-                    row = conn.execute("PRAGMA quick_check").fetchone()
-                    if not row or row[0] != "ok":
-                        corrupt_dbs.append(f"{db_p.name}: {row[0] if row else 'empty'}")
-                except Exception as err:
-                    corrupt_dbs.append(f"{db_p.name}: {err}")
-                finally:
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except Exception as e_suppressed:
-                            logger.debug(
-                                f"[engine.preflight] Non-fatal exception suppressed: {e_suppressed}"
-                            )
+
+        if (
+            not force_db_check
+            and _last_db_integrity_check[0] > 0
+            and (now_ts - _last_db_integrity_check[0] < 300.0)
+        ):
+            corrupt_dbs = list(_last_db_integrity_check[1])
+        else:
+            dbs_to_check = [
+                app_data_path("users.db"),
+                app_data_path("orders.db"),
+                app_data_path("audit.db"),
+                app_data_path("market_data.db"),
+                app_data_path("analysis_cache.db"),
+                app_data_path("analysis_search.db"),
+                app_data_path("chanakya_ledger.db"),
+                app_data_path("risk_limits.db"),
+                Path("data/eod_bars.db"),
+            ]
+            for db_p in dbs_to_check:
+                if db_p.exists():
+                    conn = None
+                    try:
+                        conn = sqlite3.connect(str(db_p), timeout=5.0)
+                        row = conn.execute("PRAGMA quick_check").fetchone()
+                        if not row or row[0] != "ok":
+                            corrupt_dbs.append(f"{db_p.name}: {row[0] if row else 'empty'}")
+                    except Exception as err:
+                        corrupt_dbs.append(f"{db_p.name}: {err}")
+                    finally:
+                        if conn is not None:
+                            try:
+                                conn.close()
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[engine.preflight] Non-fatal exception suppressed: {e_suppressed}"
+                                )
+            _last_db_integrity_check = (now_ts, list(corrupt_dbs))
 
         if corrupt_dbs:
             checks.append(

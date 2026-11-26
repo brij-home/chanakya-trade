@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
 import { useToastStore } from '../../hooks/useToast'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 /**
  * OpsDrawer — Slide-out triage and operations drawer.
@@ -60,8 +61,7 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
   useEffect(() => {
     if (isOpen) {
       fetchHubData()
-      const interval = setInterval(fetchHubData, 4000)
-      return () => clearInterval(interval)
+      return createVisibilityInterval(fetchHubData, 4000)
     }
   }, [isOpen, fetchHubData])
 

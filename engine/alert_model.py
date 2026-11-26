@@ -52,6 +52,7 @@ PULLBACK_ABSORPTION_ALERT_TYPES: frozenset[str] = frozenset(
         "SWING_INFLECTION",
         "PATTERN_COILING",
         "PULLBACK_RETEST",
+        "BREAKOUT_RETEST",
         "VWAP_BOUNCE",
         "TREND_PULLBACK_BOUNCE",
         "LIMIT_ON_PULLBACK",
@@ -257,6 +258,30 @@ class AutoAlert:
     signal_ref: Optional[str] = None
     r_multiple: Optional[float] = None
     pnl_pct: Optional[float] = None
+    stage_history: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_stage_transition(
+        self,
+        to_stage: str,
+        *,
+        reason: str = "",
+        evidence: Optional[dict[str, Any]] = None,
+        at_ist: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        """Record a causal lifecycle transition (e.g. WATCH -> ARMED -> TRIGGERED -> MANAGEMENT -> CLOSED)."""
+        ts = (at_ist or datetime.now(IST)).strftime("%Y-%m-%d %H:%M:%S IST")
+        entry: dict[str, Any] = {
+            "from_stage": self.stage,
+            "to_stage": str(to_stage).upper().strip(),
+            "at": ts,
+            "reason": reason,
+        }
+        if evidence:
+            entry["evidence"] = dict(evidence)
+        self.stage_history.append(entry)
+        self.stage = entry["to_stage"]
+        return entry
+
     updated_at: Optional[str] = None
     triggered_at: Optional[str] = None
     # Immutable first-signal timestamp: set once at insertion, NEVER overwritten on stage upgrades.
@@ -316,6 +341,9 @@ class AutoAlert:
     details: dict[str, Any] = field(default_factory=dict)
     decoupler_status: str = "CORRELATED"  # "VERIFIED_DECOUPLER" | "CORRELATED" | "INDEX_DRAGGED"
     preferred_vehicle: str = "NAKED_OPTION"  # "NAKED_OPTION" | "SPREAD_ONLY" | "CREDIT_SPREAD"
+    is_breakeven_ratcheted: bool = (
+        False  # Set to True when 60-min dead-money or T1 ratchets stop to BE
+    )
 
     def record_audit(
         self,
@@ -354,6 +382,19 @@ class AutoAlert:
         if len(self.audit_trail) > 50:
             self.audit_trail = self.audit_trail[-50:]
         return evt
+
+    @property
+    def tags(self) -> list[str]:
+        """Convenience property returning confluence factors or tags from alert metrics."""
+        if not isinstance(self.metrics, dict):
+            return []
+        cf = self.metrics.get("confluence_factors")
+        if isinstance(cf, list):
+            return cf
+        c = self.metrics.get("confluence")
+        if isinstance(c, str):
+            return [t.strip() for t in c.split("+") if t.strip()]
+        return []
 
     def sync_segment(self) -> str:
         """Reclassifies and synchronizes self.segment with classify_alert_segment(self)."""
@@ -548,7 +589,9 @@ class AutoAlert:
 
         if (not self.strike or not self.option_type) and (self.headline or self.contract_symbol):
             text_to_search = f"{self.headline or ''} {self.contract_symbol or ''}"
-            m_opt = re.search(r"\b(\d{1,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE)
+            m_opt = re.search(
+                r"(?<![\d.])(\d{1,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE
+            )
             if m_opt:
                 if not self.strike:
                     try:
@@ -565,7 +608,18 @@ class AutoAlert:
                     s_val = format_strike(self.strike)
                     self.contract_symbol = f"{self.symbol} {s_val} {self.option_type}"
 
-        if self.initial_stop_loss is None:
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt_init = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt_init = bool(
+                self.contract_symbol or self.option_premium or self.strike or self.option_type
+            )
+
+        if self.initial_stop_loss is None or (
+            is_opt_init and self.stop_loss and self.initial_stop_loss > (self.stop_loss * 3.5)
+        ):
             if (
                 self.actionable_plan
                 and isinstance(self.actionable_plan.get("option_plan"), dict)
@@ -579,9 +633,15 @@ class AutoAlert:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
+            elif is_opt_init and self.stop_loss is not None and self.stop_loss > 0:
+                self.initial_stop_loss = float(self.stop_loss)
             elif self.actionable_plan and self.actionable_plan.get("invalidation_stop"):
                 try:
-                    self.initial_stop_loss = float(self.actionable_plan["invalidation_stop"])
+                    cand_sl = float(self.actionable_plan["invalidation_stop"])
+                    if is_opt_init and self.stop_loss and cand_sl > (self.stop_loss * 3.5):
+                        self.initial_stop_loss = float(self.stop_loss)
+                    else:
+                        self.initial_stop_loss = cand_sl
                 except (ValueError, TypeError) as e_suppressed:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
@@ -639,12 +699,27 @@ class AutoAlert:
                 except (ValueError, TypeError):
                     self.tactical_sl = float(self.stop_loss)
             elif is_opt_setup:
-                # Scale guard: only adopt stop_loss as tactical option SL if it is in option premium scale (< 1500 pts)
-                # If stop_loss is in spot scale (>= 1500 pts), it belongs in structural_spot_sl!
-                if self.stop_loss < 1500.0:
-                    self.tactical_sl = float(self.stop_loss)
-                elif self.structural_spot_sl is None:
-                    self.structural_spot_sl = float(self.stop_loss)
+                ref_spot = float(
+                    self.underlying_spot
+                    or (self.metrics or {}).get("spot")
+                    or (self.metrics or {}).get("underlying_spot")
+                    or self.strike
+                    or 0.0
+                )
+                sl_val = float(self.stop_loss)
+                if ref_spot > 0:
+                    is_spot_scale = abs(sl_val - ref_spot) / ref_spot <= 0.35
+                else:
+                    opt_p = float(
+                        self.option_premium or (self.metrics or {}).get("option_premium") or 0.0
+                    )
+                    is_spot_scale = opt_p > 0 and sl_val > 2.5 * opt_p
+
+                if is_spot_scale:
+                    if self.structural_spot_sl is None:
+                        self.structural_spot_sl = sl_val
+                else:
+                    self.tactical_sl = sl_val
 
         if self.structural_spot_sl is None:
             spot_anchor = (
@@ -835,6 +910,33 @@ class AutoAlert:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
+
+        # Standardize Smart Limit-with-Protection (LWP) on option tickets (Zero Slippage Drag)
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            is_opt_order = (
+                bool(self.option_type)
+                or self.actionable_plan.get("instrument_type") == "OPTION"
+                or self.alert_type
+                in (
+                    "GAMMA_BLAST",
+                    "OPTIONS_MOMENTUM",
+                    "INDEX_CALL_SETUP",
+                    "INDEX_PUT_SETUP",
+                    "INDEX_MICRO_SCALP",
+                )
+            )
+            if is_opt_order:
+                if "order_type" not in self.actionable_plan:
+                    self.actionable_plan["order_type"] = "LIMIT"
+                if "execution_strategy" not in self.actionable_plan:
+                    self.actionable_plan["execution_strategy"] = "LIMIT_WITH_PROTECTION"
+                entry_val = float(self.option_premium or self.trigger_level or self.ltp or 0.0)
+                if entry_val > 0 and "limit_price" not in self.actionable_plan:
+                    self.actionable_plan["limit_price"] = round(entry_val * 1.005, 1)
+                if entry_val > 0 and "protection_ceiling" not in self.actionable_plan:
+                    self.actionable_plan["protection_ceiling"] = round(entry_val * 1.025, 1)
+                if "tif" not in self.actionable_plan:
+                    self.actionable_plan["tif"] = "DAY"
         # Auto-resolve market_status if not explicitly provided or defaulted to closed
         if not self.market_status or (
             self.market_status == "SESSION_CLOSED" and self.environment == "LIVE"
@@ -920,6 +1022,18 @@ class AutoAlert:
                 "PRECURSOR_RADAR",
             ):
                 self.time_horizon = "SWING_SHORT"
+            elif atype in (
+                "DEFINED_RISK_NEUTRAL",
+                "IRON_CONDOR",
+                "CREDIT_SPREAD",
+                "SHORT_STRADDLE",
+                "SHORT_STRANGLE",
+            ):
+                explicit_dte = getattr(self, "dte", None)
+                if explicit_dte is not None and explicit_dte == 0:
+                    self.time_horizon = "INTRADAY"
+                else:
+                    self.time_horizon = "SWING_SHORT"
             elif atype == "ASYMMETRIC_OPPORTUNITY":
                 setup_action = str((self.actionable_plan or {}).get("action", "")).upper()
                 if "POCKET_PIVOT" in setup_action:
@@ -1010,6 +1124,39 @@ class AutoAlert:
             else:
                 self.eta_label = "Today 15:15 IST"
 
+        # Standardize product routing (MIS vs NRML vs CNC) based on time horizon and instrument type
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            if "product" not in self.actionable_plan:
+                th_u = (self.time_horizon or "INTRADAY").upper()
+                is_swing = th_u in (
+                    "SWING_SHORT",
+                    "SWING_MID",
+                    "SWING",
+                    "POSITIONAL",
+                    "LONG_TERM",
+                    "MULTIBAGGER",
+                )
+                is_deriv = bool(
+                    self.option_type
+                    or self.contract_symbol
+                    or (getattr(self, "segment", "") or "").upper() in ("FNO", "OPTIONS", "FUTURES")
+                    or (self.actionable_plan.get("instrument_type") in ("OPTION", "FUTURE"))
+                    or (
+                        self.alert_type
+                        in (
+                            "GAMMA_BLAST",
+                            "OPTIONS_MOMENTUM",
+                            "INDEX_CALL_SETUP",
+                            "INDEX_PUT_SETUP",
+                            "INDEX_MICRO_SCALP",
+                        )
+                    )
+                )
+                if is_swing:
+                    self.actionable_plan["product"] = "NRML" if is_deriv else "CNC"
+                else:
+                    self.actionable_plan["product"] = "MIS"
+
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
             act_str = str((self.actionable_plan or {}).get("action", "")).strip().upper()
@@ -1047,7 +1194,12 @@ class AutoAlert:
 
             # Determine if this position is LONG (price expected to increase) or SHORT (price expected to decrease)
             is_short_trade = False
-            if is_option_prem or is_spot_trigger:
+            is_neutral_condor = str(self.direction or "").upper() == "NEUTRAL" or str(
+                self.alert_type or ""
+            ).upper() in ("DEFINED_RISK_NEUTRAL", "IRON_CONDOR", "CREDIT_SPREAD")
+            if is_neutral_condor:
+                is_short_trade = False
+            elif is_option_prem or is_spot_trigger:
                 if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
                     is_short_trade = True
                 else:
@@ -1068,7 +1220,12 @@ class AutoAlert:
                 is_short_trade = self.target_level < self.trigger_level
 
             th = (self.time_horizon or "INTRADAY").upper()
-            if is_spot_trigger and opt_prem_base and opt_prem_base > 0:
+            if is_neutral_condor:
+                # Preserve Iron Condor upper breakeven / target boundary
+                self.no_chase_boundary = round(
+                    float(self.target_level or self.trigger_level * 1.012), 2
+                )
+            elif is_spot_trigger and opt_prem_base and opt_prem_base > 0:
                 if is_short_trade:
                     mult = 0.95 if th == "INTRADAY" else 0.92
                 else:
@@ -1209,15 +1366,20 @@ class AutoAlert:
             except Exception as e_suppressed:
                 logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
-        # Record data invariant audit if validation fails
-        is_data_valid, val_reason = self.validate_data_integrity()
-        if not is_data_valid:
-            self.record_audit(
-                event_type="DATA_SANITY_WARNING",
-                message=f"Data integrity notice: {val_reason}",
-                actor="INTEGRITY_GUARD",
-                details={"reason": val_reason},
-            )
+        # Record data invariant audit only for non-terminal alerts (avoid reload spam on INVALIDATED)
+        if not self.is_invalidated and str(self.stage or "").upper() not in (
+            "INVALIDATED",
+            "EXPIRED",
+            "CANCELLED",
+        ):
+            is_data_valid, val_reason = self.validate_data_integrity()
+            if not is_data_valid:
+                self.record_audit(
+                    event_type="DATA_SANITY_WARNING",
+                    message=f"Data integrity notice: {val_reason}",
+                    actor="INTEGRITY_GUARD",
+                    details={"reason": val_reason},
+                )
 
     def validate_data_integrity(self) -> tuple[bool, str]:
         """
@@ -1896,11 +2058,16 @@ class AutoAlert:
                 exp_date_str = f"20{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
         if exp_date_str:
+            from market.rule_schedule import derivative_close
+
+            _is_idx_exp = str(getattr(self, "segment", "") or "").upper() == "FNO_INDEX" or str(
+                getattr(self, "symbol", "") or ""
+            ).upper() in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
             for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
                 try:
-                    exp_dt = datetime.strptime(exp_date_str.strip(), fmt).replace(
-                        hour=15, minute=30, second=0, tzinfo=IST
-                    )
+                    _parsed_d = datetime.strptime(exp_date_str.strip(), fmt).date()
+                    _exp_close_t = derivative_close(_parsed_d, expiring_index=_is_idx_exp)
+                    exp_dt = datetime.combine(_parsed_d, _exp_close_t).replace(tzinfo=IST)
                     if now >= exp_dt:
                         return True
                     break
@@ -1943,11 +2110,23 @@ class AutoAlert:
             ):
                 has_future_expiry = False
                 if self.expiry_date:
+                    from market.rule_schedule import derivative_close
+
+                    _is_idx_fut = str(
+                        getattr(self, "segment", "") or ""
+                    ).upper() == "FNO_INDEX" or str(getattr(self, "symbol", "") or "").upper() in (
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "SENSEX",
+                        "BANKEX",
+                    )
                     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
                         try:
-                            exp_dt = datetime.strptime(self.expiry_date.strip(), fmt).replace(
-                                hour=15, minute=30, second=0, tzinfo=IST
-                            )
+                            _parsed_d = datetime.strptime(self.expiry_date.strip(), fmt).date()
+                            _exp_close_t = derivative_close(_parsed_d, expiring_index=_is_idx_fut)
+                            exp_dt = datetime.combine(_parsed_d, _exp_close_t).replace(tzinfo=IST)
                             if exp_dt.date() > now.date():
                                 has_future_expiry = True
                             break
@@ -1971,6 +2150,13 @@ class AutoAlert:
                     or self.symbol.upper().endswith("USDT")
                 )
 
+                from market.rule_schedule import intraday_squareoff_cutoff
+
+                _sq_cutoff_t = intraday_squareoff_cutoff(
+                    now.date(),
+                    is_derivative=bool(is_deriv or exch in ("NFO", "BFO") or "FNO" in seg),
+                )
+
                 if not has_future_expiry and not is_active_deriv:
                     if is_crypto:
                         # Crypto is a 24x7 continuous global market; intraday alerts have a 24-hour rolling expiry window
@@ -1982,7 +2168,7 @@ class AutoAlert:
                         if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
                             return True
                     else:
-                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                        if now.time() >= _sq_cutoff_t:
                             return True
                 elif getattr(self, "_force_test_expiry", False):
                     if is_crypto:
@@ -1994,7 +2180,7 @@ class AutoAlert:
                         if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
                             return True
                     else:
-                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                        if now.time() >= _sq_cutoff_t:
                             return True
 
             # 2c. Unignited Early Warning Setup Time-Stop:
@@ -2135,6 +2321,7 @@ class AutoAlert:
             "DE_RISK_0_5R",
             "T0_5_ACHIEVED",
             "BREAKEVEN_LOCKED",
+            "TRAILING_UPDATE",
         ):
             return True
         if (
@@ -2341,15 +2528,33 @@ class AutoAlert:
             )
         )
         sl = float(self.stop_loss or 0.0)
-        if sl > 0:
-            if not is_opt or sl >= 1500.0:
+        if sl <= 0:
+            return 0.0
+        if not is_opt:
+            return sl
+
+        ref_spot = float(
+            self.underlying_spot
+            or (self.metrics or {}).get("spot")
+            or (self.metrics or {}).get("underlying_spot")
+            or self.strike
+            or 0.0
+        )
+        if ref_spot > 0:
+            if abs(sl - ref_spot) / ref_spot <= 0.35:
                 return sl
-        return 0.0
+            return 0.0
+
+        opt_p = float(self.option_premium or (self.metrics or {}).get("option_premium") or 0.0)
+        if opt_p > 0 and sl <= 2.5 * opt_p:
+            return 0.0
+        return sl
 
     @property
     def effective_option_sl(self) -> float:
         """
         Effective tactical option premium stop-loss level (denominated in option contract rupees).
+        Guarantees that spot SL is never returned as option premium stop loss.
         """
         if self.tactical_sl and self.tactical_sl > 0:
             return float(self.tactical_sl)
@@ -2363,9 +2568,32 @@ class AutoAlert:
                 and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
             )
         )
+        if not is_opt:
+            return 0.0
+
         sl = float(self.stop_loss or 0.0)
-        if is_opt and 0 < sl < 1500.0:
-            return sl
+        if sl <= 0:
+            return 0.0
+
+        ref_spot = float(
+            self.underlying_spot
+            or (self.metrics or {}).get("spot")
+            or (self.metrics or {}).get("underlying_spot")
+            or self.strike
+            or 0.0
+        )
+        if ref_spot > 0:
+            if abs(sl - ref_spot) / ref_spot <= 0.35:
+                return 0.0
+            if sl < 0.25 * ref_spot:
+                return sl
+
+        opt_p = float(self.option_premium or (self.metrics or {}).get("option_premium") or 0.0)
+        if opt_p > 0:
+            if sl <= 2.5 * opt_p:
+                return sl
+            return 0.0
+
         return 0.0
 
     @property
@@ -2428,6 +2656,12 @@ class AutoAlert:
             return float(self.option_premium)
         return float(self.ltp or 0.0)
 
+    @entry_price.setter
+    def entry_price(self, val: float) -> None:
+        self.trigger_level = float(val)
+        if isinstance(self.actionable_plan, dict):
+            self.actionable_plan["recommended_entry"] = float(val)
+
     @property
     def target_1(self) -> Optional[float]:
         """Canonical Target 1 price level."""
@@ -2474,6 +2708,13 @@ class AutoAlert:
                             )
                         ):
                             return float(self.target_level)
+                    elif is_opt and ep and val > (ep * 4.0):
+                        # Invariant 14.1 Scale Separation Guard: ignore leaked spot target on option alert
+                        if self.target_level and self.target_level <= (ep * 4.0):
+                            return float(self.target_level)
+                        sl = self.stop_loss
+                        if sl and ep > sl:
+                            return round(ep + 2.0 * (ep - sl), 2)
                     else:
                         return val
             except Exception as e_suppressed:
@@ -2530,6 +2771,13 @@ class AutoAlert:
                 logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
         return self.target_level if (self.target_level and self.target_level > 0) else None
 
+    @target_1.setter
+    def target_1(self, val: float) -> None:
+        self.target_level = float(val)
+        if isinstance(self.actionable_plan, dict):
+            self.actionable_plan["target_1"] = f"₹{float(val):,.2f}"
+            self.actionable_plan["target"] = f"₹{float(val):,.2f}"
+
     @property
     def target_2(self) -> Optional[float]:
         """Canonical Target 2 price level with strict monotonicity guardrails."""
@@ -2564,6 +2812,8 @@ class AutoAlert:
                     ep_chk = self.entry_price
                     if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
                         t2_num = None
+                    elif is_opt and ep_chk and val > (ep_chk * 6.0):
+                        t2_num = None
                     else:
                         t2_num = val
             except Exception as e_suppressed:
@@ -2578,7 +2828,11 @@ class AutoAlert:
                     if m:
                         val = float(m[0])
                         ep_chk = self.entry_price
-                        if not (not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40)):
+                        if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
+                            t2_num = None
+                        elif is_opt and ep_chk and val > (ep_chk * 6.0):
+                            t2_num = None
+                        else:
                             t2_num = val
                 except Exception as e_suppressed:
                     logger.debug(
@@ -2599,6 +2853,11 @@ class AutoAlert:
             # If t2 was missing, zero, or inverted, calculate mathematically sound T2 (+3.0R)
             return round(t1 + (1.2 * risk) if is_expanding_up else max(0.05, t1 - (1.2 * risk)), 2)
         return t2_num
+
+    @target_2.setter
+    def target_2(self, val: float) -> None:
+        if isinstance(self.actionable_plan, dict):
+            self.actionable_plan["target_2"] = f"₹{float(val):,.2f}"
 
     @property
     def target_3(self) -> Optional[float]:
@@ -2633,6 +2892,8 @@ class AutoAlert:
                     ep_chk = self.entry_price
                     if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
                         t3_num = None
+                    elif is_opt and ep_chk and val > (ep_chk * 8.0):
+                        t3_num = None
                     else:
                         t3_num = val
             except Exception as e_suppressed:
@@ -2647,7 +2908,11 @@ class AutoAlert:
                     if m:
                         val = float(m[0])
                         ep_chk = self.entry_price
-                        if not (not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40)):
+                        if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
+                            t3_num = None
+                        elif is_opt and ep_chk and val > (ep_chk * 8.0):
+                            t3_num = None
+                        else:
                             t3_num = val
                 except Exception as e_suppressed:
                     logger.debug(
@@ -2667,6 +2932,12 @@ class AutoAlert:
             return round(t2 + (1.5 * risk) if is_expanding_up else max(0.05, t2 - (1.5 * risk)), 2)
         return t3_num
 
+    @target_3.setter
+    def target_3(self, val: float) -> None:
+        if isinstance(self.actionable_plan, dict):
+            self.actionable_plan["target_3"] = f"₹{float(val):,.2f}"
+            self.actionable_plan["runner_target"] = f"₹{float(val):,.2f}"
+
     @property
     def risk_reward_ratio(self) -> float:
         """Calculates effective Risk:Reward ratio based on targets and stop loss."""
@@ -2682,14 +2953,61 @@ class AutoAlert:
                 logger.debug(f"[alert_model] Failed parsing risk_reward from plan: {e_suppressed}")
         ep = self.entry_price
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt = False
+
+        if not is_opt and ep:
+            u_spot = getattr(self, "underlying_spot", None)
+            if (
+                u_spot
+                and float(u_spot) > 0
+                and ep < float(u_spot) * 0.35
+                and (
+                    getattr(self, "contract_symbol", None)
+                    or getattr(self, "strike", None)
+                    or getattr(self, "option_type", None) in ("CE", "PE")
+                    or str(getattr(self, "segment", "")).upper()
+                    in ("NFO", "FNO_STOCK", "FNO_INDEX")
+                )
+            ):
+                is_opt = True
+
+        if is_opt and sl and ep and sl > ep * 4.0:
+            sl = self.stop_loss
+
         t1 = self.target_1
         t2 = self.target_2
+
         if ep and sl and ep != sl:
             risk = abs(ep - sl)
             tgt = t2 or t1
+            # Invariant 14.1 Scale Separation Guard: Discard spot target on option alert
+            if (
+                is_opt
+                and tgt
+                and ep
+                and (
+                    tgt > ep * 4.0
+                    or (
+                        getattr(self, "underlying_spot", None)
+                        and abs(tgt - float(self.underlying_spot)) / float(self.underlying_spot)
+                        < 0.35
+                    )
+                )
+            ):
+                tgt = round(ep + 2.0 * risk, 2)
+
             if tgt and risk > 0.001:
                 return round(abs(tgt - ep) / risk, 2)
         return 2.5
+
+    def calculate_rr_ratio(self) -> float:
+        """Alias for risk_reward_ratio (backward compatibility)."""
+        return self.risk_reward_ratio
 
     @property
     def conviction_tier(self) -> str:

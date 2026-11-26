@@ -157,6 +157,44 @@ def test_december_derivative_cutoff_fails_closed_without_master(monkeypatch):
     assert "Current derivative master data" in result.reason
 
 
+def test_calendar_market_open_and_session_respects_december_cas_cutoff(monkeypatch):
+    from datetime import datetime as dt_datetime
+    from market.calendar import is_market_open, get_current_ist_session
+
+    dt_1535 = datetime(2026, 12, 7, 15, 35, tzinfo=IST)
+    dt_1550 = datetime(2026, 12, 7, 15, 50, tzinfo=IST)
+    expiry_epoch = int(dt_datetime(2026, 12, 7, 15, 30, tzinfo=IST).timestamp())
+
+    def master_row(symbol, **kwargs):
+        if symbol == "NSE:NIFTY26D0725000CE":
+            return {"expiryDate": expiry_epoch, "underSym": "NIFTY"}
+        if symbol == "NSE:TCS26D074000CE":
+            return {"expiryDate": expiry_epoch, "underSym": "TCS"}
+        return None
+
+    monkeypatch.setattr("market.symbol_master.get_symbol_info", master_row)
+
+    # At 15:35 on 7-Dec-2026:
+    # 1. Cash NSE is closed (closes at 15:30)
+    assert is_market_open("NSE", ref_dt=dt_1535) is False
+    # 2. General NFO derivatives desk is open (closes at 15:45)
+    assert is_market_open("NFO", ref_dt=dt_1535) is True
+    assert is_market_open("FNO", ref_dt=dt_1535) is True
+    # 3. Expiring index contract is closed at 15:30
+    assert is_market_open("NFO", ref_dt=dt_1535, symbol="NSE:NIFTY26D0725000CE") is False
+    # 4. Stock option contract is open until 15:45
+    assert is_market_open("NFO", ref_dt=dt_1535, symbol="NSE:TCS26D074000CE") is True
+    # 5. At 15:50 all derivatives are closed
+    assert is_market_open("NFO", ref_dt=dt_1550) is False
+
+    # 6. Session reporting: equity_nfo remains True at 15:35 because derivatives desk is open
+    sess_1535 = get_current_ist_session(ref_dt=dt_1535)
+    assert sess_1535["equity_nfo"] is True
+    # At 15:50 equity_nfo is False
+    sess_1550 = get_current_ist_session(ref_dt=dt_1550)
+    assert sess_1550["equity_nfo"] is False
+
+
 def test_administrative_routes_require_auth(monkeypatch):
     from fastapi.testclient import TestClient
     import web.api as api

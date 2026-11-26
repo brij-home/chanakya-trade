@@ -218,32 +218,39 @@ class CodeProvenanceSentinel:
                 continue
 
             try:
-                for root, dirs, files in os.walk(str(dir_path)):
-                    # Prune excluded directories in-place for fast traversal
-                    dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
-                    for fname in files:
-                        if not fname.endswith(".py"):
-                            continue
-                        fpath = os.path.join(root, fname)
-                        try:
-                            mtime = os.path.getmtime(fpath)
-                            if mtime > threshold:
-                                rel_path = os.path.relpath(fpath, str(self.root_dir)).replace(
-                                    "\\", "/"
-                                )
-                                diff = round(mtime - threshold, 1)
-                                stale_files.append(
-                                    {
-                                        "path": rel_path,
-                                        "mtime": mtime,
-                                        "mtime_iso": datetime.fromtimestamp(
-                                            mtime, tz=timezone.utc
-                                        ).isoformat(),
-                                        "modified_after_boot_seconds": diff,
-                                    }
-                                )
-                        except (OSError, FileNotFoundError):
-                            continue
+                stack = [os.fspath(dir_path)]
+                while stack:
+                    cur = stack.pop()
+                    try:
+                        with os.scandir(cur) as it:
+                            for entry in it:
+                                name = entry.name
+                                if name in EXCLUDED_DIRS:
+                                    continue
+                                if entry.is_dir(follow_symlinks=False):
+                                    stack.append(entry.path)
+                                elif name.endswith(".py") and entry.is_file(follow_symlinks=False):
+                                    try:
+                                        mtime = entry.stat(follow_symlinks=False).st_mtime
+                                        if mtime > threshold:
+                                            rel_path = os.path.relpath(
+                                                entry.path, str(self.root_dir)
+                                            ).replace("\\", "/")
+                                            diff = round(mtime - threshold, 1)
+                                            stale_files.append(
+                                                {
+                                                    "path": rel_path,
+                                                    "mtime": mtime,
+                                                    "mtime_iso": datetime.fromtimestamp(
+                                                        mtime, tz=timezone.utc
+                                                    ).isoformat(),
+                                                    "modified_after_boot_seconds": diff,
+                                                }
+                                            )
+                                    except (OSError, FileNotFoundError):
+                                        continue
+                    except (OSError, FileNotFoundError):
+                        continue
             except Exception as e_scan:
                 logger.debug(f"[CodeProvenanceSentinel] Error scanning {dir_path}: {e_scan}")
 
@@ -251,50 +258,78 @@ class CodeProvenanceSentinel:
         stale_files.sort(key=lambda x: x["mtime"], reverse=True)
         return stale_files
 
-    def get_provenance(self, force_refresh: bool = False) -> CodeProvenanceReport:
+    def _trigger_bg_refresh(self) -> None:
+        if getattr(self, "_bg_refreshing", False):
+            return
+        self._bg_refreshing = True
+
+        def _worker() -> None:
+            try:
+                self.get_provenance(force_refresh=True)
+            except Exception as exc:
+                logger.debug(f"[CodeProvenanceSentinel] Background refresh note: {exc}")
+            finally:
+                self._bg_refreshing = False
+
+        threading.Thread(target=_worker, daemon=True, name="code-prov-bg").start()
+
+    def get_provenance(
+        self, force_refresh: bool = False, stale_ok: bool = False
+    ) -> CodeProvenanceReport:
         """
-        Returns full code provenance report. Results are cached with a 5.0s TTL.
+        Returns full code provenance report. Results are cached with a 5.0s TTL
+        (or up to 60s with background refresh when stale_ok=True).
         """
         now = time.time()
         with self._lock:
             if not force_refresh and self._cached_report is not None:
-                if (now - self._cache_time) < CACHE_TTL_SECONDS:
+                age = now - self._cache_time
+                if age < CACHE_TTL_SECONDS:
+                    return self._cached_report
+                if stale_ok:
+                    if age >= 60.0:
+                        self._trigger_bg_refresh()
                     return self._cached_report
 
-            stale_files = self.scan_stale_files()
-            is_stale = len(stale_files) > 0
-            uptime = round(now - self.boot_time, 1)
+        stale_files = self.scan_stale_files()
+        now = time.time()
+        is_stale = len(stale_files) > 0
+        uptime = round(now - self.boot_time, 1)
 
-            staleness_latency = 0.0
-            if is_stale:
-                earliest_mtime = min(f["mtime"] for f in stale_files)
-                staleness_latency = round(max(0.0, now - earliest_mtime), 1)
+        staleness_latency = 0.0
+        if is_stale:
+            earliest_mtime = min(f["mtime"] for f in stale_files)
+            staleness_latency = round(max(0.0, now - earliest_mtime), 1)
 
-            report = CodeProvenanceReport(
-                boot_timestamp=self.boot_timestamp,
-                uptime_seconds=uptime,
-                pid=self.pid,
-                python_version=_PYTHON_VERSION,
-                git_commit=self._git_commit,
-                git_branch=self._git_branch,
-                git_dirty=self._git_dirty,
-                is_stale_in_memory=is_stale,
-                stale_files_count=len(stale_files),
-                stale_files=stale_files,
-                staleness_latency_seconds=staleness_latency,
-                reload_required=is_stale,
-                scanned_roots=list(TRACKED_SOURCE_DIRS),
-                status="STALE" if is_stale else "FRESH",
-            )
+        report = CodeProvenanceReport(
+            boot_timestamp=self.boot_timestamp,
+            uptime_seconds=uptime,
+            pid=self.pid,
+            python_version=_PYTHON_VERSION,
+            git_commit=self._git_commit,
+            git_branch=self._git_branch,
+            git_dirty=self._git_dirty,
+            is_stale_in_memory=is_stale,
+            stale_files_count=len(stale_files),
+            stale_files=stale_files,
+            staleness_latency_seconds=staleness_latency,
+            reload_required=is_stale,
+            scanned_roots=list(TRACKED_SOURCE_DIRS),
+            status="STALE" if is_stale else "FRESH",
+        )
 
+        emit_telemetry = False
+        with self._lock:
             self._cached_report = report
             self._cache_time = now
-
             if is_stale and (now - self._last_telemetry_emit_time) > 300.0:
                 self._last_telemetry_emit_time = now
-                self._emit_staleness_telemetry(report)
+                emit_telemetry = True
 
-            return report
+        if emit_telemetry:
+            self._emit_staleness_telemetry(report)
+
+        return report
 
     def _emit_staleness_telemetry(self, report: CodeProvenanceReport) -> None:
         """Records a P3 advisory incident in institutional telemetry when staleness occurs."""
@@ -326,6 +361,8 @@ class CodeProvenanceSentinel:
 code_provenance_sentinel = CodeProvenanceSentinel()
 
 
-def get_code_provenance(force_refresh: bool = False) -> CodeProvenanceReport:
+def get_code_provenance(
+    force_refresh: bool = False, stale_ok: bool = False
+) -> CodeProvenanceReport:
     """Convenience accessor for global code provenance sentinel."""
-    return code_provenance_sentinel.get_provenance(force_refresh=force_refresh)
+    return code_provenance_sentinel.get_provenance(force_refresh=force_refresh, stale_ok=stale_ok)

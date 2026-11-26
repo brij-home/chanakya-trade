@@ -74,6 +74,68 @@ def is_target_or_profit_achieved(alert: Any, r_val: float = 0.0) -> bool:
     return r_val >= 0.35
 
 
+def extract_5w_dimensions(alert: Any) -> tuple[str, str, str, str]:
+    """
+    Extracts the 5W hierarchical dimensions (WHY, WHEN, WHERE, WHO) defensively
+    across canonical Level 2 setup structures and legacy fields.
+    Returns: (why_dim, when_dim, where_dim, who_dim)
+    """
+    metrics = getattr(alert, "metrics", {}) or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    hp = metrics.get("hierarchical_pipeline") or {}
+    if not isinstance(hp, dict):
+        hp = {}
+
+    l2 = hp.get("level2_setup") or hp.get("level2") or hp.get("level2_5ws") or {}
+    if not isinstance(l2, dict):
+        l2 = {}
+
+    # 1. WHY (Alpha Thesis)
+    why_dim = str(
+        l2.get("alpha_thesis")
+        or l2.get("why_alpha_thesis")
+        or getattr(alert, "setup_archetype", None)
+        or getattr(alert, "alert_type", "MOMENTUM")
+        or "UNSPECIFIED_THESIS"
+    ).upper()
+
+    # 2. WHEN (Session Window)
+    when_dim = str(
+        l2.get("session_window")
+        or l2.get("when_session_window")
+        or getattr(alert, "session_window", None)
+        or metrics.get("session_window")
+        or "UNSPECIFIED_WINDOW"
+    ).upper()
+
+    # 3. WHERE (Structural Anchor)
+    raw_anchor = (
+        l2.get("location_anchors")
+        or l2.get("where_structural_anchor")
+        or l2.get("structural_anchor")
+        or (getattr(alert, "key_levels", {}) or {}).get("structural_anchor")
+        or metrics.get("structural_anchor")
+    )
+    if isinstance(raw_anchor, list) and raw_anchor:
+        where_dim = str(raw_anchor[0]).upper()
+    elif isinstance(raw_anchor, str) and raw_anchor:
+        where_dim = str(raw_anchor).upper()
+    else:
+        where_dim = "UNSPECIFIED_ANCHOR"
+
+    # 4. WHO (Trapped Counterparty)
+    who_dim = str(
+        l2.get("trapped_counterparty")
+        or l2.get("who_trapped_counterparty")
+        or getattr(alert, "trapped_party", None)
+        or metrics.get("trapped_counterparty")
+        or "UNSPECIFIED_COUNTERPARTY"
+    ).upper()
+
+    return why_dim, when_dim, where_dim, who_dim
+
+
 def generate_session_scorecard(
     today_alerts: list[Any],
     session_date: Optional[str] = None,
@@ -193,34 +255,8 @@ def generate_session_scorecard(
         ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
         is_expired = getattr(alert, "is_expired", False)
 
-        # Extract 5W Hierarchical Dimensions
-        hp_metrics = (getattr(alert, "metrics", {}) or {}).get("hierarchical_pipeline") or {}
-        l2_metrics = hp_metrics.get("level2_5ws") or {} if isinstance(hp_metrics, dict) else {}
-
-        why_dim = str(
-            l2_metrics.get("why_alpha_thesis")
-            or getattr(alert, "setup_archetype", None)
-            or getattr(alert, "alert_type", "MOMENTUM")
-            or "UNSPECIFIED_THESIS"
-        ).upper()
-
-        when_dim = str(
-            l2_metrics.get("when_session_window")
-            or getattr(alert, "session_window", None)
-            or "UNSPECIFIED_WINDOW"
-        ).upper()
-
-        where_dim = str(
-            l2_metrics.get("where_structural_anchor")
-            or (getattr(alert, "key_levels", {}) or {}).get("structural_anchor")
-            or "UNSPECIFIED_ANCHOR"
-        ).upper()
-
-        who_dim = str(
-            l2_metrics.get("who_trapped_counterparty")
-            or getattr(alert, "trapped_party", None)
-            or "UNSPECIFIED_COUNTERPARTY"
-        ).upper()
+        # Extract 5W Hierarchical Dimensions defensively across Level 2 structures
+        why_dim, when_dim, where_dim, who_dim = extract_5w_dimensions(alert)
 
         dims_to_track = [
             ("why_alpha_thesis", why_dim),
@@ -610,8 +646,9 @@ def run_eod_alert_postmortems(
     }
 
     if not force:
-        # Require that today is an official trading day and post-market (after 15:30 IST)
+        # Require that today is an official trading day and post-market (after derivative close)
         from market.calendar import is_trading_day
+        from market.rule_schedule import derivative_close
 
         if not is_trading_day(now_ist.date(), exchange="NSE"):
             report["status"] = "SKIPPED_WEEKEND_OR_HOLIDAY"
@@ -622,10 +659,12 @@ def run_eod_alert_postmortems(
             logger.info("[AlertPostMortem] %s", report["reason"])
             return report
 
-        hhmm = now_ist.hour * 100 + now_ist.minute
-        if hhmm < 1530:
+        deriv_close_t = derivative_close(now_ist.date())
+        if now_ist.time() < deriv_close_t:
             report["status"] = "SKIPPED_MARKET_OPEN"
-            report["reason"] = "Market is still open (pre-15:30 IST). Use force=True to override."
+            report["reason"] = (
+                f"Market is still open (pre-{deriv_close_t.strftime('%H:%M')} IST). Use force=True to override."
+            )
             logger.info("[AlertPostMortem] %s", report["reason"])
             return report
 
@@ -735,8 +774,10 @@ def run_eod_alert_postmortems(
         if not has_triggered or is_disqualified:
             continue
 
-        # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting any profit milestone
+        # We evaluate setups that were invalidated, expired, or closed without hitting target
         target_hit = is_target_or_profit_achieved(alert)
+        stg = str(getattr(alert, "stage", "") or getattr(alert, "status", "")).upper()
+        is_session_exit = "SESSION_CLOSE" in stg or "TIME_STOP" in stg or "SCRATCH" in stg
         needs_postmortem = (
             is_invalidated
             or (not target_hit and is_expired)
@@ -768,15 +809,7 @@ def run_eod_alert_postmortems(
 
             exchange = getattr(alert, "exchange", "NSE")
 
-            # 1. Conduct forensic post-mortem
-            pm = pattern_learning_engine.conduct_invalidation_post_mortem(
-                alert=alert,
-                exit_price=exit_price,
-                exchange=exchange,
-            )
-            report["post_mortems_conducted"] += 1
-
-            # 2. Record trade outcome into learning history
+            # 1. Resolve R-multiple
             r_mult = getattr(alert, "r_multiple", None)
             if r_mult is None or r_mult == 0.0:
                 sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
@@ -790,25 +823,49 @@ def run_eod_alert_postmortems(
                     2,
                 )
 
-            outcome_label = "STOPPED_OUT" if is_invalidated else "UNFULFILLED_EOD"
+            # 2. Conduct forensic invalidation post-mortem ONLY if genuine adverse invalidation
+            # Normal session square-offs (SESSION_CLOSE_EXIT, TIME_STOP_EXIT) with r_mult >= -0.2 are clean flat closes, NOT invalidations!
+            pm = None
+            should_run_invalidation_pm = is_invalidated or (
+                not target_hit
+                and not is_session_exit
+                and (r_mult is not None and float(r_mult) <= -0.5)
+            )
 
-            hp_pm = (getattr(alert, "metrics", {}) or {}).get("hierarchical_pipeline") or {}
-            l2_pm = hp_pm.get("level2_5ws") or {} if isinstance(hp_pm, dict) else {}
+            if should_run_invalidation_pm:
+                pm = pattern_learning_engine.conduct_invalidation_post_mortem(
+                    alert=alert,
+                    exit_price=exit_price,
+                    exchange=exchange,
+                )
+                report["post_mortems_conducted"] += 1
+
+            # 3. Determine clean outcome label
+            if is_invalidated or (r_mult is not None and float(r_mult) <= -0.5):
+                outcome_label = "STOPPED_OUT"
+            elif target_hit or (r_mult is not None and float(r_mult) >= 0.3):
+                outcome_label = "PROFIT_TARGET"
+            elif is_session_exit:
+                outcome_label = "SESSION_CLOSE"
+            else:
+                outcome_label = "UNFULFILLED_EOD"
+
+            # 4. Extract unified 5W dimensions and record into trade learning history
+            why_dim, when_dim, where_dim, who_dim = extract_5w_dimensions(alert)
 
             pattern_learning_engine.record_trade_outcome(
                 alert_id=alert_id,
                 symbol=symbol,
-                archetype=getattr(alert, "alert_type", "MOMENTUM"),
+                archetype=why_dim,
                 entry_price=entry,
                 exit_price=exit_price,
                 outcome=outcome_label,
                 realized_rr=r_mult,
                 factors_present=getattr(alert, "matched_factors", []),
-                alpha_thesis=l2_pm.get("why_alpha_thesis")
-                or getattr(alert, "alert_type", "MOMENTUM"),
-                session_window=l2_pm.get("when_session_window"),
-                structural_anchor=l2_pm.get("where_structural_anchor"),
-                trapped_counterparty=l2_pm.get("who_trapped_counterparty"),
+                alpha_thesis=why_dim,
+                session_window=when_dim,
+                structural_anchor=where_dim,
+                trapped_counterparty=who_dim,
             )
             report["outcomes_recorded"] += 1
 
@@ -818,9 +875,15 @@ def run_eod_alert_postmortems(
                     "symbol": symbol,
                     "outcome": outcome_label,
                     "realized_rr": r_mult,
-                    "root_cause": pm.root_cause
-                    if hasattr(pm, "root_cause")
-                    else "EOD Session Close",
+                    "root_cause": (
+                        getattr(pm, "root_cause_analysis", None)
+                        or getattr(pm, "root_cause", None)
+                        or (
+                            "Normal Session Close Cutoff"
+                            if is_session_exit
+                            else "EOD Session Close"
+                        )
+                    ),
                 }
             )
         except Exception as exc:

@@ -124,31 +124,28 @@ def test_benchmark_gravitational_veto_bearish_in_markup(auditor: AlertScrutinyAu
 
 
 def test_intraday_rsi_exhaustion_tightened(auditor: AlertScrutinyAuditor):
-    """Intraday 5m RSI > 72 is vetoed as climax exhaustion, while daily swing allows up to 78."""
-    # 1. 5m Intraday Setup with RSI 74.0 -> Must be VETOED
+    """Intraday 5m RSI > 74 on routine intraday setup is vetoed as climax exhaustion, while daily swing allows up to 78."""
+    # 1. 5m Intraday Setup with RSI 75.5 -> Must be VETOED
     intraday_alert = AutoAlert(
         alert_id="test-rsi-intraday-veto",
-        alert_type="OPTIONS_MOMENTUM",
+        alert_type="INTRADAY_SPARK",
         stage="IGNITED",
         symbol="NSE:RELIANCE",
-        exchange="NFO",
+        exchange="NSE",
         direction="BULLISH",
         headline="Reliance Call Surge",
-        summary="Call surge with RSI 74",
-        ltp=55.0,
-        trigger_level=55.0,
-        stop_loss=48.0,
-        target_level=72.0,
-        option_type="CE",
-        strike=3000.0,
-        contract_symbol="RELIANCE3000CE",
+        summary="Intraday surge with RSI 75.5",
+        ltp=2950.0,
+        trigger_level=2950.0,
+        stop_loss=2900.0,
+        target_level=3100.0,
         is_live=True,
         environment="LIVE",
-        metrics={"rsi_5m": 74.5, "timeframe": "5m", "volume": 12000, "oi": 50000},
+        metrics={"rsi_5m": 75.5, "timeframe": "5m", "volume": 50000, "oi": 50000},
     )
     passed, reason, flags = auditor.verify_tier1_sanity(intraday_alert)
     assert passed is False
-    assert "Climax Exhaustion: Intraday RSI (74.5) > 72" in reason
+    assert "Climax Exhaustion: Intraday RSI (75.5) > 74" in reason
 
     # 2. Daily Swing Setup with RSI 74.0 -> Allowed (limit is 78)
     swing_alert = AutoAlert(
@@ -173,7 +170,7 @@ def test_intraday_rsi_exhaustion_tightened(auditor: AlertScrutinyAuditor):
 
 
 def test_intraday_oversold_exhaustion_tightened(auditor: AlertScrutinyAuditor):
-    """Intraday short setup with underlying RSI < 28 is vetoed as capitulation floor."""
+    """Intraday short setup with underlying RSI < 24 is vetoed as capitulation floor."""
     alert = AutoAlert(
         alert_id="test-oversold-intraday-veto",
         alert_type="INTRADAY_SPARK",
@@ -182,18 +179,18 @@ def test_intraday_oversold_exhaustion_tightened(auditor: AlertScrutinyAuditor):
         exchange="NSE",
         direction="BEARISH",
         headline="Infosys Breakdown",
-        summary="Short breakdown with RSI 25",
+        summary="Short breakdown with RSI 22.5",
         ltp=1800.0,
         trigger_level=1800.0,
         stop_loss=1835.0,
         target_level=1710.0,
         is_live=True,
         environment="LIVE",
-        metrics={"rsi_5m": 25.0, "timeframe": "5m"},
+        metrics={"rsi_5m": 22.5, "timeframe": "5m"},
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert)
     assert passed is False
-    assert "Oversold Exhaustion: Intraday RSI (25.0) < 28" in reason
+    assert "Oversold Exhaustion: Intraday RSI (22.5) < 24" in reason
 
 
 def test_intraday_20ema_mean_reversion_extension_tightened(auditor: AlertScrutinyAuditor):

@@ -144,17 +144,26 @@ def build_defined_risk_spread(
     total_qty = lots * num_lots
     spot = float(spot_price)
 
-    # Calculate standard strike interval
-    if spot > 30000:
-        step = 100.0
-    elif spot > 15000:
-        step = 50.0
-    elif spot > 1000:
-        step = 20.0
-    elif spot > 500:
-        step = 10.0
-    else:
-        step = 5.0
+    # Calculate canonical strike interval from exchange master
+    try:
+        from market.symbol_master import get_strike_step
+
+        step = float(get_strike_step(sym, spot=spot))
+    except Exception:
+        step = 0.0
+
+    if step <= 0.0:
+        # Fallback to standard price ladder if master is unavailable
+        if spot > 30000:
+            step = 100.0
+        elif spot > 15000:
+            step = 50.0
+        elif spot > 1000:
+            step = 20.0
+        elif spot > 500:
+            step = 10.0
+        else:
+            step = 5.0
 
     atm_strike = round(spot / step) * step
 

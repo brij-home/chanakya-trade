@@ -38,14 +38,26 @@ export function getCachedCsrfToken() {
   return cachedCsrfToken
 }
 
+export function resolveSidecarBaseUrl(port = null) {
+  if (typeof window !== 'undefined') {
+    if (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173') {
+      return window.location.origin
+    }
+    if (port) return `http://127.0.0.1:${port}`
+    try {
+      const savedPort = localStorage.getItem('chanakya_sidecar_port')
+      if (savedPort) return `http://127.0.0.1:${savedPort}`
+    } catch {}
+  }
+  return 'http://127.0.0.1:8765'
+}
+
 export function useAPI() {
   const port = useChatStore((s) => s.port)
 
   // Web mode: use same origin (no port needed)
   // Electron mode: use port from IPC with fallback to default 8765
-  const base = (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173')
-    ? window.location.origin
-    : (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765')
+  const base = resolveSidecarBaseUrl(port)
 
   // In web mode, include credentials (cookies) with every request
   const fetchOpts = useMemo(() => (window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}), [])

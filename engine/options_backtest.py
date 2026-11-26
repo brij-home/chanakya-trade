@@ -102,6 +102,79 @@ def bs_premium(
         return intrinsic + time_value
 
 
+def vectorized_bs_premium_grid(
+    spots: Any,
+    strikes: Any,
+    dte: Any,
+    ivs: Any,
+    option_type: str = "CE",
+    rate: float = RISK_FREE_RATE,
+) -> np.ndarray:
+    """Batch Black-Scholes pricing delegating to market.vectorized_greeks."""
+    from market.vectorized_greeks import vectorized_black_scholes_prices
+
+    is_call = str(option_type).upper().strip() == "CE"
+    return vectorized_black_scholes_prices(
+        spots=spots,
+        strikes=strikes,
+        dte=dte,
+        sigmas=ivs,
+        r=rate,
+        is_call=is_call,
+    )
+
+
+def bs_iv(
+    price: float,
+    spot: float,
+    strike: float,
+    dte: int,
+    option_type: str,
+    rate: float = RISK_FREE_RATE,
+    max_iter: int = 25,
+    tolerance: float = 1e-4,
+) -> Optional[float]:
+    """
+    Invert Black-Scholes formula using hybrid Newton-Raphson / bisection solver
+    to find implied volatility (as decimal, e.g. 0.165 for 16.5%).
+    Returns None if price is below intrinsic value or inputs are invalid.
+    """
+    if price <= 0.05 or spot <= 0 or strike <= 0 or dte <= 0:
+        return None
+
+    opt = option_type.upper().strip()
+    intrinsic = max(0.0, (spot - strike) if opt == "CE" else (strike - spot))
+    if price < intrinsic * 0.995:
+        return None
+
+    sigma = 0.20
+    low = 0.005
+    high = 4.0
+
+    for _ in range(max_iter):
+        p = bs_premium(spot, strike, dte, sigma, opt, rate=rate)
+        diff = p - price
+        if abs(diff) < tolerance:
+            return round(sigma, 4)
+
+        v = bs_vega(spot, strike, dte, sigma, rate=rate)
+        if v > 1e-4:
+            new_sigma = sigma - diff / v
+            if low < new_sigma < high:
+                sigma = new_sigma
+                continue
+
+        if diff > 0:
+            high = sigma
+        else:
+            low = sigma
+        sigma = 0.5 * (low + high)
+        if abs(high - low) < tolerance:
+            return round(sigma, 4)
+
+    return round(sigma, 4) if (0.01 <= sigma <= 3.5) else None
+
+
 def bs_delta(
     spot: float,
     strike: float,

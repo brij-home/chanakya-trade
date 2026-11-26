@@ -79,7 +79,13 @@ def get_expiry_metadata(
         parsed_c = parse_derivative_contract(str(contract_symbol))
         if parsed_c and parsed_c.expiry_date:
             try:
-                dt = datetime.strptime(parsed_c.expiry_date, "%Y-%m-%d").date()
+                raw_exp = parsed_c.expiry_date
+                if isinstance(raw_exp, datetime):
+                    dt = raw_exp.date()
+                elif isinstance(raw_exp, date):
+                    dt = raw_exp
+                else:
+                    dt = datetime.strptime(str(raw_exp).strip(), "%Y-%m-%d").date()
                 if not expiry_type:
                     expiry_type = classify_expiry_type(
                         dt.strftime("%Y-%m-%d"), symbol or parsed_c.underlying
@@ -90,7 +96,6 @@ def get_expiry_metadata(
                 )
 
         import re
-        from datetime import date
 
         csym = canonical_symbol(str(contract_symbol))
 
@@ -322,25 +327,50 @@ def is_alert_option_premium_level(alert: Any) -> bool:
             return True
         return False
 
-    # If the alert's LTP has explicitly been mapped to option premium space, it IS option premium levels
+    # If the alert's LTP, trigger, or SL has explicitly been mapped to option premium space, it IS option premium levels
     opt_prem = _g("option_premium", None)
     ltp = float(_g("ltp", 0.0) or 0.0)
+    trig = float(_g("trigger_level", 0.0) or _g("entry_price", 0.0) or 0.0)
+    sl = float(_g("stop_loss", 0.0) or 0.0)
     deriv = str(_g("derivative_type", "") or "").upper()
     spot_val = _g("underlying_spot", None)
+    csym = _g("contract_symbol")
+    otype = _g("option_type")
+    has_opt_contract = bool(
+        csym or otype in ("CE", "PE") or deriv == "OPT" or " CE" in sym_u or " PE" in sym_u
+    )
 
-    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+    if opt_prem is not None and float(opt_prem) > 0:
         prem = float(opt_prem)
-        if abs(ltp - prem) <= max(1.0, prem * 0.15):
+        if ltp > 0 and abs(ltp - prem) <= max(1.0, prem * 0.15):
+            return True
+        if trig > 0 and abs(trig - prem) <= max(1.0, prem * 0.15):
             return True
 
-    if deriv == "OPT" and spot_val is not None and float(spot_val) > 0 and ltp > 0:
-        if ltp < float(spot_val) * 0.35:
+    if spot_val is not None and float(spot_val) > 0 and has_opt_contract:
+        s_val = float(spot_val)
+        if (
+            (ltp > 0 and ltp < s_val * 0.35)
+            or (trig > 0 and trig < s_val * 0.35)
+            or (sl > 0 and sl < s_val * 0.35)
+        ):
+            return True
+
+    if spot_val is not None and float(spot_val) > 0 and ltp > 0:
+        if ltp < float(spot_val) * 0.35 and (
+            deriv == "OPT"
+            or _g("exchange") == "NFO"
+            or str(_g("segment", "")).upper() in ("NFO", "FNO_STOCK", "FNO_INDEX")
+            or _g("contract_symbol")
+            or _g("option_type") in ("CE", "PE")
+        ):
             return True
 
     # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
         "BREAKOUT",
         "BREAKDOWN",
+        "BREAKOUT_RETEST",
         "MOMENTUM_BREAKOUT",
         "ASYMMETRIC_OPPORTUNITY",
         "SQUEEZE_BREAKOUT",
@@ -356,9 +386,13 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "THEMATIC_SYMPATHY_IGNITION",
         "THEMATIC_EXPANSION",
         "SMC_OB_RETEST",
+        "SMC_ORDERBLOCK_RETEST",
         "SMC_SWEEP",
         "PREDATOR_SWEEP",
         "LIQUIDITY_PURGE",
+        "LIQUIDITY_INVERSION",
+        "TURTLE_SOUP",
+        "TURTLE_SOUP_SWEEP",
         "VWAP_REVERSAL",
         "GAP_AND_GO",
         "POCKET_PIVOT",
@@ -371,7 +405,7 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "CRYPTO_MOMENTUM",
         "CRYPTO",
         "CRYPTO_BREAKOUT",
-    ):
+    ) or atype.startswith(("CHART_", "INSTITUTIONAL_", "STRAT_")):
         return False
 
     if _g("exchange", "") == "CRYPTO" or _g("segment", "") == "CRYPTO":
@@ -551,6 +585,20 @@ def is_0dte_afternoon(expiry_str: Optional[str], ref_dt: Optional[datetime] = No
     from datetime import time as dtime
 
     return now_dt.time() >= dtime(12, 30)
+
+
+def is_expiry_day(symbol: str, ref_date: Optional[Any] = None) -> bool:
+    """Returns True if the given symbol (index or equity) expires on the given calendar date."""
+    d = ref_date or datetime.now(IST).date()
+    if isinstance(d, datetime):
+        d = d.date()
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        from market.rule_schedule import expiry_weekday
+
+        exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+        return d.weekday() == expiry_weekday(exch, d)
+    return False
 
 
 def is_monthly_physical_expiry_week(

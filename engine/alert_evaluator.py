@@ -64,7 +64,15 @@ def evaluate_alert_invalidation(
             "STALK",
             "PRIMED",
         ):
+            from market.rule_schedule import intraday_squareoff_cutoff
+
             exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
+            _seg_u = str(getattr(alert, "segment", "") or "").upper()
+            _is_deriv = (
+                exch in ("NFO", "BFO") or "FNO" in _seg_u or is_alert_option_premium_level(alert)
+            )
+            _sq_t = intraday_squareoff_cutoff(now_ist.date(), is_derivative=_is_deriv)
+            cutoff_time = "23:15" if exch == "MCX" else _sq_t.strftime("%H:%M")
             cutoff_reached = False
             if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
                 # Crypto is 24x7; intraday alerts have a 24-hour rolling expiry window
@@ -76,9 +84,8 @@ def evaluate_alert_invalidation(
             elif exch == "MCX":
                 cutoff_reached = now_ist.hour > 23 or (now_ist.hour == 23 and now_ist.minute >= 15)
             else:
-                cutoff_reached = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 15)
+                cutoff_reached = now_ist.time() >= _sq_t
             if cutoff_reached:
-                cutoff_time = "23:15" if exch == "MCX" else "15:15"
                 return f"Intraday session expired ({cutoff_time} IST cutoff reached). Trade closed."
 
     is_option = is_alert_option_premium_level(alert)
@@ -208,7 +215,7 @@ def evaluate_alert_invalidation(
     # If an intraday option setup has been active for >= 45m without reaching +0.5R (+12%),
     # and momentum/volume has dried up with LTP at or below entry, exit at scratch before theta collapse.
     if (
-        not is_test_runner
+        (not is_test_runner or getattr(alert, "_force_test_expiry", False))
         and is_option
         and created_dt
         and (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper() == "INTRADAY"
@@ -247,20 +254,45 @@ def evaluate_alert_invalidation(
                 or getattr(alert, "trigger_level", None)
                 or 0.0
             )
-            if ref_entry > 0 and current_ltp <= (ref_entry * 1.02):
-                peak_high = float(session_high or current_ltp)
-                max_gain_pct = (
-                    ((peak_high - ref_entry) / ref_entry) * 100.0 if ref_entry > 0 else 0.0
+            sl_level = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            from engine.alert_expiry import is_option_seller
+
+            is_opt_sell = is_option_seller(alert)
+
+            # Invariant: If stop-loss is breached or drawdown exceeds 15%, do NOT intercept as a stagnation scratch!
+            # Allow Section 1 (Stop-Loss Invalidation) to execute the proper structural SL exit.
+            is_sl_breached = (
+                (
+                    (current_ltp <= sl_level)
+                    if not is_opt_sell
+                    else (current_ltp >= sl_level and sl_level > 0)
                 )
-                if max_gain_pct < 12.0:
-                    rvol = float((getattr(alert, "metrics", {}) or {}).get("rvol", 1.0) or 1.0)
-                    is_afternoon_decay = now_ist.hour >= 13 or elapsed_sec >= 3600 or rvol < 0.90
-                    if is_afternoon_decay:
-                        mins_stalled = int(elapsed_sec / 60)
-                        return (
-                            f"Velocity Stagnation Time-Stop: Option momentum stalled for {mins_stalled}m "
-                            f"without reaching +0.5R expansion. Exited at scratch level ₹{current_ltp:.1f} to prevent theta decay."
+                if sl_level > 0
+                else False
+            )
+            is_deep_drawdown = (
+                (ref_entry > 0 and ((ref_entry - current_ltp) / ref_entry) >= 0.15)
+                if not is_opt_sell
+                else False
+            )
+
+            if not is_sl_breached and not is_deep_drawdown:
+                if ref_entry > 0 and current_ltp <= (ref_entry * 1.02):
+                    peak_high = float(session_high or current_ltp)
+                    max_gain_pct = (
+                        ((peak_high - ref_entry) / ref_entry) * 100.0 if ref_entry > 0 else 0.0
+                    )
+                    if max_gain_pct < 12.0:
+                        rvol = float((getattr(alert, "metrics", {}) or {}).get("rvol", 1.0) or 1.0)
+                        is_afternoon_decay = (
+                            now_ist.hour >= 13 or elapsed_sec >= 3600 or rvol < 0.90
                         )
+                        if is_afternoon_decay:
+                            mins_stalled = int(elapsed_sec / 60)
+                            return (
+                                f"Velocity Stagnation Time-Stop: Option momentum stalled for {mins_stalled}m "
+                                f"without reaching +0.5R expansion. Exited at scratch level ₹{current_ltp:.1f} to prevent theta decay."
+                            )
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -1022,9 +1054,31 @@ def evaluate_alert_targets_and_trailing(
       2. Clear, decisive trailing stop recommendation: WHETHER TO TRAIL OR NOT.
       3. Exact price level to trail stop loss to and profit locked.
     """
-    if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") in (
+    stage_u = str(getattr(alert, "stage", "") or "").upper()
+    if getattr(alert, "is_invalidated", False) or stage_u in (
         "INVALIDATED",
         "COMPLETED",
+        "EXPIRED",
+        "CANCELLED",
+        "RUNNER_EXIT",
+        "TIME_STOP_EXIT",
+        "STALK",
+        "PRIMED",
+        "RADAR",
+    ):
+        return None
+
+    if not getattr(alert, "has_triggered", True):
+        return None
+
+    dir_u = str(getattr(alert, "direction", "") or "").upper()
+    atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+    if dir_u == "NEUTRAL" or atype_u in (
+        "DEFINED_RISK_NEUTRAL",
+        "IRON_CONDOR",
+        "SHORT_STRADDLE",
+        "SHORT_STRANGLE",
+        "CREDIT_SPREAD",
     ):
         return None
 
@@ -1049,16 +1103,32 @@ def evaluate_alert_targets_and_trailing(
     if current_ltp is None or current_ltp <= 0:
         return None
 
+    is_option_sell = False
     if is_option:
         # Check if option buyer or option writer/seller:
         act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
         is_option_sell = act in ("SELL", "WRITE", "SHORT")
         if not is_option_sell and alert.stop_loss and alert.target_level:
-            ref_entry = getattr(alert, "option_premium", None) or alert.ltp
-            if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
-                is_option_sell = True
+            ref_entry = (
+                getattr(alert, "option_premium", None)
+                or getattr(alert, "trigger_level", None)
+                or getattr(alert, "entry_price", None)
+                or alert.ltp
+            )
+            # Only if both SL > ref_entry and Target < ref_entry from inception (writing premium for decay)
+            if (
+                ref_entry
+                and alert.stop_loss > ref_entry * 1.05
+                and alert.target_level < ref_entry * 0.95
+            ):
+                has_ratcheted = getattr(alert, "should_trail", False) or any(
+                    m in (getattr(alert, "achieved_milestones", []) or [])
+                    for m in ("T0_5_ACHIEVED", "T1_ACHIEVED", "TRAILING_UPDATE", "BREAKEVEN_LOCKED")
+                )
+                if not has_ratcheted:
+                    is_option_sell = True
 
-        # For option buyers, payoff is upward (is_bullish = True, profit on premium expansion).
+        # For option buyers (both Calls and Puts), payoff is upward (is_bullish = True, profit on premium expansion).
         # For option writers/sellers, payoff is downward (is_bullish = False, profit on premium decay).
         is_bullish = not is_option_sell
 
@@ -1284,7 +1354,7 @@ def evaluate_alert_targets_and_trailing(
     raw_risk = abs(entry - initial_stop)
 
     tp_dist = None
-    if plan and isinstance(plan, dict):
+    if not is_option and plan and isinstance(plan, dict):
         tp = plan.get("trade_plan")
         if isinstance(tp, dict) and tp.get("stop_distance_pts"):
             try:
@@ -1292,7 +1362,33 @@ def evaluate_alert_targets_and_trailing(
             except (ValueError, TypeError):
                 tp_dist = None
 
-    if tp_dist and tp_dist >= min_risk_pts:
+    if is_option:
+        # Universal Scale Separation (Invariant 14.1):
+        # For option setups, initial_risk MUST be strictly in OPTION PREMIUM scale, never underlying spot space!
+        opt_plan = (plan.get("option_plan") if isinstance(plan, dict) else None) or {}
+        opt_init_sl = (
+            opt_plan.get("initial_sl_premium")
+            or opt_plan.get("sl_premium")
+            or (getattr(alert, "metrics", {}) or {}).get("option_stop_loss")
+        )
+        try:
+            opt_init_sl_f = float(opt_init_sl) if opt_init_sl else 0.0
+        except (ValueError, TypeError):
+            opt_init_sl_f = 0.0
+
+        if opt_init_sl_f > 0 and 0 < abs(entry - opt_init_sl_f) < (entry * 0.85):
+            initial_risk = abs(entry - opt_init_sl_f)
+        elif 0 < raw_risk < (entry * 0.85):
+            initial_risk = raw_risk
+        else:
+            # Institutional risk corridor: 22% for stock options, 25% for index options
+            is_idx = bool(
+                getattr(alert, "is_index", False)
+                or str(getattr(alert, "symbol", "")).upper()
+                in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            )
+            initial_risk = max(min_risk_pts, entry * (0.25 if is_idx else 0.22))
+    elif tp_dist and tp_dist >= min_risk_pts:
         initial_risk = tp_dist
     elif raw_risk >= min_risk_pts:
         initial_risk = raw_risk
@@ -1318,6 +1414,14 @@ def evaluate_alert_targets_and_trailing(
         return None
     elif r_multiple < -5.0:
         r_multiple = -5.0
+
+    # Real-Time MFE / MAE Excursion Tracking on active setup
+    cur_mfe = float(getattr(alert, "peak_mfe_r", 0.0) or 0.0)
+    cur_mae = float(getattr(alert, "peak_mae_r", 0.0) or 0.0)
+    if r_multiple > cur_mfe:
+        alert.peak_mfe_r = round(r_multiple, 2)
+    if r_multiple < 0 and abs(r_multiple) > cur_mae:
+        alert.peak_mae_r = round(abs(r_multiple), 2)
 
     # Target levels resolution
     plan_t0_5 = None
@@ -2382,13 +2486,27 @@ def evaluate_alert_targets_and_trailing(
                             )
 
                         # Institutional Session Horizon Boundary:
-                        # For INTRADAY setups, consolidation runway must never extend past the session cutoff (15:15 IST for NSE/BSE/NFO, 23:15 for MCX)
+                        # For INTRADAY setups, consolidation runway must never extend past the effective-dated session cutoff
                         th_str = str(
                             getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY"
                         ).upper()
                         if th_str == "INTRADAY":
                             exch_str = str(getattr(alert, "exchange", "NSE") or "NSE").upper()
-                            cutoff_hour, cutoff_min = (23, 15) if exch_str == "MCX" else (15, 15)
+                            if exch_str == "MCX":
+                                cutoff_hour, cutoff_min = (23, 15)
+                            else:
+                                from market.rule_schedule import intraday_squareoff_cutoff
+
+                                _seg_u = str(getattr(alert, "segment", "") or "").upper()
+                                _is_deriv_eval = (
+                                    exch_str in ("NFO", "BFO")
+                                    or "FNO" in _seg_u
+                                    or is_alert_option_premium_level(alert)
+                                )
+                                _sq_eval = intraday_squareoff_cutoff(
+                                    c_dt.date(), is_derivative=_is_deriv_eval
+                                )
+                                cutoff_hour, cutoff_min = _sq_eval.hour, _sq_eval.minute
                             cutoff_dt = c_dt.replace(
                                 hour=cutoff_hour, minute=cutoff_min, second=0, microsecond=0
                             )
@@ -2524,6 +2642,105 @@ def evaluate_alert_targets_and_trailing(
                         f"[AlertEvaluator] Velocity time-stop evaluation failed for {getattr(alert, 'alert_id', 'unknown')}: {e}",
                         exc_info=True,
                     )
+
+    # ── Rule 4E: 60-Minute "Dead-Money" Dynamic Ratchet to Breakeven ──
+    # For directional trades (option buyers, cash equity, futures breakouts):
+    # If a trade stalls in low-amplitude drift (r_multiple >= 0.35 or pnl_pct >= 3.0) for >= 60 minutes
+    # without reaching T0.5 or T1, holding exposes it to severe theta decay or midday reversal.
+    # Automatically ratchet stop-loss to Breakeven (+0.2% fee cushion) to permanently eliminate downside risk.
+    # Non-directional option sellers & defined-risk neutral spreads are strictly exempted.
+    atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+    is_non_directional = is_option_sell or atype_u in (
+        "DEFINED_RISK_NEUTRAL",
+        "IRON_CONDOR",
+        "SHORT_STRADDLE",
+        "SHORT_STRANGLE",
+    )
+    if (
+        not is_non_directional
+        and not getattr(alert, "is_breakeven_ratcheted", False)
+        and "DEAD_MONEY_BREAKEVEN" not in achieved
+        and "BREAKEVEN_LOCKED" not in achieved
+        and "T0_5_ACHIEVED" not in achieved
+        and "T1_ACHIEVED" not in achieved
+        and "T2_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+        and (r_multiple >= (0.25 if is_option else 0.35) or pnl_pct >= (2.5 if is_option else 3.0))
+    ):
+        is_test_runner = (
+            (getattr(alert, "environment", "LIVE") == "TEST")
+            or (not getattr(alert, "is_live", True))
+            or (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        created_str = (
+            getattr(alert, "original_call_time", None)
+            or getattr(alert, "triggered_at", None)
+            or getattr(alert, "created_at", "")
+        )
+        if created_str:
+            clean_ts = created_str.replace(" IST", "").strip()[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    c_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                    now_ist = datetime.now(IST)
+                    if is_test_runner:
+                        elapsed_s = (now_ist - c_dt).total_seconds()
+                    else:
+                        from market.calendar import get_trading_minutes_elapsed
+
+                        elapsed_s = get_trading_minutes_elapsed(c_dt, now_ist, exchange=exch) * 60.0
+
+                    # 45-minute cutoff for options (to defeat theta decay); 60-minute cutoff for cash/futures
+                    min_dead_money_s = 2700.0 if is_option else 3600.0
+                    if elapsed_s >= min_dead_money_s:
+                        be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
+                        cur_trail = getattr(alert, "trailing_stop", None) or stop
+                        if (is_bullish and be_stop > cur_trail) or (
+                            not is_bullish and be_stop < cur_trail
+                        ):
+                            locked_pts = abs(be_stop - entry)
+                            curr_sym = (
+                                "$"
+                                if (
+                                    getattr(alert, "segment", "") == "CRYPTO"
+                                    or "CRYPTO" in str(getattr(alert, "alert_type", "")).upper()
+                                    or str(getattr(alert, "symbol", ""))
+                                    .upper()
+                                    .endswith(("USDT", "USDC", "BTC"))
+                                )
+                                else "₹"
+                            )
+                            period_label = (
+                                "45-minute option momentum time-stop"
+                                if is_option
+                                else "60-minute consolidation dead-money ratchet"
+                            )
+                            rationale = (
+                                f"{period_label}: Position active for {int(elapsed_s // 60)}m "
+                                f"with modest profit (+{r_multiple:.1f}R / +{pnl_pct:.1f}%). "
+                                f"DECISION: RATCHET STOP TO BREAKEVEN ({curr_sym}{be_stop:,.2f}) to eliminate downside ruin risk and theta drain."
+                            )
+                            return TargetTrailingEvaluation(
+                                new_milestone="DEAD_MONEY_BREAKEVEN",
+                                target_status=getattr(alert, "target_status", None)
+                                or "BREAKEVEN_LOCKED",
+                                should_trail=True,
+                                trailing_decision="TRAIL_DEAD_MONEY_BREAKEVEN",
+                                recommended_stop=be_stop,
+                                trailing_rationale=rationale,
+                                locked_profit_pts=round(locked_pts, 2),
+                                locked_profit_pct=0.2,
+                                r_multiple=round(r_multiple, 2),
+                                pnl_pct=round(pnl_pct, 2),
+                                is_superperforming=is_superperforming,
+                                is_risk_compression=True,
+                                risk_reduction_pct=100.0,
+                            )
+                    break
+                except Exception as e_dead_money:
+                    logger.debug(f"[AlertEvaluator] Dead-money evaluation note: {e_dead_money}")
 
     # Fallback: Early Sub-Target Phase (< 1.5R, No compression conditions met)
     rationale = (

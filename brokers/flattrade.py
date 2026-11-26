@@ -38,7 +38,9 @@ from brokers.base import (
 logger = logging.getLogger("brokers.flattrade")
 log = logger
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "flattrade.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("flattrade.json")
 DEFAULT_API_URL = "https://piconnect.flattrade.in/PiConnectAPI/"
 DEFAULT_WS_URL = "wss://piconnect.flattrade.in/PiConnectWSAPI/"
 AUTH_API_BASE = "https://authapi.flattrade.in"
@@ -57,6 +59,25 @@ _ORDER_TYPE_MAP = {"MARKET": "MKT", "LIMIT": "LMT", "SL": "SL-LMT", "SL-M": "SL-
 _IST = ZoneInfo("Asia/Kolkata")
 _FLATTRADE_RESOLVED_CACHE: dict[str, dict[str, str]] = {}
 _CACHE_LOCK = threading.Lock()
+_GLOBAL_FT_AUTH_LOCK = threading.Lock()
+_GLOBAL_FT_AUTH_BACKOFF_UNTIL: float = 0.0
+_GLOBAL_FT_AUTH_LAST_ERROR: str = ""
+_GLOBAL_FT_AUTH_LAST_WARN_TS: float = 0.0
+
+
+def _reset_auth_backoff() -> None:
+    global _GLOBAL_FT_AUTH_BACKOFF_UNTIL, _GLOBAL_FT_AUTH_LAST_ERROR, _GLOBAL_FT_AUTH_LAST_WARN_TS
+    _GLOBAL_FT_AUTH_BACKOFF_UNTIL = 0.0
+    _GLOBAL_FT_AUTH_LAST_ERROR = ""
+    _GLOBAL_FT_AUTH_LAST_WARN_TS = 0.0
+
+
+def _record_ft_auth_failure(err_str: str) -> None:
+    global _GLOBAL_FT_AUTH_BACKOFF_UNTIL, _GLOBAL_FT_AUTH_LAST_ERROR
+    _GLOBAL_FT_AUTH_LAST_ERROR = err_str
+    upper = err_str.upper()
+    cooldown = 300.0 if ("INVALID_IP" in upper or "INVALID_SESSION" in upper) else 60.0
+    _GLOBAL_FT_AUTH_BACKOFF_UNTIL = time.time() + cooldown
 
 
 def _today_ist() -> str:
@@ -293,13 +314,26 @@ class FlattradeAPI(BrokerAPI):
             and self._api_key
             and self._api_secret
         ):
-            try:
-                log.info("[Flattrade] Auto-authenticating via headless TOTP flow...")
-                self.complete_login()
-                return bool(self._token and self._token_date == _today_ist())
-            except Exception as e_login:
-                log.warning(f"[Flattrade] Headless auto-login attempt failed: {e_login}")
-                return False
+            now = time.time()
+            with _GLOBAL_FT_AUTH_LOCK:
+                rem = _GLOBAL_FT_AUTH_BACKOFF_UNTIL - now
+                if rem > 0:
+                    global _GLOBAL_FT_AUTH_LAST_WARN_TS
+                    if now - _GLOBAL_FT_AUTH_LAST_WARN_TS >= 120.0:
+                        _GLOBAL_FT_AUTH_LAST_WARN_TS = now
+                        log.debug(
+                            f"[Flattrade] Headless auto-login in cooldown ({rem:.0f}s remaining): {_GLOBAL_FT_AUTH_LAST_ERROR}"
+                        )
+                    return False
+                try:
+                    log.info("[Flattrade] Auto-authenticating via headless TOTP flow...")
+                    self.complete_login()
+                    return bool(self._token and self._token_date == _today_ist())
+                except Exception as e_login:
+                    err_str = str(e_login)
+                    _record_ft_auth_failure(err_str)
+                    log.warning(f"[Flattrade] Headless auto-login attempt failed: {err_str}")
+                    return False
         return False
 
     def get_login_url(self) -> str:
@@ -437,6 +471,7 @@ class FlattradeAPI(BrokerAPI):
             name=profile.name,
             email=profile.email,
         )
+        _reset_auth_backoff()
         log.info(f"[Flattrade] Automated TOTP login successful for user {user_id}")
         return profile
 
@@ -493,7 +528,8 @@ class FlattradeAPI(BrokerAPI):
                     )
             raw_body += f"&jKey={self._token}"
 
-        # Rate Governor pacing
+        # Rate Governor pacing (fail-closed outside explicit ORDER priority to prevent 429 storms)
+        gate = None
         try:
             from market.flattrade_rate_gate import FlattradeCallCategory, get_flattrade_rate_gate
 
@@ -517,19 +553,31 @@ class FlattradeAPI(BrokerAPI):
                 category = FlattradeCallCategory.DEPTH
 
             gate = get_flattrade_rate_gate()
-            gate_timeout = 5.0 if category == FlattradeCallCategory.ORDER else 15.0
-            if not gate.acquire(category=category, timeout=gate_timeout):
-                log.warning(
-                    f"[Flattrade] Rate gate wait timed out for {endpoint} ({category.name})"
-                )
+            if category == FlattradeCallCategory.ORDER:
+                gate_timeout = 5.0
+            elif category == FlattradeCallCategory.URGENT_QUOTE:
+                gate_timeout = 8.0
+            elif category == FlattradeCallCategory.HISTORICAL:
+                gate_timeout = 30.0
+            else:
+                gate_timeout = 25.0
+            acquired = gate.acquire(category=category, timeout=gate_timeout)
         except Exception as e_gate:
             log.debug(f"[Flattrade] Rate gate bypass notice: {e_gate}")
+            acquired = True
+
+        if not acquired:
+            msg = f"[Flattrade] Rate gate wait timed out for {endpoint} ({category.name})"
+            log.warning(msg)
+            raise TimeoutError(msg)
 
         response = self._client.post(
             f"{self.api_url}{endpoint}",
             content=raw_body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        if response.status_code == 429 and gate is not None:
+            gate.notify_rate_limited(2.0)
         if endpoint == "SearchScrip" and response.status_code == 404:
             return {"stat": "Ok", "values": []}
         response.raise_for_status()
@@ -704,11 +752,19 @@ class FlattradeAPI(BrokerAPI):
         with _CACHE_LOCK:
             if key in _FLATTRADE_RESOLVED_CACHE:
                 cached = _FLATTRADE_RESOLVED_CACHE[key]
-                if cached is None:
+                if isinstance(cached, tuple) and len(cached) == 2:
+                    neg_ts, neg_val = cached
+                    if neg_val is None and (time.time() - neg_ts) < 60.0:
+                        raise RuntimeError(
+                            f"Flattrade could not resolve instrument {instrument} (cached negative)"
+                        )
+                    _FLATTRADE_RESOLVED_CACHE.pop(key, None)
+                elif cached is None:
                     raise RuntimeError(
                         f"Flattrade could not resolve instrument {instrument} (cached negative)"
                     )
-                return cached
+                else:
+                    return cached
         if key in self._instrument_cache:
             with _CACHE_LOCK:
                 _FLATTRADE_RESOLVED_CACHE[key] = self._instrument_cache[key]
@@ -756,7 +812,7 @@ class FlattradeAPI(BrokerAPI):
         values = result.get("values") or []
         if not values:
             with _CACHE_LOCK:
-                _FLATTRADE_RESOLVED_CACHE[key] = None
+                _FLATTRADE_RESOLVED_CACHE[key] = (time.time(), None)
             raise RuntimeError(f"Flattrade could not resolve instrument {instrument}")
 
         exact = next(
@@ -790,13 +846,11 @@ class FlattradeAPI(BrokerAPI):
         }
         if not resolved["token"]:
             with _CACHE_LOCK:
-                _FLATTRADE_RESOLVED_CACHE[key] = None
+                _FLATTRADE_RESOLVED_CACHE[key] = (time.time(), None)
             raise RuntimeError(f"Flattrade instrument lookup omitted token for {instrument}")
 
         with _CACHE_LOCK:
             _FLATTRADE_RESOLVED_CACHE[key] = resolved
-        self._instrument_cache[key] = resolved
-        return resolved
 
         lot_size = _int(exact.get("ls"), 0)
         tick_size = _num(exact.get("ti"), 0.0)
@@ -889,7 +943,8 @@ class FlattradeAPI(BrokerAPI):
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        max_workers = min(16, len(instruments))
+        # Cap concurrent threads to 4 for 8 req/s Pi Connect ceiling to prevent 16-way waiter storms.
+        max_workers = min(4, len(instruments))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_fetch_single, inst): inst for inst in instruments}
             for fut in as_completed(futures):
@@ -987,7 +1042,29 @@ class FlattradeAPI(BrokerAPI):
             }
         else:
             endpoint = "TPSeries"
-            minutes = interval.lower().replace("min", "")
+            _intrv_map = {
+                "minute": "1",
+                "1minute": "1",
+                "1m": "1",
+                "3minute": "3",
+                "3m": "3",
+                "5minute": "5",
+                "5m": "5",
+                "10minute": "10",
+                "10m": "10",
+                "15minute": "15",
+                "15m": "15",
+                "30minute": "30",
+                "30m": "30",
+                "60minute": "60",
+                "60m": "60",
+                "1h": "60",
+            }
+            norm_intv = interval.lower().strip()
+            minutes = _intrv_map.get(
+                norm_intv,
+                norm_intv.replace("minute", "").replace("min", "").replace("m", "") or "5",
+            )
             payload = {
                 "exch": resolved["exch"],
                 "token": resolved["token"],
@@ -1063,22 +1140,51 @@ class FlattradeAPI(BrokerAPI):
 
         # 2. Get spot price to establish center strike (Noren requires valid positive strprc)
         spot_price = 0.0
-        try:
-            spot_q = self.get_quote([f"{prefix}{clean_sym}"])
-            if (
-                spot_q
-                and spot_q.get(f"{prefix}{clean_sym}")
-                and spot_q[f"{prefix}{clean_sym}"].last_price > 0
-            ):
-                spot_price = spot_q[f"{prefix}{clean_sym}"].last_price
-        except Exception as e_spot:
-            log.debug(f"[Flattrade] Spot quote lookup failed for {clean_sym}: {e_spot}")
+        quote_candidates = [f"{prefix}{clean_sym}"]
+        if is_currency or is_commodity:
+            if fut_tsym and fut_tsym != clean_sym:
+                quote_candidates.append(f"{exch}:{fut_tsym}")
+        elif not is_bse:
+            if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+                idx_alias = {
+                    "NIFTY": "NSE:NIFTY50-INDEX",
+                    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+                }.get(clean_sym, f"NSE:{clean_sym}-INDEX")
+                quote_candidates.insert(0, idx_alias)
+            else:
+                quote_candidates.insert(0, f"NSE:{clean_sym}-EQ")
+                if fut_tsym and fut_tsym != clean_sym:
+                    quote_candidates.append(f"NFO:{fut_tsym}")
+
+        for q_sym in dict.fromkeys(quote_candidates):
+            try:
+                spot_q = self.get_quote([q_sym])
+                q_obj = spot_q.get(q_sym) if spot_q else None
+                if q_obj and getattr(q_obj, "last_price", 0.0) > 0:
+                    spot_price = float(q_obj.last_price)
+                    break
+            except Exception as e_spot:
+                log.debug(f"[Flattrade] Spot quote lookup failed for {q_sym}: {e_spot}")
 
         if spot_price <= 0:
-            from market.symbol_master import get_strike_step
+            try:
+                from market.quotes import get_ltp
 
-            step = get_strike_step(clean_sym, spot=100.0)
-            spot_price = step * 100
+                cached_ltp = get_ltp(
+                    f"NSE:{clean_sym}-EQ"
+                    if not (is_commodity or is_currency or is_bse)
+                    else f"{prefix}{clean_sym}"
+                )
+                if cached_ltp and float(cached_ltp) > 0:
+                    spot_price = float(cached_ltp)
+            except Exception as e_cached_ltp:
+                log.debug(f"[Flattrade] Cached LTP lookup skipped for {clean_sym}: {e_cached_ltp}")
+
+        if spot_price <= 0:
+            log.info(
+                f"[Flattrade] Skipping option chain for {clean_sym}: live spot quote unavailable."
+            )
+            return []
 
         atm_strike = int(round(spot_price))
 
@@ -1095,8 +1201,16 @@ class FlattradeAPI(BrokerAPI):
         if not rows:
             return []
 
-        # Batch pre-fetch live quotes for all strikes in parallel
-        tokens_to_fetch = [r.get("token") for r in rows if r.get("token")]
+        # Batch pre-fetch live quotes for strikes closest to ATM without queueing deep-OTM tails.
+        quote_candidates = [
+            r
+            for r in rows
+            if isinstance(r, dict)
+            and r.get("token")
+            and not (_num(r.get("lp")) > 0 and _int(r.get("oi")) > 0)
+        ]
+        quote_candidates.sort(key=lambda r: abs(_num(r.get("strprc")) - atm_strike))
+        tokens_to_fetch = [r.get("token") for r in quote_candidates[:40] if r.get("token")]
         strike_quotes: dict[str, dict[str, Any]] = {}
         if tokens_to_fetch:
             from concurrent.futures import ThreadPoolExecutor
@@ -1105,10 +1219,11 @@ class FlattradeAPI(BrokerAPI):
                 try:
                     res = self._post("GetQuotes", {"exch": exch, "token": tk})
                     return tk, res if isinstance(res, dict) else {}
-                except Exception:
+                except Exception as exc:
+                    log.debug(f"[Flattrade] Option strike quote skipped for token {tk}: {exc}")
                     return tk, {}
 
-            workers = min(16, len(tokens_to_fetch))
+            workers = min(4, len(tokens_to_fetch))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 for tk, q_data in executor.map(_fetch_quote, tokens_to_fetch):
                     strike_quotes[tk] = q_data
@@ -1282,7 +1397,20 @@ class FlattradeAPI(BrokerAPI):
                                 ws, sorted(self._subscriptions), task="t"
                             )
                     else:
-                        log.warning(f"[Flattrade] WebSocket authentication failed: {msg}")
+                        log.warning(
+                            f"[Flattrade] WebSocket authentication rejected ({msg}). "
+                            "Invalidating cached session token and closing socket."
+                        )
+                        self._token = ""
+                        self._token_date = ""
+                        try:
+                            self.token_file.unlink(missing_ok=True)
+                        except Exception as e_del:
+                            logger.debug(f"[brokers.flattrade] Token unlink error: {e_del}")
+                        try:
+                            ws.close()
+                        except Exception as e_cls:
+                            logger.debug(f"[brokers.flattrade] WS close after ak reject: {e_cls}")
                 elif (
                     msg_type in {"tk", "tf", "df", "dk"} or "lp" in msg or "ltp" in msg
                 ) and tick_handler:
@@ -1297,9 +1425,20 @@ class FlattradeAPI(BrokerAPI):
                 logger.debug(f"[brokers.flattrade] WebSocket message error: {e_suppressed}")
 
         def _on_error(ws, error):
-            log.warning(f"[Flattrade] WebSocket notice: {error}")
+            err_str = str(error)
+            if "1000" in err_str or "normally" in err_str.lower():
+                log.info(f"[Flattrade] WebSocket notice: {error}")
+            else:
+                log.warning(f"[Flattrade] WebSocket notice: {error}")
+
+        _hb_stop = threading.Event()
+        _hb_lock = threading.Lock()
+
+        def _stop_heartbeat() -> None:
+            _hb_stop.set()
 
         def _on_close(ws, close_status_code, close_msg):
+            _stop_heartbeat()
             log.info(f"[Flattrade] WebSocket closed: code={close_status_code}, msg={close_msg}")
             if close_status_code == 1008:
                 log.warning(
@@ -1313,6 +1452,14 @@ class FlattradeAPI(BrokerAPI):
                 except Exception as e_del:
                     logger.debug(f"[brokers.flattrade] Token unlink error: {e_del}")
 
+        def _heartbeat_loop(ws) -> None:
+            while not _hb_stop.wait(timeout=20.0) and not self._ws_stop.is_set():
+                try:
+                    if getattr(getattr(ws, "sock", None), "connected", False):
+                        ws.send(json.dumps({"t": "h"}))
+                except Exception:
+                    break
+
         def _on_open(ws):
             auth_msg = {
                 "t": "a",
@@ -1323,6 +1470,11 @@ class FlattradeAPI(BrokerAPI):
             }
             ws.send(json.dumps(auth_msg))
             log.info("[Flattrade] WebSocket connection opened and authentication sent.")
+            with _hb_lock:
+                _hb_stop.clear()
+                threading.Thread(
+                    target=_heartbeat_loop, args=(ws,), daemon=True, name="flattrade-ws-hb"
+                ).start()
 
         def _run():
             backoff = 3.0
@@ -1362,9 +1514,11 @@ class FlattradeAPI(BrokerAPI):
                         on_error=_on_error,
                         on_close=_on_close,
                     )
-                    self._ws.run_forever(ping_interval=30, ping_timeout=10)
+                    self._ws.run_forever(ping_interval=30, ping_timeout=15)
                 except Exception as e_ws:
                     logger.debug(f"[Flattrade] WebSocket loop notice: {e_ws}")
+                finally:
+                    _stop_heartbeat()
                 if not self._ws_stop.is_set():
                     if self._ws_stop.wait(timeout=backoff):
                         break
@@ -1404,6 +1558,14 @@ class FlattradeAPI(BrokerAPI):
                     )
             if tokens:
                 self._send_subscription_batches(self._ws, tokens, task="u")
+
+    def subscribe_websocket(self, instruments: list[str], on_tick: Optional[Any] = None) -> None:
+        """Canonical streaming interface matching primary adapters: ensures WS started and subscribes."""
+        if not self._ws_thread or not self._ws_thread.is_alive():
+            if on_tick is not None:
+                self.start_websocket(on_tick)
+        if instruments:
+            self.subscribe(instruments)
 
     def stop_websocket(self) -> None:
         self._ws_stop.set()

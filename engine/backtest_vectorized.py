@@ -192,60 +192,87 @@ def vectorized_backtest(
     df: pd.DataFrame,
     strategy_name: str = "rsi",
     symbol: str = "UNKNOWN",
+    *,
+    segment: str = "EQUITY_DELIVERY",
+    slippage_bps: float = 5.0,
+    include_charges: bool = True,
 ) -> BacktestResult:
     """
-    Run vectorized backtest on pre-loaded OHLCV DataFrame.
-    Returns BacktestResult with same fields as event-driven engine.
-
-    Args:
-        df: DataFrame with columns: open, high, low, close, volume. Date-indexed.
-        strategy_name: One of rsi, macd, bollinger/bb, ma/ema.
-        symbol: Ticker symbol for display.
+    Run genuinely vectorized NumPy/pandas backtest on OHLCV DataFrame with statutory charges & slippage.
+    Returns BacktestResult matching event-driven schema.
     """
+    from engine.charges import calculate_transaction_charges
+
     close = df["close"].astype(float)
     if len(close) < 30:
         raise ValueError(f"Not enough data: {len(close)} bars (need ≥30)")
 
-    # Get signal function
     signal_fn = _STRATEGY_MAP.get(strategy_name.lower(), _signals_rsi)
-    signals = signal_fn(close)
+    signals = signal_fn(close).fillna(0).astype(int)
 
-    # ── Generate trades ────────────────────────────────────────
-    # Position: 1 = long, 0 = flat. Enter on buy signal, exit on sell.
-    position = pd.Series(0, index=close.index, dtype=int)
-    in_trade = False
+    # Vectorized state propagation: replace 0 with NaN, ffill active direction, clamp flat (0) where -1
+    sig_arr = signals.to_numpy(dtype=np.int8)
+    raw_state = np.where(sig_arr != 0, sig_arr, np.nan)
+    pos_series = pd.Series(raw_state, index=close.index).ffill().fillna(0.0)
+    pos_arr = (pos_series.to_numpy(dtype=np.float64) == 1.0).astype(np.int8)
+
+    # Close any open position on final bar cleanly so trade round-trips are balanced
+    prev_pos = np.roll(pos_arr, 1)
+    prev_pos[0] = 0
+    entry_mask = (pos_arr == 1) & (prev_pos == 0)
+    exit_mask = (pos_arr == 0) & (prev_pos == 1)
+
+    if pos_arr[-1] == 1:
+        pos_arr[-1] = 0
+        exit_mask[-1] = True
+
+    entry_indices = np.flatnonzero(entry_mask)
+    exit_indices = np.flatnonzero(exit_mask)
+    close_arr = close.to_numpy(dtype=np.float64)
+    idx_arr = close.index
+
+    slip_frac = max(0.0, float(slippage_bps)) / 10_000.0
     entries: list[tuple] = []
     exits: list[tuple] = []
-    entry_price = 0.0
-    entry_date = None
+    trade_bar_costs = np.zeros(len(close_arr), dtype=np.float64)
 
-    for i, (date, sig) in enumerate(signals.items()):
-        price = float(close.iloc[i])
-        if sig == 1 and not in_trade:
-            in_trade = True
-            entry_price = price
-            entry_date = date
-            position.iloc[i] = 1
-        elif sig == -1 and in_trade:
-            in_trade = False
-            pct = (price / entry_price - 1) * 100
-            entries.append((entry_date, entry_price))
-            exits.append((date, price, pct))
-            position.iloc[i] = 0
-        elif in_trade:
-            position.iloc[i] = 1
+    n_pairs = min(len(entry_indices), len(exit_indices))
+    for k in range(n_pairs):
+        e_idx = int(entry_indices[k])
+        x_idx = int(exit_indices[k])
+        if x_idx <= e_idx:
+            continue
+        raw_e = float(close_arr[e_idx])
+        raw_x = float(close_arr[x_idx])
+        eff_e = raw_e * (1.0 + slip_frac)
+        eff_x = raw_x * (1.0 - slip_frac)
 
-    # Close any open trade at end
-    if in_trade:
-        last_price = float(close.iloc[-1])
-        pct = (last_price / entry_price - 1) * 100
-        entries.append((entry_date, entry_price))
-        exits.append((close.index[-1], last_price, pct))
+        cost_pct = 0.0
+        if include_charges and eff_e > 0:
+            buy_c = float(
+                calculate_transaction_charges(
+                    price=eff_e, quantity=1, segment=segment, side="BUY"
+                ).total_charges
+            )
+            sell_c = float(
+                calculate_transaction_charges(
+                    price=eff_x, quantity=1, segment=segment, side="SELL"
+                ).total_charges
+            )
+            cost_pct = (buy_c + sell_c) / eff_e
+            trade_bar_costs[x_idx] = cost_pct
 
-    # ── Equity curve ────────────────────────────────────────────
-    daily_returns = close.pct_change().fillna(0)
-    strategy_returns = daily_returns * position.shift(1).fillna(0)
-    equity = (1 + strategy_returns).cumprod() * 100
+        net_pct = ((eff_x / max(eff_e, 1e-9)) - 1.0 - cost_pct) * 100.0
+        entries.append((idx_arr[e_idx], round(eff_e, 4)))
+        exits.append((idx_arr[x_idx], round(eff_x, 4), net_pct))
+
+    # Vectorized net strategy return stream (apply execution slippage & statutory drag on transitions)
+    position = pd.Series(pos_arr, index=close.index, dtype=float)
+    daily_returns = close.pct_change().fillna(0.0)
+    entry_drag = pd.Series(np.where(entry_mask, slip_frac, 0.0), index=close.index)
+    exit_drag = pd.Series(np.where(exit_mask, slip_frac, 0.0) + trade_bar_costs, index=close.index)
+    strategy_returns = (daily_returns * position.shift(1).fillna(0.0)) - entry_drag - exit_drag
+    equity = (1.0 + strategy_returns).cumprod() * 100.0
     equity_list = equity.tolist()
 
     # ── Metrics ────────────────────────────────────────────────
@@ -253,10 +280,10 @@ def vectorized_backtest(
     wins = [r for r in trade_rets if r > 0]
     losses = [r for r in trade_rets if r <= 0]
 
-    total_return = float(equity.iloc[-1] - 100)
-    bh_return = (float(close.iloc[-1]) / float(close.iloc[0]) - 1) * 100
+    total_return = float(equity.iloc[-1] - 100.0)
+    bh_return = (float(close.iloc[-1]) / float(close.iloc[0]) - 1.0) * 100.0
 
-    years = len(close) / 252
+    years = len(close) / 252.0
     cagr = _calc_cagr(total_return, years)
     sharpe = _calc_sharpe(strategy_returns)
     max_dd = _calc_max_drawdown(equity)

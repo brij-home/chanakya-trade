@@ -18,7 +18,6 @@ import logging
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -60,7 +59,9 @@ class CalibrationRunner:
         try:
             import json
 
-            cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+            from config.paths import app_data_path
+
+            cal_path = app_data_path("calibration", "index_calibration.json")
             if cal_path.exists():
                 with open(cal_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -80,7 +81,9 @@ class CalibrationRunner:
         Returns True if the file does not exist, was generated > max_age_hours ago,
         or was generated on a calendar date prior to today.
         """
-        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        from config.paths import app_data_path
+
+        cal_path = app_data_path("calibration", "index_calibration.json")
         if not cal_path.exists():
             return True
 
@@ -133,6 +136,32 @@ class CalibrationRunner:
             logger.info(f"[CalibrationRunner] Background calibration initiated at {now_str}")
             return True, f"Calibration started in background at {now_str}."
 
+    def _collect_options_replay_diagnostics(self) -> dict[str, Any]:
+        """Run research-only purged walk-forward replay on cached warehouse bars if available."""
+        try:
+            from engine.historical_warehouse import historical_warehouse
+            from engine.options_replay import purged_walk_forward_score
+            from market.symbol_master import resolve_active_future
+
+            fut = resolve_active_future("NIFTY") or "NIFTY"
+            df_5m = historical_warehouse.load_bars(fut, interval="5m")
+            if df_5m is None or df_5m.empty or len(df_5m) < 60:
+                return {"status": "UNCALIBRATED", "reason": "INSUFFICIENT_WAREHOUSE_BARS"}
+
+            close = df_5m["close"].astype(float)
+            ema_fast = close.ewm(span=9, adjust=False).mean()
+            ema_slow = close.ewm(span=21, adjust=False).mean()
+            cross_up = (ema_fast > ema_slow) & (ema_fast.shift(1) <= ema_slow.shift(1))
+            entries = [int(i) for i in range(len(cross_up)) if bool(cross_up.iloc[i])]
+            if not entries:
+                return {"status": "UNCALIBRATED", "heldout_trades": 0}
+            res = purged_walk_forward_score(df_5m, entries, segment="FUTURES")
+            res["provenance"] = "RESEARCH_ONLY_WAREHOUSE_REPLAY"
+            return res
+        except Exception as exc_rep:
+            logger.debug(f"[CalibrationRunner] Options replay diagnostics skipped: {exc_rep}")
+            return {"status": "UNCALIBRATED", "reason": str(exc_rep)}
+
     def _worker_run(self) -> None:
         """Worker thread executing the 90-day calibration steps."""
         try:
@@ -151,6 +180,7 @@ class CalibrationRunner:
             out_file = save_calibration_payload(
                 tod_curve, index_metrics, fno_metrics, coiling_squeezes
             )
+            replay_diag = self._collect_options_replay_diagnostics()
 
             now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             with self._lock:
@@ -163,6 +193,7 @@ class CalibrationRunner:
                     "indices_count": len(index_metrics),
                     "fno_stocks_count": len(fno_metrics),
                     "coiling_squeezes_count": len(coiling_squeezes),
+                    "options_replay": replay_diag,
                 }
             logger.info(
                 f"[CalibrationRunner] Calibration completed successfully at {now_str}: "

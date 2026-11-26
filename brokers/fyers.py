@@ -46,7 +46,6 @@ import time
 import datetime as dt
 from datetime import datetime
 from market.instruments import format_strike
-from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -64,7 +63,9 @@ from brokers.base import (
     Order,
 )
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "fyers.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("fyers.json")
 TOKEN_EXPIRY = 24 * 3600  # FYERS tokens expire daily at 06:30 IST; hard upper bound.
 _GLOBAL_FYERS_AUTH_LOCK = threading.RLock()
 _GLOBAL_AUTH_LAST_ATTEMPT_TS: float = 0.0
@@ -272,6 +273,39 @@ _REVERSE_WEEKLY_MONTH_MAP = {
 }
 
 
+def _get_fyers_contract_lot_size(symbol: str, underlying: str = "") -> int:
+    """Authoritatively resolve contract lot size from exchange symbol master, falling back to canonical F&O master."""
+    try:
+        from market.symbol_master import get_lot_size as _master_lot
+
+        lot = _master_lot(symbol)
+        if lot > 1:
+            return lot
+    except Exception as e_lot:
+        logger.debug(f"[fyers] Symbol master lot resolution fallback for {symbol}: {e_lot}")
+
+    try:
+        from market.instruments import get_fno_lot_size as _inst_lot
+
+        clean_und = (
+            underlying.upper()
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("-INDEX", "")
+            .strip()
+        )
+        lot = _inst_lot(clean_und)
+        if lot > 0:
+            return lot
+    except Exception as e_inst:
+        logger.debug(
+            f"[fyers] Instrument master lot resolution fallback for {underlying}: {e_inst}"
+        )
+
+    return 1
+
+
 def format_fyers_option_symbol(
     underlying: str,
     expiry_date: Any,
@@ -419,7 +453,7 @@ def _resolve_commodity_contract(symbol: str, ref_time: dt.datetime | None = None
 
     # NATURALGAS: monthly, expires ~25th (tender period starts ~23rd).
     # 48h pre-tender auto-roll activates on day 23.
-    if clean in ("NATURALGAS", "NATURALGASM"):
+    if clean in ("NATURALGAS", "NATURALGASM", "NATGASMINI"):
         target_dt = now if now.day <= 22 else now + dt.timedelta(days=15)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
@@ -624,16 +658,22 @@ def _get_sdk():
 
 
 def _is_fyers_auth_error(data: Any) -> bool:
-    """Check if Fyers API response indicates an invalid, expired, or rejected session token."""
+    """Check if Fyers API response indicates an invalid, expired, or rejected session token.
+
+    NOTE: fyers_apiv3 uses code -99 in ``FyersServiceSync.error_resp`` as a catch-all for
+    network/DNS/transport failures with message ``"Bad request"``. Never treat -99 alone as
+    token expiration unless the error message explicitly confirms an authentication failure.
+    """
     if not isinstance(data, dict):
         return False
-    if data.get("code") in (-14, -15, -16, -17, -99, 401, 403):
+    if data.get("code") in (-14, -15, -16, -17, 401, 403):
         return True
     msg = str(data.get("message", "")).lower()
     return any(
         token_err in msg
         for token_err in (
             "could not authenticate",
+            "authentication failed",
             "token is expired",
             "token expired",
             "valid token",
@@ -646,6 +686,72 @@ def _is_fyers_auth_error(data: Any) -> bool:
             "unauthorized",
         )
     )
+
+
+def _is_fyers_rate_limit_error(data: Any = None, err_msg: str = "") -> bool:
+    """Check if Fyers API response or exception indicates HTTP 429 / code -360 throttling."""
+    code = data.get("code") if isinstance(data, dict) else None
+    if code in (-360, 429):
+        return True
+    msg = (err_msg or (str(data.get("message", "")) if isinstance(data, dict) else "")).lower()
+    return any(
+        token in msg
+        for token in (
+            "429",
+            "-360",
+            "rate limit",
+            "api request limit",
+            "plan limit",
+            "5,000 requests",
+            "too many requests",
+        )
+    )
+
+
+def _is_fyers_transport_error(data: Any) -> bool:
+    """Return True when fyers_apiv3 returns its SDK catch-all -99 transport error."""
+    if not isinstance(data, dict) or data.get("code") != -99:
+        return False
+    if _is_fyers_auth_error(data):
+        return False
+    msg = str(data.get("message", "")).strip().lower()
+    return msg in ("bad request", "invalid input please check your input", "")
+
+
+def _record_fyers_failure_if_applicable(
+    data: Any = None, err_msg: str = "", default_status_code: int = 0
+) -> bool:
+    """Record auth, rate-limit, or SDK transport failures onto the Fyers circuit breaker."""
+    raw_msg = err_msg or (
+        str(data.get("message", "Unknown error")) if isinstance(data, dict) else str(data)
+    )
+    code = data.get("code", default_status_code) if isinstance(data, dict) else default_status_code
+
+    if _is_fyers_auth_error(data):
+        get_fyers_circuit_breaker().record_failure(status_code=code or -16, error_message=raw_msg)
+        return True
+
+    if _is_fyers_rate_limit_error(data, raw_msg):
+        rate_code = code if code in (-360, 429) else 429
+        try:
+            _fyers_rate_limiter.notify_rate_limited(2.5)
+        except Exception as exc:
+            logger.debug(f"[brokers.fyers] Rate limiter notification skipped: {exc}")
+        get_fyers_circuit_breaker().record_failure(
+            status_code=rate_code,
+            error_message=raw_msg,
+            is_429=(rate_code == 429 or "429" in raw_msg),
+        )
+        return True
+
+    if _is_fyers_transport_error(data):
+        get_fyers_circuit_breaker().record_failure(
+            status_code=-99,
+            error_message=f"Fyers SDK network/transport error (-99: {raw_msg or 'Bad request'})",
+        )
+        return True
+
+    return False
 
 
 class FyersAPI(BrokerAPI):
@@ -955,7 +1061,11 @@ class FyersAPI(BrokerAPI):
                     )
 
                 # ── Step 2: Verify TOTP ───────────────────────────────────────────
-                totp = pyotp.TOTP(self._totp_secret).now()
+                # Guard against 30s TOTP boundary rollover (~last 3s of window)
+                _totp_rem = 30 - (int(time.time()) % 30)
+                if _totp_rem <= 3:
+                    time.sleep(_totp_rem + 0.5)
+                totp = pyotp.TOTP((self._totp_secret or "").strip().replace(" ", "")).now()
                 r2 = _req.post(
                     f"{BASE_VAGATOR}/verify_otp",
                     json={"request_key": request_key, "otp": totp},
@@ -1069,13 +1179,14 @@ class FyersAPI(BrokerAPI):
                 return access_token
 
             except Exception as e:
+                err_low = str(e).lower()
                 if attempt < MAX_ATTEMPTS and (
-                    "step 5" in str(e).lower() or "invalid auth code" in str(e).lower()
+                    "step 5" in err_low or "invalid auth code" in err_low or "wrong totp" in err_low
                 ):
                     logger.warning(
                         f"[FyersAPI] Retrying headless auto-login flow (attempt {attempt}/{MAX_ATTEMPTS}) due to: {e}"
                     )
-                    time.sleep(1.5)
+                    time.sleep(2.5 if "wrong totp" in err_low else 1.5)
                     continue
                 raise
 
@@ -1093,17 +1204,7 @@ class FyersAPI(BrokerAPI):
         with _GLOBAL_FYERS_AUTH_LOCK:
             # ── Path A: Headless auto-login (TOTP + PIN) ──────────────────────
             if self._fy_id and self._totp_secret and self._pin and not auth_code:
-                # Double-check if token was already refreshed while waiting for lock
-                if self._access_token and not self._is_token_expired(self._token_ts):
-                    return self.get_profile()
-
-                # Check if token on disk was refreshed by another process
-                self._load_token()
-                if self._access_token and not self._is_token_expired(self._token_ts):
-                    _reset_auth_backoff()
-                    return self.get_profile()
-
-                # Check if currently cooling down from previous failure / 429
+                # Check if currently cooling down from previous failure / 429 / -360
                 backoff_rem = _get_auth_backoff_remaining()
                 if backoff_rem > 0:
                     now = time.time()
@@ -1116,6 +1217,21 @@ class FyersAPI(BrokerAPI):
                     raise RuntimeError(
                         f"Fyers auto-login in cooldown ({backoff_rem:.1f}s remaining): {_GLOBAL_AUTH_LAST_ERROR}"
                     )
+
+                # Double-check if token was already refreshed while waiting for lock
+                if self._access_token and not self._is_token_expired(self._token_ts):
+                    profile = self.get_profile()
+                    _reset_auth_backoff()
+                    get_fyers_circuit_breaker().record_auth_success()
+                    return profile
+
+                # Check if token on disk was refreshed by another process
+                self._load_token()
+                if self._access_token and not self._is_token_expired(self._token_ts):
+                    profile = self.get_profile()
+                    _reset_auth_backoff()
+                    get_fyers_circuit_breaker().record_auth_success()
+                    return profile
                 try:
                     _GLOBAL_AUTH_LAST_ATTEMPT_TS = time.time()
                     token = self._auto_login_totp()
@@ -1123,9 +1239,20 @@ class FyersAPI(BrokerAPI):
                     self._token_ts = time.time()
                     self._fyers = None
                     self._save_token(token)
+                    # Only clear a token-expiry circuit breaker trip before the verification
+                    # get_profile() probe; rate-limit/transport trips must wait for cooldown.
+                    cb = get_fyers_circuit_breaker()
+                    if (
+                        cb.is_tripped()
+                        and not cb._daily_quota_exhausted
+                        and "token invalid or expired" in cb._trip_reason.lower()
+                    ):
+                        cb.record_auth_success()
+
+                    profile = self.get_profile()
                     _reset_auth_backoff()
                     try:
-                        get_fyers_circuit_breaker().record_auth_success()
+                        cb.record_auth_success()
                     except Exception as e_cb:
                         logger.debug(
                             f"[brokers.fyers] Error recording circuit breaker auth success: {e_cb}"
@@ -1136,11 +1263,11 @@ class FyersAPI(BrokerAPI):
                         _invalidate_auth_cache("fyers")
                     except Exception as e_ac:
                         logger.debug(f"[brokers.fyers] Error invalidating web auth cache: {e_ac}")
-                    return self.get_profile()
+                    return profile
                 except Exception as e:
                     _GLOBAL_AUTH_FAILURE_COUNT += 1
                     _GLOBAL_AUTH_LAST_ERROR = str(e)
-                    is_429 = "429" in str(e) or "too many requests" in str(e).lower()
+                    is_429 = _is_fyers_rate_limit_error(None, str(e))
                     if is_429:
                         backoff_duration = max(
                             60.0, 30.0 * (2 ** min(_GLOBAL_AUTH_FAILURE_COUNT, 3))
@@ -1148,7 +1275,7 @@ class FyersAPI(BrokerAPI):
                         _GLOBAL_AUTH_BACKOFF_UNTIL = time.time() + backoff_duration
                         try:
                             get_fyers_circuit_breaker().record_failure(
-                                status_code=429,
+                                status_code=429 if "429" in str(e) else -360,
                                 error_message=f"Fyers Headless Auth Throttled: {e}",
                                 is_429=True,
                             )
@@ -1197,6 +1324,8 @@ class FyersAPI(BrokerAPI):
             self._token_ts = time.time()
             self._fyers = None  # reset so it gets recreated with new token
             self._save_token(token)
+            _reset_auth_backoff()
+            get_fyers_circuit_breaker().record_auth_success()
             return self.get_profile()
 
     def _handle_auth_failure(self, failed_ts: float | None = None) -> bool:
@@ -1430,7 +1559,8 @@ class FyersAPI(BrokerAPI):
                 "Fyers session is expired or unauthenticated. Please login via /fyers/login."
             )
 
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            raise PermissionError("Fyers rate gate denied permit for profile.")
         fyers = self._get_fyers()
         if not fyers:
             self._profile = None
@@ -1450,11 +1580,7 @@ class FyersAPI(BrokerAPI):
         if not isinstance(data, dict) or data.get("s") != "ok" or not data.get("data"):
             self._profile = None
             err_msg = data.get("message", "Unknown error") if isinstance(data, dict) else str(data)
-            code = data.get("code", 0) if isinstance(data, dict) else 0
-            if _is_fyers_auth_error(data):
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+            _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
             raise PermissionError(f"Fyers profile request rejected: {err_msg}")
 
         get_fyers_circuit_breaker().record_success()
@@ -1486,7 +1612,8 @@ class FyersAPI(BrokerAPI):
             )
         if not self.is_authenticated():
             raise PermissionError("Fyers session is expired or unauthenticated.")
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            raise PermissionError("Fyers rate gate denied permit for funds.")
         fyers = self._get_fyers()
         if not fyers:
             raise PermissionError("Fyers SDK instance unavailable.")
@@ -1503,11 +1630,7 @@ class FyersAPI(BrokerAPI):
 
         if not isinstance(data, dict) or data.get("s") != "ok":
             err_msg = data.get("message", "Unknown error") if isinstance(data, dict) else str(data)
-            code = data.get("code", 0) if isinstance(data, dict) else 0
-            if _is_fyers_auth_error(data):
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+            _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
             raise RuntimeError(f"Fyers funds request failed: {err_msg}")
 
         get_fyers_circuit_breaker().record_success()
@@ -1541,9 +1664,9 @@ class FyersAPI(BrokerAPI):
                 return list(cached_holdings)
         if get_fyers_circuit_breaker().is_tripped():
             return []
-        if not self.is_authenticated():
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            logger.warning("[FyersAPI] Rate gate denied permit for holdings query.")
             return []
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         if not fyers:
             return []
@@ -1557,12 +1680,8 @@ class FyersAPI(BrokerAPI):
                     data = fyers.holdings()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
-            if _is_fyers_auth_error(data):
-                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
-                code = data.get("code", 0) if isinstance(data, dict) else 0
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+            err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+            _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
             return []
 
         get_fyers_circuit_breaker().record_success()
@@ -1602,7 +1721,9 @@ class FyersAPI(BrokerAPI):
             return []
         if not self.is_authenticated():
             return []
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            logger.warning("[FyersAPI] Rate gate denied permit for positions query.")
+            return []
         fyers = self._get_fyers()
         if not fyers:
             return []
@@ -1616,12 +1737,8 @@ class FyersAPI(BrokerAPI):
                     data = fyers.positions()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
-            if _is_fyers_auth_error(data):
-                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
-                code = data.get("code", 0) if isinstance(data, dict) else 0
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+            err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+            _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
             return []
 
         get_fyers_circuit_breaker().record_success()
@@ -1716,7 +1833,7 @@ class FyersAPI(BrokerAPI):
             try:
                 if not rate_gate_acquired:
                     if not _fyers_rate_limiter.acquire(category=category):
-                        logger.warning(
+                        logger.info(
                             f"[FyersAPI] Rate gate denied permit for {category.name} chunk ({len(chunk)} symbols)."
                         )
                         continue
@@ -1739,23 +1856,9 @@ class FyersAPI(BrokerAPI):
                         if isinstance(data, dict)
                         else "Invalid quotes response"
                     )
-                    code = data.get("code", 0) if isinstance(data, dict) else 0
-                    if _is_fyers_auth_error(data):
-                        get_fyers_circuit_breaker().record_failure(
-                            status_code=code or -16, error_message=err_msg
-                        )
-                        break
-                    elif (
-                        "429" in err_msg
-                        or "rate limit" in err_msg.lower()
-                        or "plan limit" in err_msg.lower()
-                        or "5,000 requests" in err_msg.lower()
-                        or (isinstance(data, dict) and data.get("code") in (-360, 429))
+                    if _record_fyers_failure_if_applicable(
+                        data, err_msg=err_msg, default_status_code=0
                     ):
-                        c_code = code if code in (-360, 429) else 429
-                        get_fyers_circuit_breaker().record_failure(
-                            status_code=c_code, error_message=err_msg
-                        )
                         break
                 else:
                     get_fyers_circuit_breaker().record_success()
@@ -1957,7 +2060,8 @@ class FyersAPI(BrokerAPI):
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
 
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
+                return {"status": "UNAVAILABLE", "message": "Fyers rate gate denied permit"}
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
             if _is_fyers_auth_error(data):
                 failed_ts = self._token_ts
@@ -1975,17 +2079,7 @@ class FyersAPI(BrokerAPI):
                     if isinstance(data, dict)
                     else "Invalid depth response"
                 )
-                if (
-                    "429" in err_msg
-                    or "rate limit" in err_msg.lower()
-                    or "plan limit" in err_msg.lower()
-                    or "5,000 requests" in err_msg.lower()
-                    or (isinstance(data, dict) and data.get("code") in (-360, 429))
-                ):
-                    code = data.get("code", 429) if isinstance(data, dict) else 429
-                    get_fyers_circuit_breaker().record_failure(
-                        status_code=code, error_message=err_msg
-                    )
+                _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
                 unavail_res = {
                     "status": "UNAVAILABLE",
                     "message": err_msg,
@@ -2041,7 +2135,8 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+                return {"status": "UNAVAILABLE", "message": "Fyers rate gate denied permit"}
             res = fyers.market_status()
             if isinstance(res, dict) and res.get("s") == "ok":
                 status_res = {
@@ -2087,7 +2182,7 @@ class FyersAPI(BrokerAPI):
                         params["timestamp"] = str(exp_ts)
 
             if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
-                logger.warning(
+                logger.info(
                     f"[FyersAPI] Rate gate denied permit for DEPTH_CHAIN optionchain ({underlying})."
                 )
                 return []
@@ -2108,20 +2203,7 @@ class FyersAPI(BrokerAPI):
                     if isinstance(data, dict)
                     else "Invalid options chain response"
                 )
-                code = data.get("code", 0) if isinstance(data, dict) else 0
-                if (
-                    "429" in err_msg
-                    or "rate limit" in err_msg.lower()
-                    or "plan limit" in err_msg.lower()
-                    or "5,000 requests" in err_msg.lower()
-                    or _is_fyers_auth_error(data)
-                    or code in (-360, 429, -16)
-                ):
-                    get_fyers_circuit_breaker().record_failure(
-                        status_code=code
-                        or (429 if "429" in err_msg else -16 if _is_fyers_auth_error(data) else 0),
-                        error_message=err_msg,
-                    )
+                _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
                 return []
             get_fyers_circuit_breaker().record_success()
             payload = data.get("data", {})
@@ -2200,7 +2282,11 @@ class FyersAPI(BrokerAPI):
                         vega=_parse_greek_val(greeks.get("vega")),
                         bid=float(item.get("bid", 0.0) or 0.0) or None,
                         ask=float(item.get("ask", 0.0) or 0.0) or None,
-                        lot_size=int(item.get("lotSize", 50) or 50),
+                        lot_size=(
+                            int(item.get("lotSize", 0) or 0)
+                            if int(item.get("lotSize", 0) or 0) > 1
+                            else (_get_fyers_contract_lot_size(item.get("symbol", ""), underlying))
+                        ),
                         exchange=(
                             "MCX"
                             if (
@@ -2232,7 +2318,9 @@ class FyersAPI(BrokerAPI):
             return list(cached[1])
 
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
+                logger.warning(f"[FyersAPI] Rate gate denied permit for expiries ({fyers_sym}).")
+                return []
             data = fyers.optionchain({"symbol": fyers_sym, "strikecount": 1})
             expiry_data = data.get("data", {}).get("expiryData", [])
             dates = []
@@ -2272,7 +2360,8 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return None
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
+                return None
             data = fyers.optionchain({"symbol": fyers_symbol, "strikecount": 1})
             expiry_data = data.get("data", {}).get("expiryData", [])
             parts = target_expiry_iso.split("-")
@@ -2438,10 +2527,9 @@ class FyersAPI(BrokerAPI):
                 err_msg = (
                     data.get("message", "Auth failure") if isinstance(data, dict) else str(data)
                 )
-                code = data.get("code", 0) if isinstance(data, dict) else 0
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+                _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=-16)
+        elif not isinstance(data, dict) or data.get("s") != "ok":
+            _record_fyers_failure_if_applicable(data)
 
         if isinstance(data, dict) and data.get("s") == "ok":
             get_fyers_circuit_breaker().record_success()
@@ -2489,7 +2577,15 @@ class FyersAPI(BrokerAPI):
                     "offlineOrder": False,
                 }
             )
-        _fyers_rate_limiter.acquire()
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return [
+                OrderResponse(
+                    order_id="",
+                    status="REJECTED",
+                    message="Fyers rate gate denied permit for basket order",
+                )
+                for _ in orders
+            ]
         data = fyers.place_basket_orders(payload_orders)
         responses = []
         for item in data.get("data", []) if isinstance(data, dict) else []:
@@ -2519,7 +2615,8 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         if not fyers or not orders:
             return []
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return [{"s": "error", "message": "Fyers rate gate denied permit"}]
         data = fyers.modify_basket_orders(orders)
         if isinstance(data, dict):
             return data.get("data", []) or [data]
@@ -2530,7 +2627,8 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         if not fyers or not order_ids:
             return []
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return [{"s": "error", "message": "Fyers rate gate denied permit"}]
         payload = [{"id": str(x)} if isinstance(x, str) else x for x in order_ids]
         data = fyers.cancel_basket_orders(payload)
         if isinstance(data, dict):
@@ -2582,7 +2680,12 @@ class FyersAPI(BrokerAPI):
             "validity": "IOC",
             "legs": payload_legs,
         }
-        _fyers_rate_limiter.acquire()
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return OrderResponse(
+                order_id="",
+                status="REJECTED",
+                message="Fyers rate gate denied permit for multi-leg order",
+            )
         data = fyers.place_multileg_order(payload)
         return OrderResponse(
             order_id=str(data.get("id", "")),
@@ -2595,7 +2698,8 @@ class FyersAPI(BrokerAPI):
         """1-click square off specific position or panic square off all positions."""
         fyers = self._get_fyers()
         try:
-            _fyers_rate_limiter.acquire()
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+                return False
             data = fyers.exit_positions(id=position_id) if position_id else fyers.exit_positions()
             return data.get("s") == "ok"
         except Exception:
@@ -2627,7 +2731,8 @@ class FyersAPI(BrokerAPI):
         if qty is not None:
             payload["qty"] = int(qty)
 
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         try:
             return fyers.attach_position_legs(payload)
         except Exception as exc:
@@ -2656,7 +2761,8 @@ class FyersAPI(BrokerAPI):
             "convertFrom": str(convert_from).upper(),
             "convertTo": str(convert_to).upper(),
         }
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         try:
             return fyers.convert_position(payload)
         except Exception as exc:
@@ -2706,7 +2812,8 @@ class FyersAPI(BrokerAPI):
             payload["lpr"] = float(lpr)
         if mpp != 0:
             payload["mpp"] = int(mpp)
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         try:
             return fyers.create_smart_order_limit(payload)
         except Exception as exc:
@@ -2754,7 +2861,8 @@ class FyersAPI(BrokerAPI):
         }
         if limit_price is not None and limit_price > 0:
             payload["limitPrice"] = round_price_to_tick(float(limit_price))
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         try:
             return fyers.create_smart_order_step(payload)
         except Exception as exc:
@@ -2782,7 +2890,8 @@ class FyersAPI(BrokerAPI):
             payload["lossRate"] = float(loss_rate)
         if wait_time > 0 or strategy_type == 3:
             payload["waitTime"] = int(wait_time)
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         try:
             return fyers.create_smartexit_trigger(payload)
         except Exception as exc:
@@ -2794,7 +2903,8 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return []
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+                return []
             res = (
                 fyers.get_smartexit_triggers(filters or {})
                 if filters
@@ -2816,7 +2926,9 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         if not fyers:
             return []
-        _fyers_rate_limiter.acquire()
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            logger.warning("[FyersAPI] Rate gate denied permit for orderbook query.")
+            return []
         data = fyers.orderbook()
         if _is_fyers_auth_error(data):
             failed_ts = self._token_ts
@@ -2829,12 +2941,8 @@ class FyersAPI(BrokerAPI):
                     data = fyers.orderbook()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
-            if _is_fyers_auth_error(data):
-                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
-                code = data.get("code", 0) if isinstance(data, dict) else 0
-                get_fyers_circuit_breaker().record_failure(
-                    status_code=code or -16, error_message=err_msg
-                )
+            err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+            _record_fyers_failure_if_applicable(data, err_msg=err_msg, default_status_code=0)
             return []
 
         get_fyers_circuit_breaker().record_success()
@@ -2870,7 +2978,9 @@ class FyersAPI(BrokerAPI):
     def cancel_order(self, order_id: str) -> bool:
         fyers = self._get_fyers()
         try:
-            _fyers_rate_limiter.acquire()
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+                logger.warning(f"[FyersAPI] Rate gate denied permit for cancel_order({order_id}).")
+                return False
             data = fyers.cancel_order({"id": order_id})
             ok = data.get("s") == "ok"
             if ok:
@@ -2899,7 +3009,12 @@ class FyersAPI(BrokerAPI):
         if order_type is not None:
             payload["type"] = self._to_fyers_order_type(order_type)
         try:
-            _fyers_rate_limiter.acquire()
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+                return OrderResponse(
+                    order_id=str(order_id),
+                    status="REJECTED",
+                    message="Fyers rate gate denied permit for modify_order",
+                )
             data = fyers.modify_order(payload)
             ok = data.get("s") == "ok"
             if ok:
@@ -3047,14 +3162,18 @@ class FyersAPI(BrokerAPI):
         cont_flag = "0"
 
         all_candles: list[list] = []
+        partial_chunks = False
+        self._last_history_partial = False
         for c_from, c_to in chunks:
             if get_fyers_circuit_breaker().is_tripped():
                 _warn_circuit_breaker_open("historical data", fyers_sym)
+                partial_chunks = True
                 break
             if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
-                logger.warning(
+                logger.info(
                     f"[FyersAPI] Rate gate denied permit for HISTORICAL chunk ({fyers_sym}, {c_from} to {c_to})."
                 )
+                partial_chunks = True
                 break
             payload = {
                 "symbol": fyers_sym,
@@ -3081,10 +3200,10 @@ class FyersAPI(BrokerAPI):
                 elif isinstance(data, dict):
                     err_msg = str(data.get("message", "History error"))
                     if _is_fyers_auth_error(data):
-                        code = data.get("code", -16)
-                        get_fyers_circuit_breaker().record_failure(
-                            status_code=code, error_message=err_msg
+                        _record_fyers_failure_if_applicable(
+                            data, err_msg=err_msg, default_status_code=-16
                         )
+                        partial_chunks = True
                         break
                     if data.get("code") == -300 or "valid symbol" in err_msg.lower():
                         # Fallback: For futures, retry with continuous series flag (cont_flag="1") when
@@ -3105,25 +3224,26 @@ class FyersAPI(BrokerAPI):
                         logger.warning(
                             f"[FyersAPI] Historical data not available for symbol '{fyers_sym}' (code -300). Contract may be expired or delisted: {err_msg}"
                         )
+                        partial_chunks = True
                         break  # Prevent wasteful rate limit consumption on non-existent/expired contracts
-                    if (
-                        "429" in err_msg
-                        or "rate limit" in err_msg.lower()
-                        or "plan limit" in err_msg.lower()
-                        or "5,000 requests" in err_msg.lower()
-                        or data.get("code") in (-360, 429)
+                    if _record_fyers_failure_if_applicable(
+                        data, err_msg=err_msg, default_status_code=429
                     ):
-                        code = data.get("code", 429)
-                        get_fyers_circuit_breaker().record_failure(
-                            status_code=code, error_message=err_msg
-                        )
+                        partial_chunks = True
                         break
             except Exception as exc:
                 logger.warning(
                     f"[FyersAPI] Historical data fetch failed for {fyers_sym} ({res_str}, {c_from} to {c_to}): {exc}",
                     exc_info=True,
                 )
+                partial_chunks = True
                 continue
+
+        self._last_history_partial = partial_chunks
+        if partial_chunks and all_candles:
+            logger.warning(
+                f"[FyersAPI] PARTIAL_DATA: {fyers_sym} historical series truncated mid-chunk ({len(all_candles)} candles returned)."
+            )
 
         # Deduplicate candles by epoch timestamp and sort chronologically
         seen_epochs = set()
@@ -3424,7 +3544,9 @@ class FyersAPI(BrokerAPI):
 
     def get_gtt_orders(self) -> list[dict]:
         """Fetch active server-side GTT orders."""
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            logger.warning("[FyersAPI] Rate gate denied permit for gtt_orderbook.")
+            return []
         fyers = self._get_fyers()
         try:
             data = fyers.gtt_orderbook()
@@ -3434,7 +3556,9 @@ class FyersAPI(BrokerAPI):
 
     def cancel_gtt_order(self, order_id: str) -> bool:
         """Cancel an active GTT order."""
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            logger.warning(f"[FyersAPI] Rate gate denied permit for cancel_gtt_order({order_id}).")
+            return False
         fyers = self._get_fyers()
         try:
             data = fyers.cancel_gtt_order({"id": str(order_id)})
@@ -3446,7 +3570,12 @@ class FyersAPI(BrokerAPI):
         """Standardized BrokerAPI implementation for Fyers server-side GTT/OCO."""
         from brokers.base import GTTResponse
 
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return GTTResponse(
+                gtt_id="",
+                status="REJECTED",
+                message="Fyers rate gate denied permit for GTT placement",
+            )
         fyers = self._get_fyers()
         fyers_sym = _to_fyers_symbol(req.symbol)
         side = 1 if str(req.transaction_type).upper() == "BUY" else -1
@@ -3540,7 +3669,8 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            return {"status": "error", "error": "Fyers rate gate denied permit", "s": "error"}
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
@@ -3566,7 +3696,8 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
-        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            return {"status": "error", "error": "Fyers rate gate denied permit", "s": "error"}
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
@@ -3880,23 +4011,47 @@ class FyersAPI(BrokerAPI):
         margin_total = 0.0
         margin_avail = 0.0
         fyers_err = None
+        cb = get_fyers_circuit_breaker()
 
-        try:
-            resp = requests.post(
-                margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0
-            )
-            if resp.status_code == 200:
-                res_data = resp.json()
-                if res_data.get("s") == "ok" and "data" in res_data:
-                    d = res_data["data"]
-                    margin_total = float(d.get("margin_total", 0.0) or 0.0)
-                    margin_avail = float(d.get("margin_avail", 0.0) or 0.0)
+        if cb.is_tripped():
+            _warn_circuit_breaker_open("multiorder/margin")
+            fyers_err = "Fyers circuit breaker is OPEN — margin API call skipped"
+        elif not _fyers_rate_limiter.acquire(category=FyersCallCategory.URGENT_QUOTE):
+            fyers_err = "Fyers rate gate denied permit for multiorder/margin"
+        else:
+            resp = None
+            try:
+                resp = requests.post(
+                    margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0
+                )
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    if res_data.get("s") == "ok" and "data" in res_data:
+                        d = res_data["data"]
+                        margin_total = float(d.get("margin_total", 0.0) or 0.0)
+                        margin_avail = float(d.get("margin_avail", 0.0) or 0.0)
+                        cb.record_success()
+                    else:
+                        fyers_err = res_data.get("message", "Fyers margin calculation failed")
+                        if _is_fyers_auth_error(res_data):
+                            cb.record_failure(
+                                status_code=res_data.get("code", -16),
+                                error_message=str(fyers_err),
+                            )
                 else:
-                    fyers_err = res_data.get("message", "Fyers margin calculation failed")
-            else:
-                fyers_err = f"HTTP {resp.status_code}: {resp.text}"
-        except Exception as e:
-            fyers_err = str(e)
+                    fyers_err = f"HTTP {resp.status_code}: {resp.text}"
+                    if resp.status_code in (401, 403, 429):
+                        cb.record_failure(
+                            status_code=resp.status_code, error_message=str(fyers_err)
+                        )
+            except Exception as e:
+                fyers_err = str(e)
+            finally:
+                if resp is not None and hasattr(resp, "close"):
+                    try:
+                        resp.close()
+                    except Exception as e_close:
+                        logger.debug(f"[brokers.fyers] Margin HTTP close note: {e_close}")
 
         # 2. If margin_avail is 0 or unpopulated, resolve from live funds endpoint
         if margin_avail <= 0:

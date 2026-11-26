@@ -806,3 +806,102 @@ def test_fii_selling_and_index_vwap_bearish_regime_suppresses_longs():
     }
     passed_p, reason_p = engine._eval_telegram_apex_gate(alert_pass, in_market=True)
     assert passed_p, f"Expected decoupled defensive leader to pass, but got: {reason_p}"
+
+
+def test_telegram_catalyst_runner_delta_override_bidirectional(monkeypatch):
+    """Verifies that high-momentum catalyst runners (Bullish or Bearish) with Delta in 0.22-0.29
+
+    pass the Telegram Apex Gate, preventing false negative suppression on big gainers/losers.
+    """
+    engine = AutoAlertEngine()
+    monkeypatch.setenv("TELEGRAM_APEX_ONLY", "1")
+    monkeypatch.setenv("CHANAKYA_TESTING", "0")
+
+    # 1. Routine non-catalyst stock with Delta 0.25 -> REJECTED (insufficient directional speed)
+    alert_routine = _make_dummy_alert(
+        "stk-routine-delta",
+        "INFY",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=90,
+    )
+    alert_routine.metrics = {
+        "delta": 0.25,
+        "spot_change_pct": 0.8,
+        "is_opening_drive": False,
+    }
+    passed_r, reason_r = engine._eval_telegram_apex_gate(alert_routine, in_market=True)
+    assert not passed_r
+    assert "below 0.30 floor" in reason_r
+
+    # 2. Bullish Catalyst (e.g. POWERINDIA +5% Open=Low) with Delta 0.25 -> PASSES
+    alert_power = _make_dummy_alert(
+        "stk-powerindia-catalyst",
+        "POWERINDIA",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=96,
+    )
+    alert_power.is_opening_drive = True
+    alert_power.opening_drive_type = "BULLISH_OPEN_EQUALS_LOW"
+    alert_power.metrics = {
+        "delta": 0.25,
+        "spot_change_pct": 5.06,
+        "is_opening_drive": True,
+        "opening_drive_type": "BULLISH_OPEN_EQUALS_LOW",
+    }
+    passed_pw, reason_pw = engine._eval_telegram_apex_gate(alert_power, in_market=True)
+    assert passed_pw, f"Expected POWERINDIA catalyst to pass, but got: {reason_pw}"
+
+    # 3. Bearish Catalyst (e.g. -4% gap down, Open=High liquidation) with Put Delta -0.25 -> PASSES
+    alert_bear_cat = _make_dummy_alert(
+        "stk-bear-catalyst",
+        "TCS",
+        direction="BEARISH",
+        segment="FNO_STOCK",
+        opt_type="PE",
+        confidence=94,
+    )
+    alert_bear_cat.is_opening_drive = True
+    alert_bear_cat.opening_drive_type = "BEARISH_OPEN_EQUALS_HIGH"
+    alert_bear_cat.metrics = {
+        "delta": -0.25,
+        "spot_change_pct": -4.20,
+        "is_opening_drive": True,
+        "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH",
+    }
+    passed_bc, reason_bc = engine._eval_telegram_apex_gate(alert_bear_cat, in_market=True)
+    assert passed_bc, f"Expected Bearish catalyst to pass, but got: {reason_bc}"
+
+
+def test_telegram_apex_gate_allows_index_and_fno_stock_at_configured_confidence():
+    """Verify that Index setups and Stock F&O setups at configured confidence (>=80%) pass Apex Gate."""
+    engine = AutoAlertEngine()
+
+    # 1. Index setup with 85% confidence in IGNITED stage (previously blocked by 90% floor)
+    alert_idx = _make_dummy_alert(
+        "idx-banknifty-85",
+        "BANKNIFTY",
+        alert_type="INDEX_CALL_SETUP",
+        segment="FNO_INDEX",
+        stage="IGNITED",
+        confidence=85,
+    )
+    with patch.dict(os.environ, {"TELEGRAM_APEX_ONLY": "1"}):
+        passed, reason = engine._eval_telegram_apex_gate(alert_idx, in_market=True)
+    assert passed is True, f"Expected BANKNIFTY 85% setup to pass Apex gate, got: {reason}"
+
+    # 2. Stock F&O setup with 88% confidence in IGNITED stage (e.g. PERSISTENT/M&M)
+    alert_stk = _make_dummy_alert(
+        "stk-persistent-88",
+        "PERSISTENT",
+        alert_type="OPTIONS_MOMENTUM",
+        segment="FNO_STOCK",
+        stage="IGNITED",
+        confidence=88,
+    )
+    with patch.dict(os.environ, {"TELEGRAM_APEX_ONLY": "1"}):
+        passed, reason = engine._eval_telegram_apex_gate(alert_stk, in_market=True)
+    assert passed is True, f"Expected Stock F&O 88% setup to pass Apex gate, got: {reason}"

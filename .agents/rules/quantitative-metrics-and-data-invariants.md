@@ -80,4 +80,5 @@ All lot sizes, tick sizes, freeze limits, and multipliers **MUST** resolve stric
 
 ### Mandatory Rule for AI Agents & Developers:
 - **Zero Obsolete Citing**: Never cite, calculate with, or use legacy numbers in prose, chat explanations, test fixtures, docstrings, or mathematical examples (e.g. NEVER say "NIFTY 1 lot (75 qty)" or "SENSEX 10").
-- Every calculation of contract turnover, premium risk, portfolio exposure, margin, or position size MUST strictly utilize the active canonical lot size.
+- **Dealer Flow, Causal VPIN & Intraday FutEq MWPL**: Option DEX (`market/options.py`, `market/vectorized_greeks.py`) uses signed dealer delta (`-delta` on puts) alongside `vanna` and 1-day `charm`; VPIN (`analysis/order_flow.compute_vpin`) remains strictly causal (rolling `min_periods`, zero future-DF look-ahead) paired with 50-depth `multi_layer_obi()`; stock F&O evaluates intraday FutEq Delta-OI utilization (`market/fno_ban.py`, flagging `>= 60%` ban-approach risk).
+- Every calculation of contract turnover, premium risk, portfolio exposure, margin, or position size MUST strictly utilize the active canonical expiry-dated lot size (`get_fno_lot_size(symbol, expiry_date=...)`) and `market.rule_schedule` session clock.

@@ -277,3 +277,334 @@ def evaluate_pullback(
             )
 
     return None
+
+
+@dataclass
+class AntiFomoEntryAssessment:
+    """Deterministic institutional anti-FOMO entry & structural extension verdict."""
+
+    extension_status: str  # "AT_PIVOT" | "IN_BASE_CHEAT" | "PULLBACK_RETEST" | "OVEREXTENDED_WAIT"
+    is_extended: bool
+    recommended_entry: float
+    pullback_limit_entry: float
+    no_chase_boundary: float
+    structural_anchor: float
+    ema20: float
+    sma50: float
+    sma200: float
+    avwap_anchor: float
+    dist_pivot_pct: float
+    dist_ema20_atr: float
+    dist_sma50_pct: float
+    atr_14: float
+    pullback_signal: Optional[PullbackSignal] = None
+    action_directive: str = "ENTER_AT_PIVOT"
+
+
+def evaluate_anti_fomo_entry(
+    df: pd.DataFrame,
+    ltp: float,
+    *,
+    pivot_price: float = 0.0,
+    direction: str = "BULLISH",
+    symbol: str = "",
+) -> AntiFomoEntryAssessment:
+    """Evaluate price extension against structural anchors (Pivot, 20-EMA, 50-SMA, AVWAP).
+
+    Strictly prevents chasing extended price action by locking `no_chase_boundary`
+    to the structural anchor (+2.5% for longs, -2.5% for shorts) and anchoring
+    `pullback_limit_entry` to reachable support/resistance levels rather than `ltp`.
+    """
+    ltp_val = float(ltp or 0.0)
+    is_bearish = str(direction).upper() == "BEARISH"
+    if df is None or df.empty or ltp_val <= 0:
+        anchor = float(pivot_price or ltp_val)
+        nc = round(anchor * (0.975 if is_bearish else 1.025), 2) if anchor > 0 else 0.0
+        return AntiFomoEntryAssessment(
+            extension_status="AT_PIVOT",
+            is_extended=False,
+            recommended_entry=round(ltp_val, 2),
+            pullback_limit_entry=round(anchor, 2),
+            no_chase_boundary=nc,
+            structural_anchor=round(anchor, 2),
+            ema20=0.0,
+            sma50=0.0,
+            sma200=0.0,
+            avwap_anchor=0.0,
+            dist_pivot_pct=0.0,
+            dist_ema20_atr=0.0,
+            dist_sma50_pct=0.0,
+            atr_14=0.0,
+            pullback_signal=None,
+            action_directive="WAIT_FOR_DATA",
+        )
+
+    close_s = df["close"].astype(float)
+    high_s = df["high"].astype(float) if "high" in df.columns else close_s
+    low_s = df["low"].astype(float) if "low" in df.columns else close_s
+
+    ema20_val = 0.0
+    sma50_val = 0.0
+    sma200_val = 0.0
+    atr_val = 0.0
+    avwap_val = 0.0
+
+    if len(close_s) >= 20:
+        ema20_val = float(ema(close_s, 20).iloc[-1])
+        if np.isnan(ema20_val):
+            ema20_val = float(close_s.tail(20).mean())
+    elif len(close_s) > 0:
+        ema20_val = float(close_s.mean())
+
+    if len(close_s) >= 50:
+        sma50_val = float(close_s.rolling(50).mean().iloc[-1])
+    elif len(close_s) >= 20:
+        sma50_val = float(close_s.mean())
+
+    if len(close_s) >= 200:
+        sma200_val = float(close_s.rolling(200).mean().iloc[-1])
+
+    if len(df) >= 15 and {"high", "low", "close"}.issubset(df.columns):
+        atr_series = atr(df, period=14)
+        atr_last = float(atr_series.iloc[-1])
+        if not np.isnan(atr_last) and atr_last > 0:
+            atr_val = atr_last
+    if atr_val <= 0:
+        atr_val = max(0.01, float((high_s.tail(14) - low_s.tail(14)).mean()))
+
+    try:
+        from analysis.anchored_vwap import compute_anchored_vwap
+
+        if len(df) >= 20 and "volume" in df.columns:
+            lookback = min(60, len(df))
+            tail_df = df.tail(lookback)
+            if is_bearish:
+                anchor_pos = int(np.argmax(tail_df["high"].astype(float).values))
+                anchor_type = "SWING_HIGH"
+            else:
+                anchor_pos = int(np.argmin(tail_df["low"].astype(float).values))
+                anchor_type = "SWING_LOW"
+            abs_idx = max(0, len(df) - lookback + anchor_pos)
+            avwap_res = compute_anchored_vwap(df, anchor_index=abs_idx, anchor_type=anchor_type)
+            if avwap_res is not None and getattr(avwap_res, "current_avwap", 0.0) > 0:
+                avwap_val = float(avwap_res.current_avwap)
+    except Exception:
+        avwap_val = 0.0
+
+    pivot_val = float(pivot_price or 0.0)
+    if pivot_val > 0:
+        structural_anchor = pivot_val
+    else:
+        ma_candidates = [v for v in (ema20_val, avwap_val, sma50_val) if v > 0]
+        if is_bearish:
+            above_ltp = [v for v in ma_candidates if v >= ltp_val]
+            structural_anchor = (
+                min(above_ltp) if above_ltp else (max(ma_candidates) if ma_candidates else ltp_val)
+            )
+        else:
+            below_ltp = [v for v in ma_candidates if v <= ltp_val]
+            structural_anchor = (
+                max(below_ltp) if below_ltp else (min(ma_candidates) if ma_candidates else ltp_val)
+            )
+
+    if is_bearish:
+        dist_pivot_pct = (
+            ((structural_anchor - ltp_val) / structural_anchor * 100.0)
+            if structural_anchor > 0
+            else 0.0
+        )
+        dist_ema20_atr = (
+            ((ema20_val - ltp_val) / atr_val) if (ema20_val > 0 and atr_val > 0) else 0.0
+        )
+        dist_sma50_pct = ((sma50_val - ltp_val) / sma50_val * 100.0) if sma50_val > 0 else 0.0
+    else:
+        dist_pivot_pct = (
+            ((ltp_val - structural_anchor) / structural_anchor * 100.0)
+            if structural_anchor > 0
+            else 0.0
+        )
+        dist_ema20_atr = (
+            ((ltp_val - ema20_val) / atr_val) if (ema20_val > 0 and atr_val > 0) else 0.0
+        )
+        dist_sma50_pct = ((ltp_val - sma50_val) / sma50_val * 100.0) if sma50_val > 0 else 0.0
+
+    pullback_sig: Optional[PullbackSignal] = None
+    if not is_bearish and len(df) >= 20:
+        try:
+            pullback_sig = evaluate_pullback(
+                df,
+                symbol=symbol or "ASSET",
+                breakout_level=structural_anchor,
+                atr_val=atr_val,
+            )
+        except Exception:
+            pullback_sig = None
+
+    pivot_extended = pivot_val > 0 and dist_pivot_pct > 2.5
+    ema_extended = ema20_val > 0 and atr_val > 0 and dist_ema20_atr > 2.0
+    sma_extended = sma50_val > 0 and dist_sma50_pct > 18.0
+    is_extended = bool(pivot_extended or ema_extended or sma_extended)
+
+    if is_bearish:
+        no_chase_boundary = round(structural_anchor * 0.975, 2)
+        res_candidates = [v for v in (structural_anchor, ema20_val, avwap_val) if v > ltp_val]
+        if pullback_limit := (min(res_candidates) if res_candidates else 0.0):
+            pullback_limit_entry = round(min(pullback_limit, ltp_val * 1.15), 2)
+        else:
+            pullback_limit_entry = round(max(structural_anchor, ltp_val * 1.015), 2)
+    else:
+        no_chase_boundary = round(structural_anchor * 1.025, 2)
+        sup_candidates = [v for v in (structural_anchor, ema20_val, avwap_val) if 0 < v < ltp_val]
+        if pullback_sig is not None and 0 < pullback_sig.anchor_level < ltp_val:
+            sup_candidates.append(float(pullback_sig.anchor_level))
+        reachable_supports = [v for v in sup_candidates if v >= ltp_val * 0.85]
+        if reachable_supports:
+            pullback_limit_entry = round(max(reachable_supports), 2)
+        elif sup_candidates:
+            pullback_limit_entry = round(max(sup_candidates), 2)
+        elif ema20_val > 0:
+            pullback_limit_entry = round(min(ltp_val * 0.975, ema20_val), 2)
+        else:
+            pullback_limit_entry = round(ltp_val * 0.975, 2)
+
+    if is_extended:
+        extension_status = "OVEREXTENDED_WAIT"
+        recommended_entry = pullback_limit_entry
+        action_directive = "WAIT_FOR_PULLBACK"
+    elif pullback_sig is not None:
+        extension_status = "PULLBACK_RETEST"
+        recommended_entry = round(
+            min(ltp_val, float(pullback_sig.anchor_level))
+            if pullback_sig.anchor_level > 0
+            else ltp_val,
+            2,
+        )
+        action_directive = "ENTER_AT_RETEST"
+    elif -6.0 <= dist_pivot_pct < -1.0:
+        extension_status = "IN_BASE_CHEAT"
+        recommended_entry = round(ltp_val, 2)
+        action_directive = "STALK_CHEAT_OR_PIVOT"
+    else:
+        extension_status = "AT_PIVOT"
+        recommended_entry = round(ltp_val, 2)
+        action_directive = "ENTER_AT_PIVOT"
+
+    return AntiFomoEntryAssessment(
+        extension_status=extension_status,
+        is_extended=is_extended,
+        recommended_entry=round(recommended_entry, 2),
+        pullback_limit_entry=round(pullback_limit_entry, 2),
+        no_chase_boundary=no_chase_boundary,
+        structural_anchor=round(structural_anchor, 2),
+        ema20=round(ema20_val, 2),
+        sma50=round(sma50_val, 2),
+        sma200=round(sma200_val, 2),
+        avwap_anchor=round(avwap_val, 2),
+        dist_pivot_pct=round(dist_pivot_pct, 2),
+        dist_ema20_atr=round(dist_ema20_atr, 2),
+        dist_sma50_pct=round(dist_sma50_pct, 2),
+        atr_14=round(atr_val, 2),
+        pullback_signal=pullback_sig,
+        action_directive=action_directive,
+    )
+
+
+def check_base_quality_and_supply(
+    df: pd.DataFrame,
+    entry_price: float,
+    risk_pts: float,
+    *,
+    pivot_price: float = 0.0,
+) -> dict[str, Any]:
+    """Check institutional base-quality clues (3-Weeks-Tight, Pocket Pivot) and overhead supply.
+
+    Returns runway distance in R-multiples to the nearest multi-month overhead
+    resistance above the pivot/entry so cramped setups with <2.0R headroom are flagged.
+    """
+    result: dict[str, Any] = {
+        "is_tight_flag": False,
+        "has_pocket_pivot": False,
+        "nearest_overhead_resistance": 0.0,
+        "overhead_supply_r": None,
+        "has_clear_runway": True,
+    }
+    if df is None or df.empty or entry_price <= 0:
+        return result
+
+    close_s = df["close"].astype(float)
+    high_s = df["high"].astype(float) if "high" in df.columns else close_s
+    open_s = df["open"].astype(float) if "open" in df.columns else close_s
+    vol_s = df["volume"].astype(float) if "volume" in df.columns else None
+
+    # 1. 3-Weeks-Tight / Tight Consolidation Flag
+    if len(close_s) >= 25:
+        w1 = float(close_s.iloc[-15:-10].iloc[-1])
+        w2 = float(close_s.iloc[-10:-5].iloc[-1])
+        w3 = float(close_s.iloc[-5:].iloc[-1])
+        w_min = min(w1, w2, w3)
+        w_max = max(w1, w2, w3)
+        prior_move = (w1 - float(close_s.iloc[-25])) / max(1e-6, float(close_s.iloc[-25]))
+        if w_min > 0 and ((w_max - w_min) / w_min) <= 0.018 and prior_move >= 0.05:
+            result["is_tight_flag"] = True
+
+    if not result["is_tight_flag"] and len(close_s) >= 20:
+        recent_high = float(high_s.tail(10).max())
+        recent_low = (
+            float(df["low"].astype(float).tail(10).min())
+            if "low" in df.columns
+            else float(close_s.tail(10).min())
+        )
+        prior_close = float(close_s.iloc[-20])
+        if recent_low > 0 and prior_close > 0:
+            range_pct = (recent_high - recent_low) / recent_low
+            prior_gain = (recent_low - prior_close) / prior_close
+            if range_pct <= 0.06 and prior_gain >= 0.08:
+                result["is_tight_flag"] = True
+
+    # 2. Pocket Pivot inside base (up-bar volume > max down-day volume of prior 10 days)
+    if vol_s is not None and len(df) >= 16:
+        for offset in range(1, 6):
+            idx = len(df) - offset
+            if idx < 11:
+                continue
+            bar_close = float(close_s.iloc[idx])
+            bar_open = float(open_s.iloc[idx])
+            prev_close = float(close_s.iloc[idx - 1])
+            bar_vol = float(vol_s.iloc[idx])
+            if bar_close > bar_open and bar_close > prev_close and bar_vol > 0:
+                win_c = close_s.iloc[idx - 10 : idx]
+                win_prev = close_s.iloc[idx - 11 : idx - 1]
+                win_v = vol_s.iloc[idx - 10 : idx]
+                down_mask = win_c.values < win_prev.values
+                if np.any(down_mask):
+                    max_down_vol = float(np.max(win_v.values[down_mask]))
+                    if bar_vol > max_down_vol > 0:
+                        result["has_pocket_pivot"] = True
+                        break
+
+    # 3. Overhead Supply Check (exclude the current 20-bar breakout base itself)
+    if len(high_s) >= 40 and risk_pts > 0:
+        ref_level = max(entry_price, pivot_price) * 1.02
+        hist_highs = high_s.iloc[-120:-20] if len(high_s) >= 120 else high_s.iloc[:-20]
+        if not hist_highs.empty:
+            # Find local swing highs strictly above current pivot zone
+            vals = hist_highs.values
+            swing_res: list[float] = []
+            for i in range(2, len(vals) - 2):
+                if (
+                    vals[i] >= vals[i - 1]
+                    and vals[i] >= vals[i - 2]
+                    and vals[i] >= vals[i + 1]
+                    and vals[i] >= vals[i + 2]
+                ):
+                    if vals[i] > ref_level:
+                        swing_res.append(float(vals[i]))
+            if swing_res:
+                nearest_res = min(swing_res)
+                overhead_r = (nearest_res - entry_price) / risk_pts
+                result["nearest_overhead_resistance"] = round(nearest_res, 2)
+                result["overhead_supply_r"] = round(overhead_r, 2)
+                if overhead_r < 2.0:
+                    result["has_clear_runway"] = False
+
+    return result

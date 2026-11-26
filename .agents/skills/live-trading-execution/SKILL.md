@@ -92,8 +92,12 @@ result = get_execution_broker().place_order(order)
 - File: `engine/pilot_safety.py`
 
 ### `validate_pretrade(order)`
-- Computes STT, GST, SEBI charges, checks margin, verifies instrument from canonical master
+- Computes Apr-2026 STT/GST/SEBI charges, checks margin, verifies instrument from canonical master, enforces exchange-specific BSE/BFO vs NSE/NFO holidays, and fails closed on live option `MARKET` orders lacking inside bid/ask spread.
 - File: `engine/pretrade.py`
+
+### `OrderSocket` Stream Reconciliation & Recovery
+- `market/fyers_order_stream.py` auto-binds `apply_fyers_stream_order_update()` and `apply_fyers_stream_trade_fill()` into `engine/order_lifecycle.py` with strict `account_id` mismatch rejection and deterministic broker fill timestamps.
+- `recover_stale_inflight_orders(account_id=...)` correlates lingering `SUBMITTING` / `UNKNOWN_FREEZE` rows against broker orders without clearing freezes automatically unless confirmed.
 
 ---
 

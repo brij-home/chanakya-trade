@@ -56,7 +56,7 @@ Injects India VIX, NIFTY 50 breadth, FII/DII institutional flows, USD/INR, Crude
 ### Stage 4 — Fund Manager Synthesis
 - **Debate Facilitator**: Mediates points of contention across rounds.
 - **Fund Manager / Risk Gate**: Final verdict (`BUY`, `STRONG_BUY`, `HOLD`, `SELL`, `STRONG_SELL`, `AVOID`), confidence score, entry, stop-loss, target, and position size.
-- **Deterministic Risk & Blueprint Grounding**: The Fund Manager and Persona Agents must NEVER invent arbitrary static stop-losses (e.g. flat ₹1.00) or assume legacy derivative contracts. All execution blueprints (Entry, Invalidation Stop, Targets T1/T2/Runner, Position Size) must be computed via [`engine.trade_plan.calculate_trade_plan`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_plan.py) and [`engine.dynamic_risk.calculate_hierarchical_position_size`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py), strictly respecting canonical lot sizes ([`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py)) and timeframe scaling.
+- **Deterministic Risk & Blueprint Grounding**: The Fund Manager and Persona Agents must NEVER invent arbitrary static stop-losses (e.g. flat ₹1.00) or assume legacy derivative contracts. All execution blueprints (Entry, Invalidation Stop, Targets T1/T2/Runner, Position Size) must be computed via [`engine.trade_plan.calculate_trade_plan`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_plan.py) and [`engine.dynamic_risk.calculate_hierarchical_position_size`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py), strictly respecting expiry-dated canonical lot sizes ([`market.instruments.get_fno_lot_size`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py)), `market.rule_schedule` cutoffs, and timeframe scaling.
 - **DAG Orchestration** ([`agent/dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py)): Parallel execution with dependency graphs.
 
 ---
@@ -73,7 +73,7 @@ Used for parallel Bull & Bear opening/rebuttal arguments, news sentiment classif
 | :--- | :--- | :--- |
 | **Groq** | `qwen/qwen3.8-27b` (✅ tool-calling) | **Primary choice** — ~389ms latency, supports function calling |
 | **Groq** | `openai/gpt-oss-120b` | Deep reasoning fallback — ~446ms, no tool-calling |
-| **Gemini** | `gemini-3.7-flash`, `gemini-3.6-flash` | Google's fast models with tool-calling |
+| **Gemini** | `gemini-3.8-flash`, `gemini-3.8-flash-thinking`, `gemini-3.5-flash-lite` | Google's fast models with tool-calling |
 
 > ⚠️ **Deprecated**: `llama-3.3-70b-versatile` is no longer available on Groq Cloud (returns `404`). Use `qwen/qwen3.8-27b` instead.
 
@@ -84,9 +84,9 @@ Used for Facilitator debate synthesis and Fund Manager final verdict.
 | Provider | Recommended Models |
 | :--- | :--- |
 | **Groq** | `openai/gpt-oss-120b` (120B parameters, high quality) |
-| **NVIDIA NIM** | `meta/llama-3.3-70b-instruct` |
-| **Anthropic** | `claude-sonnet-4` |
-| **OpenAI** | `gpt-4o`, `o3-mini` |
+| **NVIDIA NIM** | `meta/llama-3.2-11b-vision-instruct` / `qwen/qwen3.8-27b` |
+| **Anthropic** | `claude-sonnet-4-7` |
+| **OpenAI** | `gpt-4o` |
 
 ### Failover & Latency Safeguards
 

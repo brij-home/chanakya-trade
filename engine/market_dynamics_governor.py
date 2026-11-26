@@ -122,6 +122,10 @@ def get_intraday_phase(dt: Optional[datetime] = None) -> str:
         dt = dt.astimezone(IST)
 
     t = dt.time()
+    from market.rule_schedule import derivative_close, intraday_squareoff_cutoff
+
+    sq_cutoff = intraday_squareoff_cutoff(dt.date(), is_derivative=True)
+    deriv_close = derivative_close(dt.date())
 
     if t < dtime(9, 15):
         return "OFF_MARKET_PREOPEN"
@@ -133,9 +137,9 @@ def get_intraday_phase(dt: Optional[datetime] = None) -> str:
         return "MIDDAY_MEAN_REVERSION_CHOP"
     if t < dtime(14, 45):
         return "AFTERNOON_TREND_IGNITION"
-    if t < dtime(15, 15):
+    if t < sq_cutoff:
         return "EXPIRY_0DTE_GAMMA_UNPIN"
-    if t < dtime(15, 30):
+    if t < deriv_close:
         return "SESSION_MOC_HARDBOARD_CUTOFF"
     return "OFF_MARKET_POSTCLOSE"
 
@@ -217,29 +221,69 @@ class MarketDynamicsGovernor:
         self._cache_ttl = cache_ttl_seconds
         self._lock = threading.RLock()
         self._cache: dict[str, tuple[float, DynamicCalibrationContext]] = {}
-        self._vix_cache: tuple[float, float] = (0.0, 14.0)  # (timestamp, vix_val)
+        # Never pre-seed synthetic 14.5 VIX as fresh live telemetry
+        self._vix_cache: tuple[float, Optional[float]] = (0.0, None)  # (timestamp, vix_val)
+        self._vix_max_age: float = 60.0
+        self._vix_fetching: bool = False
         logger.info("[MarketDynamicsGovernor] Initialized context-adaptive calibration governor.")
 
-    def _fetch_live_vix(self) -> float:
-        """Fetch current India VIX with bounded 30s cache."""
+    def get_live_vix(self) -> Optional[float]:
+        """Return live India VIX strictly if cached within max age; None when unavailable/stale."""
         now_ts = time.time()
         with self._lock:
             ts, val = self._vix_cache
-            if now_ts - ts < 30.0 and val > 0.0:
-                return val
+            if val is not None and val > 0.0 and ts > 0.0 and (now_ts - ts) <= self._vix_max_age:
+                return float(val)
+            if not self._vix_fetching:
+                self._vix_fetching = True
+                threading.Thread(target=self._bg_refresh_vix, daemon=True).start()
+            return None
 
+    def _fetch_live_vix(self) -> Optional[float]:
+        """Fetch current India VIX with TTL-bounded memory cache and non-blocking background refresh."""
+        fresh = self.get_live_vix()
+        if fresh is not None:
+            return fresh
+        # Trigger synchronous best-effort check without inventing a 14.5 value
         try:
-            from market.indices import get_vix
+            from analysis.regime_governor import _fresh_live_vix
 
-            raw_vix = get_vix()
-            vix_val = float(raw_vix) if raw_vix and float(raw_vix) > 0.0 else 14.0
-        except Exception as e_vix:
-            logger.debug(f"[MarketDynamicsGovernor] VIX fetch fallback: {e_vix}")
-            vix_val = 14.0
+            strict_vix = _fresh_live_vix(max_age_seconds=self._vix_max_age)
+            if strict_vix is not None and strict_vix > 0.0:
+                with self._lock:
+                    self._vix_cache = (time.time(), float(strict_vix))
+                return float(strict_vix)
+        except Exception as exc_vix:
+            logger.debug("[MarketDynamicsGovernor] Strict live VIX lookup unavailable: %s", exc_vix)
+        return None
 
-        with self._lock:
-            self._vix_cache = (now_ts, vix_val)
-        return vix_val
+    def _bg_refresh_vix(self) -> None:
+        """Background thread worker to update India VIX without stalling callers."""
+        try:
+            from market.quotes import get_quote
+            from market.indices import INDEX_INSTRUMENTS, get_vix
+
+            vix_inst = INDEX_INSTRUMENTS.get("VIX", "NSE:INDIA VIX")
+            ws_res = get_quote([vix_inst], ws_only=True)
+            vix_quote = (
+                ws_res.get(vix_inst)
+                or ws_res.get("INDIA VIX")
+                or ws_res.get("INDIAVIX-INDEX")
+                or ws_res.get("NSE:INDIAVIX-INDEX")
+            )
+            vix_val = float(getattr(vix_quote, "last_price", 0.0) or 0.0)
+            if vix_val <= 0.0:
+                raw_vix = get_vix()
+                vix_val = float(raw_vix) if raw_vix and float(raw_vix) > 0.0 else 0.0
+
+            if vix_val > 0.0:
+                with self._lock:
+                    self._vix_cache = (time.time(), vix_val)
+        except Exception as e:
+            logger.debug(f"[MarketDynamicsGovernor] Background VIX refresh error: {e}")
+        finally:
+            with self._lock:
+                self._vix_fetching = False
 
     def get_calibration(
         self,
@@ -445,17 +489,21 @@ class MarketDynamicsGovernor:
             _, current_vix = self._vix_cache
 
         current_phase = get_intraday_phase()
-        vol_regime, _ = get_volatility_regime(current_vix)
+        has_live_vix = current_vix is not None and float(current_vix) > 0
+        if not has_live_vix:
+            # Trigger non-blocking background refresh; never block /api/system/health-hub on REST
+            self.get_live_vix()
+        vol_regime = get_volatility_regime(float(current_vix))[0] if has_live_vix else "UNKNOWN"
 
         return {
-            "status": "HEALTHY",
+            "status": "HEALTHY" if has_live_vix else "DEGRADED",
             "current_phase": current_phase,
             "volatility_regime": vol_regime,
-            "india_vix": round(current_vix, 2),
+            "india_vix": round(float(current_vix), 2) if has_live_vix else None,
             "cached_calibrations": cached_count,
             "cache_ttl_seconds": self._cache_ttl,
             "sample_index_calibration": self.get_calibration(
-                "NIFTY", vix_override=current_vix
+                "NIFTY", vix_override=(float(current_vix) if has_live_vix else 0.0)
             ).to_dict(),
         }
 

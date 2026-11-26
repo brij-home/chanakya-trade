@@ -206,3 +206,192 @@ def build_iv_surface_snapshot(
         near_dte=near_dte,
         next_dte=next_dte,
     )
+
+
+def _get_iv_db_path():
+    from config.paths import app_data_path
+
+    return app_data_path("iv_history.db")
+
+
+def extract_surface_inputs_from_chain(
+    chain: list[Any],
+    spot: float,
+    as_of_date: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Extract near/next ATM IVs, DTEs, and 25-delta skew IVs from a real option chain."""
+    from datetime import date as dt_date
+
+    if not chain or spot <= 0:
+        return {}
+
+    ref_date = as_of_date or datetime.now().date()
+    if isinstance(ref_date, datetime):
+        ref_date = ref_date.date()
+
+    by_exp: dict[dt_date, list[dict[str, Any]]] = {}
+    for c in chain:
+        is_d = isinstance(c, dict)
+        exp_raw = c.get("expiry") if is_d else getattr(c, "expiry", None)
+        iv_raw = c.get("iv", 0.0) if is_d else getattr(c, "iv", 0.0)
+        strike_raw = c.get("strike", 0.0) if is_d else getattr(c, "strike", 0.0)
+        opt_raw = c.get("option_type", "") if is_d else getattr(c, "option_type", "")
+        delta_raw = c.get("delta", None) if is_d else getattr(c, "delta", None)
+
+        try:
+            iv_val = float(iv_raw or 0.0)
+            strike_val = float(strike_raw or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if iv_val <= 0 or strike_val <= 0 or not exp_raw:
+            continue
+
+        try:
+            exp_d = (
+                exp_raw
+                if isinstance(exp_raw, dt_date) and not isinstance(exp_raw, datetime)
+                else dt_date.fromisoformat(str(exp_raw).strip()[:10])
+            )
+        except ValueError:
+            continue
+
+        dte = (exp_d - ref_date).days
+        if dte <= 0:
+            continue
+        by_exp.setdefault(exp_d, []).append(
+            {
+                "strike": strike_val,
+                "iv": iv_val,
+                "option_type": str(opt_raw or "").upper(),
+                "delta": delta_raw,
+                "dte": dte,
+            }
+        )
+
+    if not by_exp:
+        return {}
+
+    sorted_exps = sorted(by_exp.keys())
+
+    def _atm_iv(rows: list[dict[str, Any]]) -> Optional[float]:
+        closest_strike = min(rows, key=lambda r: abs(r["strike"] - spot))["strike"]
+        atm_ivs = [r["iv"] for r in rows if r["strike"] == closest_strike and r["iv"] > 0]
+        return round(sum(atm_ivs) / len(atm_ivs), 4) if atm_ivs else None
+
+    near_rows = by_exp[sorted_exps[0]]
+    near_atm = _atm_iv(near_rows)
+    near_dte = near_rows[0]["dte"]
+
+    next_atm = None
+    next_dte = None
+    if len(sorted_exps) >= 2:
+        next_rows = by_exp[sorted_exps[1]]
+        next_atm = _atm_iv(next_rows)
+        next_dte = next_rows[0]["dte"]
+
+    iv_25p = None
+    iv_25c = None
+    puts_with_d = [r for r in near_rows if r["option_type"] == "PE" and r["delta"] is not None]
+    calls_with_d = [r for r in near_rows if r["option_type"] == "CE" and r["delta"] is not None]
+    if puts_with_d:
+        iv_25p = min(puts_with_d, key=lambda r: abs(abs(float(r["delta"])) - 0.25))["iv"]
+    if calls_with_d:
+        iv_25c = min(calls_with_d, key=lambda r: abs(abs(float(r["delta"])) - 0.25))["iv"]
+
+    return {
+        "near_atm_iv": near_atm,
+        "near_dte": near_dte,
+        "next_atm_iv": next_atm,
+        "next_dte": next_dte,
+        "iv_25d_put": iv_25p,
+        "iv_25d_call": iv_25c,
+        "near_expiry": sorted_exps[0].isoformat(),
+        "next_expiry": sorted_exps[1].isoformat() if len(sorted_exps) >= 2 else None,
+    }
+
+
+def record_iv_observation(snapshot: IVSurfaceSnapshot, session_date: Optional[str] = None) -> bool:
+    """Persist one daily constant-tenor 30D IV observation (idempotent per symbol+date)."""
+    import sqlite3
+
+    if (
+        snapshot.status != "AVAILABLE"
+        or snapshot.atm_iv_30d is None
+        or not math.isfinite(snapshot.atm_iv_30d)
+        or snapshot.atm_iv_30d <= 0
+    ):
+        return False
+
+    sym = str(snapshot.symbol or "").upper().strip()
+    from contextlib import closing
+
+    if not sym:
+        return False
+
+    s_date = session_date or str(snapshot.as_of or "")[:10] or datetime.now().date().isoformat()
+    db_path = _get_iv_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS iv_daily_surface (
+                    symbol TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    atm_iv_30d REAL NOT NULL,
+                    skew_25d REAL,
+                    near_dte INTEGER,
+                    next_dte INTEGER,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (symbol, session_date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO iv_daily_surface
+                    (symbol, session_date, atm_iv_30d, skew_25d, near_dte, next_dte, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, session_date) DO UPDATE SET
+                    atm_iv_30d = excluded.atm_iv_30d,
+                    skew_25d = excluded.skew_25d,
+                    near_dte = excluded.near_dte,
+                    next_dte = excluded.next_dte,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    sym,
+                    s_date,
+                    float(snapshot.atm_iv_30d),
+                    float(snapshot.skew_25d) if snapshot.skew_25d is not None else None,
+                    snapshot.near_dte,
+                    snapshot.next_dte,
+                    snapshot.as_of,
+                ),
+            )
+    return True
+
+
+def load_historical_30d_ivs(symbol: str, limit: int = 252) -> list[float]:
+    """Load persisted chronological daily constant-30D ATM IV observations."""
+    from contextlib import closing
+    import sqlite3
+
+    sym = str(symbol or "").upper().strip()
+    db_path = _get_iv_db_path()
+    if not sym or not db_path.exists():
+        return []
+    with closing(sqlite3.connect(str(db_path), timeout=10.0)) as conn:
+        rows = conn.execute(
+            """
+            SELECT atm_iv_30d FROM (
+                SELECT session_date, atm_iv_30d
+                FROM iv_daily_surface
+                WHERE symbol = ?
+                ORDER BY session_date DESC
+                LIMIT ?
+            ) ORDER BY session_date ASC
+            """,
+            (sym, max(1, int(limit))),
+        ).fetchall()
+    return [float(r[0]) for r in rows if r and r[0] is not None and float(r[0]) > 0]

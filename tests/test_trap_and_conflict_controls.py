@@ -916,3 +916,290 @@ def test_in_flight_directional_lockout_protects_profitable_spreads():
     assert len(engine._alerts) == 1
     assert engine._alerts[0].direction == "BULLISH"
     assert engine._alerts[0].stage == "SPREAD_PROFIT_70"
+
+
+def test_index_00f2_and_1c_prevent_10min_pingpong_on_midcpnifty():
+    """
+    RCA Batch 3 regression guard for #SIG_MIDCPNIFTY_14175CE_25NOV_1402 vs PE_1412:
+    1. Index symbols (MIDCPNIFTY) must NOT bypass 00f-2 opposite-direction gate.
+    2. Routine tags like CALL_WRITING_CEILING / TREND_PULLBACK_REJECTION or tiny 0.08% noise
+       after IN_FLIGHT_WARNING within <10 minutes must NOT flip direction.
+    """
+    from datetime import datetime, timedelta
+    from config.constants import IST_ZONE as IST
+
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    now_dt = datetime.now(IST)
+    ce_active = AutoAlert(
+        alert_id="aa-index-call-setup-midcpnifty-ce-14175-1315-20261125",
+        expiry_date="2026-12-29",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IN_FLIGHT_WARNING",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NFO:MIDCPNIFTY26DEC14175CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="MIDCPNIFTY 14175 CE",
+        summary="Call warning",
+        option_type="CE",
+        strike=14175,
+        underlying_spot=14171.35,
+        ltp=376.3,
+        trigger_level=385.7,
+        stop_loss=327.8,
+        target_level=501.5,
+        is_live=True,
+        environment="LIVE",
+        confidence=92,
+        created_at=(now_dt - timedelta(minutes=6)).strftime("%Y-%m-%d %H:%M:%S IST"),
+        metrics={
+            "underlying": "MIDCPNIFTY",
+            "hbcm": {"confluence_pass": True, "total_heavyweights": 5, "bullish_count": 4},
+        },
+    )
+    engine._alerts.append(ce_active)
+
+    pe_conflict = AutoAlert(
+        alert_id="aa-index-put-setup-midcpnifty-pe-14175-1315-20261125",
+        expiry_date="2026-12-29",
+        alert_type="INDEX_PUT_SETUP",
+        stage="PRIMED",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NFO:MIDCPNIFTY26DEC14175PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 14175 PE",
+        summary="Routine pullback PE",
+        option_type="PE",
+        strike=14175,
+        underlying_spot=14180.6,
+        ltp=316.0,
+        trigger_level=316.0,
+        stop_loss=284.1,
+        target_level=379.8,
+        is_live=True,
+        environment="LIVE",
+        confidence=94,
+        metrics={
+            "underlying": "MIDCPNIFTY",
+            "signals": ["CALL_WRITING_CEILING", "TREND_PULLBACK_REJECTION", "DAY_LOW_PROXIMITY"],
+            "hbcm": {"confluence_pass": True, "total_heavyweights": 5, "bearish_count": 4},
+        },
+    )
+    ok = engine.record_alert(pe_conflict)
+    assert ok is False, "Index opposing PE within <10m without structural reversal must be blocked"
+    assert len(engine._alerts) == 1
+    assert engine._alerts[0].alert_id == ce_active.alert_id
+    engine.clear_alerts()
+
+
+def test_hbcm_and_feature_bus_cover_midcpnifty():
+    """MIDCPNIFTY must have weighted constituent coverage in HBCM and FeatureBus."""
+    from engine.hbcm import get_hbcm_constituents, evaluate_hbcm
+    from engine.feature_bus import compute_constituent_lead_lag
+
+    consts = get_hbcm_constituents("MIDCPNIFTY")
+    assert len(consts) == 5
+    syms = {c["symbol"] for c in consts}
+    assert {"PERSISTENT", "COFORGE", "DIXON", "MAXHEALTH", "FEDERALBNK"}.issubset(syms)
+
+    # Verify real evaluation returns HBCM_PASS / HBCM_VETO instead of HBCM_NOT_APPLICABLE
+    mock_quotes = {
+        f"NSE:{s}": {"last_price": 1000.0, "vwap": 1015.0, "change_pct": -2.0} for s in syms
+    }
+    res_bull = evaluate_hbcm("MIDCPNIFTY", direction="BULLISH", mock_quotes=mock_quotes)
+    assert res_bull.summary != "HBCM_NOT_APPLICABLE"
+    assert res_bull.total_heavyweights == 5
+    assert res_bull.confluence_pass is False
+
+    lead = compute_constituent_lead_lag("MIDCPNIFTY", quotes_map=mock_quotes)
+    assert lead["status"] == "AVAILABLE"
+    assert lead["lead_bias"] == "BEARISH_LEAD"
+
+
+def test_hierarchical_pipeline_vetoes_counter_flow_conflict_instead_of_apex():
+    """
+    A counter-trend CE setup with >=4 opposing institutional pillars (15m BEARISH,
+    TRIPLE_BEARISH_CONFIRMED, AVWAP BEARISH, Heavyweights BEARISH, FII BEARISH)
+    must be vetoed in Level 1 instead of receiving APEX_APPROVED.
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+    from config.constants import IST_ZONE as IST
+    from engine.pipeline.hierarchical_engine import HierarchicalSignalPipeline
+
+    pipeline = HierarchicalSignalPipeline()
+    bad_ce = AutoAlert(
+        alert_id="test-counter-flow-ce",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NFO:MIDCPNIFTY26DEC14175CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Counter-trend bottom catch",
+        summary="PDL bounce",
+        option_type="CE",
+        strike=14175,
+        underlying_spot=14171.35,
+        ltp=376.3,
+        trigger_level=385.7,
+        stop_loss=327.8,
+        target_level=501.5,
+        confidence=92,
+        metrics={
+            "vwap": 14252.77,
+            "cpr": {"pivot": 14248.0},
+            "dmi_triple_verdict": "TRIPLE_BEARISH_CONFIRMED",
+            "avwap_bias": "BEARISH",
+            "obv_divergence": "BEARISH_DIVERGENCE",
+            "eagle_regime": {
+                "multi_tf": {"trend_15m": "BEARISH", "trend_5m": "BEARISH"},
+                "heavyweights_alignment": "MODERATE_BEARISH",
+            },
+        },
+    )
+    verdict = pipeline.evaluate(bad_ce, ref_dt=datetime(2026, 11, 25, 14, 2, tzinfo=IST))
+    assert verdict.passed is False
+    assert verdict.verdict_label == "VETOED_COUNTER_FLOW_CONFLICT"
+    assert verdict.level1_context.status == "COUNTER_FLOW_CONFLICT"
+    assert isinstance(SimpleNamespace, type)  # keep imports clean
+
+
+def test_daily_levels_slices_future_bars_without_negative_age_rejection(tmp_path):
+    """DailyLevels must filter df_day < session_date instead of rejecting trailing future dates."""
+    import pandas as pd
+    from types import SimpleNamespace
+    from engine.daily_levels import DailyLevelsStore
+
+    store = DailyLevelsStore()
+    store._persist_dir = tmp_path
+
+    dates = pd.to_datetime(["2026-11-23", "2026-11-24", "2026-11-25", "2026-12-11"])
+    df = pd.DataFrame(
+        {
+            "open": [3400.0, 3420.0, 3430.0, 3500.0],
+            "high": [3440.0, 3460.0, 3470.0, 3550.0],
+            "low": [3390.0, 3410.0, 3420.0, 3480.0],
+            "close": [3430.0, 3450.0, 3460.0, 3520.0],
+            "volume": [1000, 1200, 1100, 1300],
+        },
+        index=dates,
+    )
+    q = SimpleNamespace(last_price=3465.0, close=3450.0)
+    dl = store.compute_and_store(
+        "TITAN", exchange="NSE", session_date="2026-11-25", preloaded_df=df, preloaded_quote=q
+    )
+    assert dl is not None
+    assert dl.pdh == 3460.0
+    assert dl.pdl == 3410.0
+    assert dl.pdc == 3450.0
+
+
+def test_institutional_reversal_suppresses_inverted_bearish_sl(monkeypatch):
+    """When live LTP already exceeds reversal stop_loss for TOP_REVERSAL, detector must suppress instead of failing integrity."""
+    import pandas as pd
+    from types import SimpleNamespace
+    from engine.detectors.institutional_reversal import detect_institutional_reversals
+
+    dates = pd.date_range("2026-11-25 09:15", periods=25, freq="5min")
+    df = pd.DataFrame(
+        {
+            "open": [14200.0] * 25,
+            "high": [14210.0] * 25,
+            "low": [14180.0] * 25,
+            "close": [14195.0] * 25,
+            "volume": [5000] * 25,
+        },
+        index=dates,
+    )
+    fake_sig = SimpleNamespace(
+        reversal_type="TOP_REVERSAL",
+        bias="BEARISH",
+        confidence=85,
+        stop_loss=14210.64,
+        target_1=14140.0,
+        target_2=14110.0,
+        target_3=14080.0,
+        risk_reward_ratio=2.5,
+        phase3_confirmation=True,
+        summary="Top reversal",
+    )
+    monkeypatch.setattr(
+        "engine.detectors.institutional_reversal.analyse_reversal", lambda **kw: fake_sig
+    )
+    res = detect_institutional_reversals("MIDCPNIFTY", df=df, ltp=14213.20, timeframe="5m")
+    assert res == []
+
+
+def test_telegram_notify_forwards_wait_flag():
+    """Verify engine.alerts._telegram_notify source declares wait: bool = False."""
+    from pathlib import Path
+
+    src = Path("engine/alerts.py").read_text(encoding="utf-8")
+    assert "wait: bool = False" in src
+    assert "wait=wait" in src
+
+
+def test_midcpnifty_and_monthly_stock_option_intraday_calibration():
+    """
+    Batch 5 regression guard (#SIG_MIDCPNIFTY_14175CE_25NOV_1433):
+    1. MIDCPNIFTY 34-DTE ₹385 option MUST NOT get swing-sized 58-pt SL / +116-pt T1.
+    2. Monthly stock options >= ₹150 MUST NOT get flat -22% SL / +44% T1 intraday targets.
+    """
+    from engine.trade_plan import calculate_trade_plan, calculate_option_execution_plan
+    from engine.option_resolver import resolve_option_contract
+
+    tp_mid = calculate_trade_plan(
+        symbol="MIDCPNIFTY",
+        spot=14180.0,
+        direction="BULLISH",
+        timeframe="INTRADAY",
+    )
+    opt_mid = calculate_option_execution_plan(
+        trade_plan=tp_mid,
+        option_type="CE",
+        strike=14175.0,
+        expiry="2026-12-29",
+        option_ltp=385.0,
+        lot_size=120,
+        spot=14180.0,
+        contract_symbol="NSE:MIDCPNIFTY26DEC14175CE",
+    )
+    mid_risk = 385.0 - opt_mid["sl_premium"]
+    mid_t1_gain = opt_mid["t1_premium"] - 385.0
+    assert mid_risk <= 45.0, f"MIDCPNIFTY SL risk too wide: {mid_risk}"
+    assert mid_t1_gain <= 36.5, f"MIDCPNIFTY T1 gain {mid_t1_gain} is swing-sized (> 36.5 pts)"
+
+    # Monthly expensive stock option (₹300+) intraday plan must cap drawdown <= 15% and T1 <= 25%
+    tp_stk = calculate_trade_plan(
+        symbol="EICHERMOT",
+        spot=8250.0,
+        direction="BULLISH",
+        timeframe="INTRADAY",
+    )
+    opt_stk = calculate_option_execution_plan(
+        trade_plan=tp_stk,
+        option_type="CE",
+        strike=8300.0,
+        expiry="2026-12-29",
+        option_ltp=280.0,
+        lot_size=100,
+        spot=8250.0,
+        contract_symbol="NSE:EICHERMOT26DEC8300CE",
+    )
+    assert (280.0 - opt_stk["sl_premium"]) / 280.0 <= 0.155
+    assert (opt_stk["t1_premium"] - 280.0) / 280.0 <= 0.255
+
+    # Option resolver must also honor MIDCPNIFTY intraday cap
+    res_mid = resolve_option_contract(
+        symbol="MIDCPNIFTY",
+        spot=14180.0,
+        direction="BULLISH",
+        prefer_options=True,
+    )
+    if res_mid and res_mid.entry_premium >= 150.0:
+        assert (res_mid.entry_premium - res_mid.sl_premium) <= 18.5
+        assert (res_mid.t1_premium - res_mid.entry_premium) <= 36.5

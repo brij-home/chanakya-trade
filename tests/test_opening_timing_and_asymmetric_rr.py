@@ -11,7 +11,7 @@ Regression and invariant tests for:
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -165,7 +165,7 @@ def test_index_micro_scalp_timing_at_09_16_15_and_apex_compliance():
             oi=10000,
             volume=5000,
             pchange=15.0,
-            expiry="2026-11-26",
+            expiry=(datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d"),
         ):
             self.symbol = sym
             self.strike = strike

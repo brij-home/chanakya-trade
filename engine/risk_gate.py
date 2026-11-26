@@ -179,6 +179,7 @@ def compute_allowed_actions(
     max_sector_pct: float = 0.30,  # Max portfolio concentration in a single sector (default 30%)
     dte: int | None = None,  # Days to expiry for derivative contracts
     direction: Literal["BULLISH", "BEARISH", "BOTH"] = "BULLISH",
+    advisory_mode: bool = False,
 ) -> AllowedAction:
     """
     Compute what actions are allowed for this symbol before LLM sees it.
@@ -197,6 +198,9 @@ def compute_allowed_actions(
     sym = symbol.upper()
     flags: list[str] = []
     warnings: list[str] = []
+    disclaimers: list[str] = []
+    coaching_recs: list[str] = []
+    requires_double_confirmation: bool = False
 
     total_capital = _get_capital(capital)
     current_price = _get_price(sym, prices)
@@ -216,23 +220,38 @@ def compute_allowed_actions(
 
     # ── Check 1: Daily loss cap / trade counts / tilt lockout ────────────────
     rl = _get_risk_limits()
-    try:
-        # Use a zero-price dummy call to check daily caps and tilt lockout
-        rl.check(sym, "BUY", 1, 0.0)
-    except Exception as exc:
-        reason = str(exc).splitlines()[0]
-        if "tilt" in reason.lower():
-            flags.append("TILT_LOCKOUT")
-        return AllowedAction(
-            symbol=sym,
-            allowed=False,
-            direction="NONE",
-            max_qty=0,
-            max_capital=0.0,
-            flags=flags,
-            block_reason=reason,
-            warnings=warnings,
-        )
+    is_advisory_active = advisory_mode or (
+        os.environ.get("RISK_GATE_ADVISORY_MODE", "0").lower() in ("1", "true")
+    )
+    if is_advisory_active:
+        preflight = rl.evaluate_preflight(sym, "BUY", 1, 0.0, allow_override=True)
+        if preflight.flags:
+            flags.extend(preflight.flags)
+            warnings.extend(preflight.disclaimers)
+            disclaimers.extend(preflight.disclaimers)
+            coaching_recs.extend(preflight.coaching_recommendations)
+            requires_double_confirmation = True
+    else:
+        try:
+            # Use a zero-price dummy call to check daily caps and tilt lockout
+            rl.check(sym, "BUY", 1, 0.0)
+        except Exception as exc:
+            reason = str(exc).splitlines()[0]
+            if "tilt" in reason.lower():
+                flags.append("TILT_LOCKOUT")
+            return AllowedAction(
+                symbol=sym,
+                allowed=False,
+                direction="NONE",
+                max_qty=0,
+                max_capital=0.0,
+                flags=flags,
+                block_reason=reason,
+                warnings=warnings,
+                requires_double_confirmation=True,
+                disclaimers=[reason],
+                coaching_recommendations=["Take a mindful break to protect mental clarity."],
+            )
 
     # ── Single-Stock Position Limit (10% of capital) ──
     position_limit = total_capital * 0.10  # 10% cap
@@ -386,6 +405,11 @@ def compute_allowed_actions(
         allowed_out = True
         block_msg = ""
 
+    # Co-pilot advisory sizing reduction: if behavioural flags triggered, advise 50% sizing
+    if is_advisory_active and requires_double_confirmation and max_qty > 0:
+        max_qty = max(1, int(max_qty * 0.5))
+        max_capital = max_capital * 0.5
+
     return AllowedAction(
         symbol=sym,
         allowed=allowed_out,
@@ -395,4 +419,7 @@ def compute_allowed_actions(
         flags=flags,
         block_reason=block_msg,
         warnings=warnings,
+        requires_double_confirmation=requires_double_confirmation,
+        disclaimers=disclaimers,
+        coaching_recommendations=coaching_recs,
     )

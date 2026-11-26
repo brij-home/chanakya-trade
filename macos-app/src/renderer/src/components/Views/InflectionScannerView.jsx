@@ -53,7 +53,15 @@ const TIMING_TABS = [
  */
 function resolveCandidateRiskLevels(c) {
   const af = c.anti_fomo || {}
-  const entry = Number(c.entry_price || af.fair_value_anchor || c.ltp || 0)
+  const isExtended = Boolean(
+    c.is_extended ||
+      c.extension_status === 'OVEREXTENDED_WAIT' ||
+      af.action_directive === 'WAIT_FOR_PULLBACK'
+  )
+  const rawEntry = isExtended
+    ? c.pullback_limit_entry || af.pullback_limit_entry || c.entry_price || af.fair_value_anchor || c.ltp
+    : c.entry_price || af.fair_value_anchor || c.ltp
+  const entry = Number(rawEntry || 0)
   const stop = Number(c.stop_loss || af.invalidation_stop || (entry > 0 ? entry * 0.93 : 0))
   const risk = Math.max(0.1, entry > stop ? entry - stop : entry * 0.07)
   const t1 = Number(c.target_1 || (entry > 0 ? entry + 2 * risk : 0))
@@ -65,6 +73,9 @@ function resolveCandidateRiskLevels(c) {
 
   return {
     entry_price: entry,
+    pullback_limit_entry: entry,
+    no_chase_boundary: Number(c.no_chase_boundary || af.no_chase_boundary || 0),
+    is_extended: isExtended,
     stop_loss: stop,
     target_1: t1,
     target_2: t2,
@@ -308,8 +319,14 @@ export default function InflectionScannerView({
   const loadIncubationPipeline = async () => {
     setIsLoadingIncubation(true)
     try {
+      const hParam =
+        horizonFilter instanceof Set
+          ? horizonFilter.size === 1
+            ? Array.from(horizonFilter)[0]
+            : 'ALL'
+          : horizonFilter || 'ALL'
       const res = await call('/skills/incubation_pipeline', {
-        horizon: horizonFilter,
+        horizon: hParam,
         cycle_state: 'ALL',
       })
       if (res?.data?.candidates) {
@@ -1750,22 +1767,28 @@ export default function InflectionScannerView({
                               type="button"
                               onClick={() => {
                                 if (onOpenOrderTicket) {
+                                  const waitPullback = af.action_directive === 'WAIT_FOR_PULLBACK'
                                   onOpenOrderTicket({
                                     symbol: c.symbol,
                                     exchange: 'NSE',
-                                    price: af.accumulate_low || c.ltp,
+                                    price: waitPullback ? (af.pullback_limit_entry || af.accumulate_low || c.ltp) : (af.accumulate_low || c.ltp),
+                                    orderType: waitPullback ? 'LIMIT' : undefined,
                                     stopLoss: af.invalidation_stop,
                                     target: (af.fair_value_anchor || c.ltp) * 2.0,
                                     target2: (af.fair_value_anchor || c.ltp) * 4.0,
                                     targetMoonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                                    _priceSource: 'FAIR_VALUE_POC',
+                                    _priceSource: waitPullback ? 'ANTI_FOMO_PULLBACK_LIMIT' : 'FAIR_VALUE_POC',
                                   })
                                 }
                               }}
-                              className="px-2.5 py-1 rounded-lg border border-emerald-500/40 bg-emerald-500/20 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
-                              title="Stage limit accumulation order at Fair Value"
+                              className={`px-2.5 py-1 rounded-lg border text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-xs ${
+                                af.action_directive === 'WAIT_FOR_PULLBACK'
+                                  ? 'border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25'
+                                  : 'border-emerald-500/40 bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/30'
+                              }`}
+                              title={af.action_directive === 'WAIT_FOR_PULLBACK' ? 'Overextended: place limit order at Pullback Level (No FOMO)' : 'Stage limit accumulation order at Fair Value'}
                             >
-                              ⚡ Buy
+                              {af.action_directive === 'WAIT_FOR_PULLBACK' ? '⏳ Limit' : '⚡ Buy'}
                             </button>
                           </div>
                         </td>
@@ -2841,6 +2864,14 @@ export default function InflectionScannerView({
                       VCP {c.vcp_tightness_pct}%
                     </span>
                   )}
+                  {(c.is_extended || c.extension_status === 'OVEREXTENDED_WAIT') && (
+                    <span
+                      className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30"
+                      title="Anti-FOMO Guard: Price extended past structural anchor. Place limit at Pullback Entry."
+                    >
+                      ⏳ WAIT PULLBACK · ≤₹{(c.no_chase_boundary || c.entry_price || 0).toFixed(1)}
+                    </span>
+                  )}
                 </div>
 
                 {/* 3-Pillar Score Micro Strip & Executive Summary */}
@@ -2883,8 +2914,15 @@ export default function InflectionScannerView({
                       )
                     })()}
                     <div>
-                      <span className="text-[10.5px] text-muted block">ENTRY</span>
-                      <span className="font-bold text-text">₹{c.entry_price.toFixed(1)}</span>
+                      <span className="text-[10.5px] text-muted block">
+                        {(c.is_extended || c.extension_status === 'OVEREXTENDED_WAIT') ? 'PULLBACK LIMIT' : 'ENTRY'}
+                      </span>
+                      <span className="font-bold text-text">₹{(c.pullback_limit_entry > 0 && c.is_extended ? c.pullback_limit_entry : c.entry_price).toFixed(1)}</span>
+                      {c.no_chase_boundary > 0 && (
+                        <span className="block text-[9.5px] text-rose-600 dark:text-rose-400">
+                          Max ₹{c.no_chase_boundary.toFixed(1)}
+                        </span>
+                      )}
                     </div>
                     <div>
                       <span className="text-[10.5px] text-muted block">STOP LOSS</span>
@@ -2954,21 +2992,33 @@ export default function InflectionScannerView({
                         if (onOpenOrderTicket) {
                           const liveTick = getTicker(c.symbol)
                           const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                          const spotRef = livePrice ?? c.ltp
+                          const isExtended = Boolean(
+                            c.is_extended ||
+                              c.extension_status === 'OVEREXTENDED_WAIT' ||
+                              (c.no_chase_boundary > 0 && spotRef > c.no_chase_boundary)
+                          )
+                          const limitPrice = c.pullback_limit_entry > 0 ? c.pullback_limit_entry : c.entry_price
                           onOpenOrderTicket({
                             symbol: c.symbol,
                             exchange: 'NSE',
-                            price: livePrice ?? c.entry_price,
+                            price: isExtended ? limitPrice : (livePrice ?? c.entry_price),
+                            orderType: isExtended ? 'LIMIT' : undefined,
                             stopLoss: c.stop_loss,
                             target: c.target_1,
                             target2: c.target_2,
                             targetMoonshot: c.target_moonshot,
-                            _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
+                            _priceSource: isExtended ? 'ANTI_FOMO_PULLBACK_LIMIT' : (livePrice ? 'LIVE' : 'EOD_ENTRY'),
                           })
                         }
                       }}
-                      className="px-2.5 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/15 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25 transition-all cursor-pointer"
+                      className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${
+                        (c.is_extended || c.extension_status === 'OVEREXTENDED_WAIT')
+                          ? 'border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25'
+                          : 'border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25'
+                      }`}
                     >
-                      ⚡ Order
+                      {(c.is_extended || c.extension_status === 'OVEREXTENDED_WAIT') ? '⏳ Limit' : '⚡ Order'}
                     </button>
                   </div>
                 </div>
@@ -3036,24 +3086,38 @@ export default function InflectionScannerView({
                     if (onOpenOrderTicket && activeCandidate) {
                       const liveTick = getTicker(activeCandidate.symbol)
                       const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                      const spotRef = livePrice ?? activeCandidate.ltp
+                      const isExtended = Boolean(
+                        activeCandidate.is_extended ||
+                          activeCandidate.extension_status === 'OVEREXTENDED_WAIT' ||
+                          (activeCandidate.no_chase_boundary > 0 && spotRef > activeCandidate.no_chase_boundary)
+                      )
+                      const limitPrice = activeCandidate.pullback_limit_entry > 0 ? activeCandidate.pullback_limit_entry : activeCandidate.entry_price
                       onOpenOrderTicket({
                         symbol: activeCandidate.symbol,
                         exchange: 'NSE',
-                        price: livePrice ?? activeCandidate.entry_price,
+                        price: isExtended ? limitPrice : (livePrice ?? activeCandidate.entry_price),
+                        orderType: isExtended ? 'LIMIT' : undefined,
                         stopLoss: activeCandidate.stop_loss,
                         target: activeCandidate.target_1,
-                        _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
+                        _priceSource: isExtended ? 'ANTI_FOMO_PULLBACK_LIMIT' : (livePrice ? 'LIVE' : 'EOD_ENTRY'),
                       })
                     }
                   }}
                   className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
                     activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED'
                       ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30'
+                      : (activeCandidate?.is_extended || activeCandidate?.extension_status === 'OVEREXTENDED_WAIT')
+                      ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
                       : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
                   }`}
-                  title={activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' ? 'Stock is Upper Circuit Locked' : 'Open Order Ticket'}
+                  title={activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' ? 'Stock is Upper Circuit Locked' : (activeCandidate?.is_extended ? 'Overextended: stage Limit Order at Pullback Entry' : 'Open Order Ticket')}
                 >
-                  {activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' ? '🔒 Circuit Ticket (Limit)' : '⚡ Order Ticket'}
+                  {activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED'
+                    ? '🔒 Circuit Ticket (Limit)'
+                    : (activeCandidate?.is_extended || activeCandidate?.extension_status === 'OVEREXTENDED_WAIT')
+                    ? '⏳ Limit @ Pullback'
+                    : '⚡ Order Ticket'}
                 </button>
                 <button
                   type="button"

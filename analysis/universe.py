@@ -47,8 +47,6 @@ CORPORATE_ALIASES: dict[str, str] = {
     "HDFC": "HDFCBANK",
     # Tata Motors DVR delisted (Oct 2024), mapped to ordinary shares
     "TATAMTRDVR": "TATAMOTORS",
-    # Adani Wilmar spun off from Adani Enterprises (Feb 2023)
-    "AWL": "ADANIENT",
     # Reliance Jio Financial Services demerger (Aug 2023)
     "JIOFIN": "JIOFIN",
     # HDFC AMC -- ticker unchanged; alias entry for forward compatibility

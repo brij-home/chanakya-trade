@@ -15,7 +15,7 @@
 export default function ModeBanner({ mode, loading = false, pilotSafety = null }) {
   if (loading) return null
 
-  const cfg = MODE_CONFIG[mode] ?? MODE_CONFIG.PAPER
+  const cfg = MODE_CONFIG[mode] ?? MODE_CONFIG.UNKNOWN
 
   return (
     <div
@@ -90,5 +90,13 @@ const MODE_CONFIG = {
     borderColor: 'rgba(255, 79, 123, 0.25)',
     color: 'rgba(255, 79, 123, 0.9)',
     dotColor: '#ff4f7b',
+  },
+  UNKNOWN: {
+    label: '⚠️ MODE UNAVAILABLE',
+    description: 'Backend mode unverified · Execution locked',
+    bg: 'rgba(244, 63, 94, 0.12)',
+    borderColor: 'rgba(244, 63, 94, 0.45)',
+    color: 'rgba(251, 113, 133, 0.95)',
+    dotColor: '#f43f5e',
   },
 }

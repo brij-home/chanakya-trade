@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 /**
  * SystemHealthPill — Institutional proactive health badge in top navigation.
@@ -38,11 +39,10 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
     }
   }, [port, sidecarError])
 
-  // Periodic polling every 10 seconds
+  // Periodic polling every 10 seconds (pauses when tab/window hidden)
   useEffect(() => {
     fetchHealth()
-    const interval = setInterval(fetchHealth, 10000)
-    return () => clearInterval(interval)
+    return createVisibilityInterval(fetchHealth, 10000)
   }, [fetchHealth])
 
   // Listen to instantaneous SSE events dispatched from App.jsx
@@ -105,6 +105,10 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
   const cbState = cb.state || 'CLOSED'
   const isCbTripped = cbState === 'OPEN'
   const isDailyExhausted = !!cb.daily_quota_exhausted
+  const failover = healthData?.broker_failover || {}
+  const tbt = healthData?.tbt || {}
+  const tbtActive = Number(tbt?.active_total || 0)
+  const tbtMax = Number(tbt?.max_slots || 15)
   const overall = healthData?.overall_status || (isCbTripped || activeP0 > 0 ? 'CRITICAL' : activeP1 > 0 ? 'DEGRADED' : 'HEALTHY')
 
   let badgeColor = 'var(--color-emerald)'
@@ -112,6 +116,14 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
   let badgeBorder = 'rgba(0, 214, 143, 0.35)'
   let label = 'NOMINAL'
   let subText = ''
+
+  if (failover.failover_active) {
+    subText = 'FAILOVER:FT'
+  } else if (tbtActive > 0) {
+    subText = `50D ${tbtActive}/${tbtMax}`
+  } else if (failover.flattrade_standby_ready) {
+    subText = 'FT STBY'
+  }
 
   if (overall === 'CRITICAL' || isCbTripped || activeP0 > 0) {
     badgeColor = 'var(--color-rose)'
@@ -131,6 +143,10 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
     label = cbState === 'HALF_OPEN' ? 'PROBING' : activeP1 > 0 ? `DEGRADED (${activeP1})` : 'DEGRADED'
   }
 
+  const routingTooltip = failover.primary_data_broker
+    ? `\nData: ${failover.primary_data_broker} | Exec: ${failover.execution_broker || 'fyers'} | Standby: ${failover.flattrade_standby_ready ? 'FLATTRADE READY' : 'OFFLINE'} | Depth: ${failover.active_depth_tier || '5-DEPTH'}`
+    : ''
+
   return (
     <div className="flex items-center gap-1">
       <button
@@ -143,7 +159,7 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
           borderColor: badgeBorder,
           color: badgeColor,
         }}
-        title={`OpsDeck Health Status: ${overall}\nP0 Critical: ${p0Count} | P1 High: ${p1Count} | Breaker: ${cbState}\n• Click to open Ops Drawer\n• Double-click for full OpsDeck`}
+        title={`OpsDeck Health Status: ${overall}\nP0 Critical: ${p0Count} | P1 High: ${p1Count} | Breaker: ${cbState}${routingTooltip}\n• Click to open Ops Drawer\n• Double-click for full OpsDeck`}
       >
         <span
           className={`w-2 h-2 rounded-full ${overall !== 'HEALTHY' ? 'animate-pulse' : ''}`}

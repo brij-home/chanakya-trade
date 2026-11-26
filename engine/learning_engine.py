@@ -922,6 +922,10 @@ class PatternLearningEngine:
             else alert.get("alert_type", "SETUP")
         )
 
+        act_plan = getattr(alert, "actionable_plan", {}) or (
+            alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
+        )
+
         is_opt = bool(
             getattr(alert, "option_type", None)
             or (
@@ -932,21 +936,35 @@ class PatternLearningEngine:
                 getattr(alert, "alert_type", "") == "GAMMA_BLAST"
                 and getattr(alert, "option_type", None)
             )
+            or (
+                act_plan
+                and (
+                    act_plan.get("option_type") in ("CE", "PE")
+                    or (
+                        act_plan.get("contract")
+                        and any(x in str(act_plan.get("contract")).upper() for x in ("CE", "PE"))
+                    )
+                    or (act_plan.get("instrument_type") == "OPTION")
+                    or bool(act_plan.get("option_plan"))
+                )
+            )
         )
 
         if is_opt:
-            act_plan = getattr(alert, "actionable_plan", {}) or (
-                alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
-            )
             # 1. Resolve true entry price in option premium coordinates
             entry_price = float(
-                getattr(alert, "option_premium", 0.0)
+                getattr(alert, "initial_entry_premium", 0.0)
+                or getattr(alert, "entry_price", 0.0)
                 or (act_plan.get("trade_plan", {}).get("entry_price") if act_plan else 0.0)
+                or (act_plan.get("option_entry_premium") if act_plan else 0.0)
+                or getattr(alert, "option_premium", 0.0)
                 or 0.0
             )
             if entry_price <= 0 and act_plan:
                 rec_str = str(
-                    act_plan.get("recommended_entry", "") or act_plan.get("entry_range", "")
+                    act_plan.get("recommended_entry", "")
+                    or act_plan.get("option_entry", "")
+                    or act_plan.get("entry_range", "")
                 )
                 m = re.search(r"[\d.]+", rec_str)
                 if m:
@@ -962,7 +980,11 @@ class PatternLearningEngine:
             # 2. Resolve option stop-loss in premium coordinates (never inherit underlying spot/futures level)
             stop_loss = 0.0
             if act_plan:
-                opt_sl_str = str(act_plan.get("stop_loss", ""))
+                opt_sl_str = str(
+                    act_plan.get("option_stop_loss", "")
+                    or act_plan.get("option_sl", "")
+                    or act_plan.get("stop_loss", "")
+                )
                 m_sl = re.findall(r"[\d,]+(?:\.\d+)?", opt_sl_str)
                 if m_sl:
                     stop_loss = float(m_sl[0].replace(",", ""))
@@ -984,7 +1006,12 @@ class PatternLearningEngine:
                 exit_price = float(exit_price)
         else:
             entry_price = float(
-                getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
+                getattr(alert, "initial_entry_premium", 0.0)
+                or getattr(alert, "entry_price", 0.0)
+                or (act_plan.get("trade_plan", {}).get("entry_price") if act_plan else 0.0)
+                or getattr(alert, "trigger_level", 0.0)
+                or getattr(alert, "ltp", 0.0)
+                or exit_price
             )
             stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
             exit_price = float(exit_price or entry_price)

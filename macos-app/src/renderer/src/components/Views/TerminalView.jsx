@@ -11,6 +11,7 @@ import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../d
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatLivePrice, formatLiveChange, classifyDataSource } from '../../utils/marketDataUtils'
 import { cleanMojibake, sanitizeData } from '../../utils/cleanText'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 export default function TerminalView({
   onSelectSymbol,
@@ -98,8 +99,7 @@ export default function TerminalView({
 
   useEffect(() => {
     fetchSnapshot(false)
-    const timer = setInterval(() => fetchSnapshot(false), 8000)
-    return () => clearInterval(timer)
+    return createVisibilityInterval(() => fetchSnapshot(false), 8000)
   }, [selectedSymbol, timeframe])
 
   const setupRaw = data?.setup || data?.automated_setup

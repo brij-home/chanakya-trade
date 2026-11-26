@@ -157,7 +157,7 @@ def test_monotonic_update_number_never_resets():
 
 
 def test_rehabilitation_of_falsely_invalidated_post_t1_alert(tmp_path, monkeypatch):
-    """Verify _load rehabilitates alerts that were falsely marked INVALIDATED after hitting T1."""
+    """Verify explicit rehabilitation restores alerts that were falsely marked INVALIDATED after hitting T1."""
     db_file = tmp_path / "auto_alerts.json"
     raw_alert_dict = {
         "alert_id": "REHAB-PIDI-01",
@@ -184,6 +184,7 @@ def test_rehabilitation_of_falsely_invalidated_post_t1_alert(tmp_path, monkeypat
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: db_file)
 
     engine = AutoAlertEngine()
+    engine.rehabilitate_falsely_invalidated_options()
     rehabbed = next((a for a in engine._alerts if a.alert_id == "REHAB-PIDI-01"), None)
     assert rehabbed is not None
     assert rehabbed.is_invalidated is False

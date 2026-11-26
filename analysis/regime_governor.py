@@ -75,6 +75,38 @@ def _is_test_environment() -> bool:
     )
 
 
+def _validate_live_vix_quote(quote: Any, max_age_seconds: float) -> Optional[float]:
+    """Validate that a quote carries a fresh, verified LIVE India VIX reading."""
+    if quote is None:
+        return None
+    value = float(getattr(quote, "last_price", 0.0) or getattr(quote, "ltp", 0.0) or 0.0)
+    provider = str(getattr(quote, "provider", "UNKNOWN") or "UNKNOWN").upper()
+    data_state = str(getattr(quote, "data_state", "UNAVAILABLE") or "UNAVAILABLE").upper()
+    received_at_raw = getattr(quote, "received_at", None)
+    received_at = (
+        datetime.fromisoformat(str(received_at_raw).replace("Z", "+00:00"))
+        if received_at_raw
+        else None
+    )
+    age_seconds = (
+        (datetime.now(timezone.utc) - received_at.astimezone(timezone.utc)).total_seconds()
+        if received_at is not None and received_at.tzinfo is not None
+        else None
+    )
+    if (
+        not math.isfinite(value)
+        or value <= 0
+        or data_state != "LIVE"
+        or provider in {"UNKNOWN", "MOCK", "TEST"}
+        or age_seconds is None
+        or not math.isfinite(age_seconds)
+        or age_seconds < 0.0
+        or age_seconds > max_age_seconds
+    ):
+        return None
+    return value
+
+
 def _fresh_live_vix(max_age_seconds: float = 30.0) -> Optional[float]:
     """Return India VIX only from a recent LIVE quote with an identified provider."""
     try:
@@ -82,36 +114,22 @@ def _fresh_live_vix(max_age_seconds: float = 30.0) -> Optional[float]:
         from market.quotes import get_quote
 
         symbol = INDEX_INSTRUMENTS["VIX"]
-        snapshots = get_quote(symbol)
+        try:
+            snapshots = get_quote(symbol, ws_only=True)
+        except TypeError:
+            snapshots = None
         quote = snapshots.get(symbol) if isinstance(snapshots, dict) else None
-        if quote is None:
-            return None
-        value = float(getattr(quote, "last_price", 0.0) or getattr(quote, "ltp", 0.0) or 0.0)
-        provider = str(getattr(quote, "provider", "UNKNOWN") or "UNKNOWN").upper()
-        data_state = str(getattr(quote, "data_state", "UNAVAILABLE") or "UNAVAILABLE").upper()
-        received_at_raw = getattr(quote, "received_at", None)
-        received_at = (
-            datetime.fromisoformat(str(received_at_raw).replace("Z", "+00:00"))
-            if received_at_raw
-            else None
-        )
-        age_seconds = (
-            (datetime.now(timezone.utc) - received_at.astimezone(timezone.utc)).total_seconds()
-            if received_at is not None and received_at.tzinfo is not None
-            else None
-        )
-        if (
-            not math.isfinite(value)
-            or value <= 0
-            or data_state != "LIVE"
-            or provider in {"UNKNOWN", "MOCK", "TEST"}
-            or age_seconds is None
-            or not math.isfinite(age_seconds)
-            or age_seconds < 0.0
-            or age_seconds > max_age_seconds
-        ):
-            return None
-        return value
+        ws_val = _validate_live_vix_quote(quote, max_age_seconds)
+        if ws_val is not None:
+            return ws_val
+
+        # If WS-only returned None OR a stale/unverified cached tick, fall back to fresh REST quote.
+        try:
+            snapshots = get_quote(symbol, bypass_cache=True)
+        except TypeError:
+            snapshots = get_quote(symbol)
+        quote = snapshots.get(symbol) if isinstance(snapshots, dict) else None
+        return _validate_live_vix_quote(quote, max_age_seconds)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         logger.warning("[regime_governor] Fresh VIX quote unavailable: %s", exc)
         return None
@@ -156,15 +174,17 @@ def classify_market_regime(
     if vix_val is None:
         vix_val = _fresh_live_vix()
 
-    # 2. Check Expiry Session (Post 13:15 IST on active index weekly expiry days: Nifty Thu, Sensex Fri)
+    # 2. Check Expiry Session (Post 13:15 IST through effective-dated derivative close)
     from market.calendar import is_expiry_day
+    from market.rule_schedule import derivative_close
 
     cur_d = now_ist.date()
     is_active_expiry = is_expiry_day("NIFTY", ref_date=cur_d) or is_expiry_day(
         "SENSEX", ref_date=cur_d, exchange="BSE"
     )
     now_t = now_ist.time()
-    is_afternoon_expiry = is_active_expiry and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
+    expiry_close_t = derivative_close(cur_d, expiring_index=True)
+    is_afternoon_expiry = is_active_expiry and now_t >= dtime(13, 15) and now_t <= expiry_close_t
 
     # 3. Check ORB Trapping (Opening 30-min range containment between 10:30 and 14:00 IST)
     is_orb_trapped = False
@@ -223,34 +243,33 @@ def classify_market_regime(
             unavailable_reasons=["FRESH_LIVE_INDIA_VIX_MISSING"],
         )
 
-    # Regime 2b: Institutional Distribution (Bearish Trend Day)
+    # Regime 2b / 2c: Benchmark Institutional Distribution vs Symmetric Accumulation
     nifty_dir_chg = 0.0
     is_intraday_recovering = False
+    is_intraday_fading = False
     if not is_test_env:
         try:
-            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+            from market.quotes import get_quote
 
-            with _quote_cache_lock:
-                for k in ("NSE:NIFTY 50", "NSE:NIFTY", "NIFTY", "NIFTY 50"):
-                    if k in _QUOTE_CACHE:
-                        _, nq = _QUOTE_CACHE[k]
-                        nifty_dir_chg = float(getattr(nq, "change_pct", 0.0) or 0.0)
-                        nq_ltp = float(
-                            getattr(nq, "last_price", 0.0) or getattr(nq, "ltp", 0.0) or 0.0
-                        )
-                        nq_open = float(getattr(nq, "open", 0.0) or 0.0)
-                        nq_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
-                        # Intraday recovery: Spot has reclaimed VWAP or is trading above session open
-                        if nq_ltp > 0 and (
-                            (nq_vwap > 0 and nq_ltp > nq_vwap) or (nq_open > 0 and nq_ltp > nq_open)
-                        ):
-                            is_intraday_recovering = True
-                        break
+            q_keys = ["NSE:NIFTY 50", "NSE:NIFTY", "NIFTY", "NIFTY 50"]
+            q_map = get_quote(q_keys, ws_only=True) or {}
+            nq = next((q_map[k] for k in q_keys if k in q_map and q_map[k] is not None), None)
+            if nq is not None:
+                nifty_dir_chg = float(getattr(nq, "change_pct", 0.0) or 0.0)
+                nq_ltp = float(getattr(nq, "last_price", 0.0) or getattr(nq, "ltp", 0.0) or 0.0)
+                nq_open = float(getattr(nq, "open", 0.0) or 0.0)
+                nq_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                if nq_ltp > 0:
+                    if (nq_vwap > 0 and nq_ltp > nq_vwap) or (nq_open > 0 and nq_ltp > nq_open):
+                        is_intraday_recovering = True
+                    if (nq_vwap > 0 and nq_ltp < nq_vwap) or (nq_open > 0 and nq_ltp < nq_open):
+                        is_intraday_fading = True
         except Exception as e_suppressed:
             logger.debug(f"[analysis.regime_governor] Benchmark quote error: {e_suppressed}")
 
-    # If spot has broken out above ORB high, benchmark is exhibiting bullish expansion, not distribution
+    # ORB directional breakouts
     is_orb_breakout_bull = bool(nifty_spot and orb_high and orb_high > 0 and nifty_spot > orb_high)
+    is_orb_breakdown_bear = bool(nifty_spot and orb_low and orb_low > 0 and nifty_spot < orb_low)
 
     if (
         (nifty_dir_chg <= -0.40 or macro_score <= -30.0)
@@ -281,27 +300,41 @@ def classify_market_regime(
             ],
         )
 
+    if (
+        (nifty_dir_chg >= 0.40 or macro_score >= 30.0)
+        and not is_orb_trapped
+        and not is_orb_breakdown_bear
+        and not is_intraday_fading
+    ):
+        return MarketRegimeClassification(
+            regime="INSTITUTIONAL_ACCUMULATION",
+            vix=vix_val,
+            is_orb_trapped=False,
+            is_expiry_session=is_afternoon_expiry,
+            min_scrutiny_score=72,
+            dominant_bias="BULLISH_EXPANSION",
+            guidance="Dalal Street in institutional accumulation (Nifty up >= 0.40% or strong macro tailwinds). Prioritize Call breakouts, VWAP pullbacks, and F&O sector leaders.",
+            active_detectors=[
+                "INDEX_CALL_SETUP",
+                "OPENING_DRIVE",
+                "AFTERNOON_THRUST",
+                "SQUEEZE_BREAKOUT",
+                "GAMMA_BLAST",
+            ],
+            suppressed_detectors=[
+                "INDEX_PUT_SETUP",
+                "SQUEEZE_BREAKDOWN",
+                "INTRADAY_BREAKDOWN_SPARK",
+            ],
+        )
+
     # Regime 2: Balanced Chop / Midday Consolidation
     is_benchmark_trending = False
     if nifty_spot and orb_high and orb_low and orb_high > orb_low:
         if nifty_spot > orb_high or nifty_spot < orb_low:
             is_benchmark_trending = True
-    if not is_benchmark_trending and not is_test_env:
-        try:
-            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
-
-            with _quote_cache_lock:
-                for k in ("NSE:NIFTY 50", "NSE:NIFTY", "NIFTY", "NIFTY 50"):
-                    if k in _QUOTE_CACHE:
-                        _, nq = _QUOTE_CACHE[k]
-                        chg_pct = abs(float(getattr(nq, "change_pct", 0.0) or 0.0))
-                        if chg_pct >= 0.40:
-                            is_benchmark_trending = True
-                        break
-        except Exception as e_suppressed:
-            logger.debug(
-                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
-            )
+    if not is_benchmark_trending and abs(nifty_dir_chg) >= 0.40:
+        is_benchmark_trending = True
 
     is_midday_lull = (
         (dtime(11, 15) <= now_t <= dtime(13, 15)) and vix_val < 16.0 and not is_benchmark_trending
@@ -423,14 +456,14 @@ def is_detector_eligible_for_regime(
                         f"Bullish setup requires RVOL >= {rvol_floor:.2f}x (got {rvol:.2f}x) to confirm decoupling from benchmark selling.",
                     )
 
-    # In Bullish Trend Expansion (Bullish Benchmark State)
-    if regime.regime == "TREND_EXPANSION":
+    # In Bullish Trend Expansion / Institutional Accumulation (Bullish Benchmark State)
+    if regime.regime in ("TREND_EXPANSION", "INSTITUTIONAL_ACCUMULATION"):
         if is_bear:
             if atype == "INDEX_PUT_SETUP":
                 if not has_structural_sweep and rvol < 2.5:
                     return (
                         False,
-                        f"Suppressed by Regime Governor: TREND_EXPANSION active (Benchmark trending up). "
+                        f"Suppressed by Regime Governor: {regime.regime} active (Benchmark trending up). "
                         f"Counter-trend Index Put requires verified SMC structural sweep or extreme RVOL >= 2.50x (got {rvol:.2f}x).",
                     )
             elif atype in ("SQUEEZE_BREAKDOWN", "INTRADAY_BREAKDOWN_SPARK"):
@@ -441,7 +474,7 @@ def is_detector_eligible_for_regime(
                     )
                     return (
                         False,
-                        f"Suppressed by Regime Governor: TREND_EXPANSION active ({tag}). "
+                        f"Suppressed by Regime Governor: {regime.regime} active ({tag}). "
                         f"Short breakdown requires RVOL >= {rvol_floor:.2f}x (got {rvol:.2f}x) or verified SMC sweep to avoid bear traps.",
                     )
 

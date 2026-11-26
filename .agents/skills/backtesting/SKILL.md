@@ -14,7 +14,8 @@ description: >-
 
 | Module | File | Purpose |
 | :--- | :--- | :--- |
-| **Vectorized Backtester** | [`engine/backtest_vectorized.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest_vectorized.py) | Ultra-fast NumPy/Pandas array calculations for broad-market sweeps |
+| **Vectorized Backtester** | [`engine/backtest_vectorized.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest_vectorized.py) | Vectorized NumPy array simulation with Apr-2026 statutory charges & slippage |
+| **Expired F&O Replay** | [`engine/options_replay.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/options_replay.py) | Research-only expired F&O loader + Purged Walk-Forward Triple-Barrier evaluator |
 | **Event-Driven Backtester** | [`engine/backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py) | Bar-by-bar execution, slippage, commissions, intraday stops |
 | **Options Backtester** | [`engine/options_backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/options_backtest.py) | Black-Scholes Greeks, IV decay, delta hedging, multi-leg strategies |
 | **Regime Detector** | [`engine/backtest_regime.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest_regime.py) | Filters by macro regime (Trending Bull/Bear, High/Low Vol) |
@@ -81,9 +82,10 @@ report_path = generate_html_tear_sheet(
 3. **Timezone Normalization**: All input OHLCV DataFrames must have tz-naive DatetimeIndex (`df.index.tz_localize(None)`). Never mix tz-aware and tz-naive timestamps.
 4. **Deterministic Tests**: Always pass synthetic OHLCV data in unit tests — no network calls to Yahoo Finance or brokers.
 5. **Cache Reuse**: Historical OHLCV cached via SQLite `analysis_cache` (15min TTL). Reuse across strategy iterations.
-6. **Realistic Institutional Transaction Costs & October 2026 Mandate**:
-   - All backtests (both vectorized and event-driven) must incorporate realistic statutory transaction costs via [`engine.charges.calculate_charges`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/charges.py): post-October 2024 STT rates (Futures 0.02%, Options Premium 0.10%), exchange turnover charges, SEBI fees, stamp duty, and 18% GST.
-   - Derivative strategies must strictly use canonical lot sizes from [`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py) (Nifty 65, BankNifty 30, Sensex 20), NEVER legacy pre-2024 lot sizes (50, 25, 15).
+6. **Realistic Institutional Transaction Costs & Nov 2026 / Apr 2026 STT Mandate**:
+   - All backtests (`engine/backtest_vectorized.py`, `engine/backtest.py`, `engine/options_replay.py`) must incorporate realistic statutory costs via [`engine.charges.calculate_transaction_charges`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/charges.py): effective April 1, 2026 STT rates (**Futures 0.05% sell**, **Options 0.15% sell / intrinsic exercise**; historical backtests supply historical dates), exchange turnover charges, SEBI fees, stamp duty, and 18% GST.
+   - Derivative strategies must strictly resolve expiry-dated lot sizes via [`market.instruments.get_fno_lot_size(symbol, expiry_date=...)`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py) (`NIFTY 65`, `BANKNIFTY 30`, `SENSEX 20` before `2027-01-25` / `25` for `2027-01-25+`), NEVER legacy lot sizes.
+   - Research-only expired F&O replay (`engine/options_replay.py`) preserves null provider Greeks without inventing constant-tenor IV rank and marks samples `< 30` trades or zero-loss samples `UNCALIBRATED`.
    - Zero frictionless backtests — strategies that do not survive realistic statutory drag must be rejected.
 7. **Dynamic Price-Tier Slippage & Timeframe-Adaptive Stops**:
    - Slippage models and minimum stops must dynamically scale using [`engine.dynamic_risk.resolve_price_tier(ltp)`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py) and `clamp_dynamic_risk(...)`.

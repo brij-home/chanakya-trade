@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -20,7 +20,7 @@ import pandas as pd
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.commodity")
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 DEFAULT_COMMODITIES = [
     "CRUDEOIL",
@@ -31,11 +31,20 @@ DEFAULT_COMMODITIES = [
     "ZINC",
 ]
 
-# On Indian MCX, only energy (Crude, NatGas) and gold have active option liquidity.
-# Base metals (Copper, Zinc, Aluminium) and silver mini/lead have virtually non-existent option liquidity
+# On Indian MCX, energy (Crude, NatGas), gold, and silver have active option liquidity.
+# Base metals (Copper, Zinc, Aluminium) have virtually non-existent option liquidity
 # and ITM options devolve into physically settled 2,500 kg futures requiring high margin.
-# Trading them as primary options is an institutional violation; they MUST be traded as MCX Futures.
-LIQUID_COMMODITY_OPTIONS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI", "GOLD", "GOLDM"}
+# Trading base metals as primary options is an institutional violation; they MUST be traded as MCX Futures.
+LIQUID_COMMODITY_OPTIONS = {
+    "CRUDEOIL",
+    "CRUDEOILM",
+    "NATURALGAS",
+    "NATGASMINI",
+    "GOLD",
+    "GOLDM",
+    "SILVER",
+    "SILVERM",
+}
 
 
 def compute_commodity_rsi(df_5m: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
@@ -186,17 +195,49 @@ def detect_commodity_breakouts(
 
         def _fetch_target_ohlcv(t_sym: str) -> tuple[str, Any]:
             c_sym = t_sym.upper().replace("MCX:", "").strip()
+            is_test_env = (
+                (os.environ.get("CHANAKYA_TESTING") == "1")
+                or (os.environ.get("DEPLOY_MODE") == "test")
+                or ("PYTEST_CURRENT_TEST" in os.environ)
+            )
+            if not is_test_env:
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    mm = get_market_matrix()
+                    mm_df = mm.get_candles_df(c_sym, timeframe="5m", limit=80)
+                    if mm_df is not None and len(mm_df) >= 10:
+                        return c_sym, mm_df
+                except Exception as e_mm:
+                    logger.debug(
+                        f"[CommodityDetector] MarketMatrix 5m lookup skipped for {c_sym}: {e_mm}"
+                    )
+
             try:
-                return c_sym, get_ohlcv(c_sym, exchange="MCX", interval="5minute", days=2)
+                df_mcx = get_ohlcv(c_sym, exchange="MCX", interval="5minute", days=2)
+                if df_mcx is not None and len(df_mcx) >= 6 and not is_test_env:
+                    try:
+                        from engine.market_matrix import get_market_matrix
+
+                        get_market_matrix().seed_historical_candles(c_sym, "5m", df_mcx)
+                    except Exception as e_seed:
+                        logger.debug(
+                            f"[CommodityDetector] MarketMatrix 5m seed skipped for {c_sym}: {e_seed}"
+                        )
+                return c_sym, df_mcx
             except Exception as e_hist:
                 logger.debug(
                     f"[CommodityDetector] Error pre-fetching 5m OHLCV for MCX:{c_sym}: {e_hist}"
                 )
                 return c_sym, None
 
-        with ThreadPoolExecutor(max_workers=min(6, len(targets))) as pool:
-            for c_sym, df_res in pool.map(_fetch_target_ohlcv, targets):
-                ohlcv_map[c_sym] = df_res
+        missing_targets = [
+            s for s in targets if s.upper().replace("MCX:", "").strip() not in ohlcv_map
+        ]
+        if missing_targets:
+            with ThreadPoolExecutor(max_workers=min(6, len(missing_targets))) as pool:
+                for c_sym, df_res in pool.map(_fetch_target_ohlcv, missing_targets):
+                    ohlcv_map[c_sym] = df_res
     except Exception as e_pool:
         logger.debug(f"[CommodityDetector] Concurrent OHLCV pre-fetch error: {e_pool}")
 
@@ -269,34 +310,35 @@ def detect_commodity_breakouts(
             hh, mm = now_ist.hour, now_ist.minute
             weekday = now_ist.weekday()  # Monday=0, Tuesday=1, Wednesday=2, Thursday=3
 
-            # 1. Wednesday EIA Weekly Petroleum Status Report (Crude): 19:55 - 20:15 IST (release at 20:00 IST)
+            # 1. Wednesday EIA Weekly Petroleum Status Report (Crude): 19:55 - 20:06 IST (release at 20:00 IST)
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 2:
-                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 6):
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Wednesday EIA Crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
                     )
                     continue
 
-            # 2. Thursday EIA Natural Gas Storage Report: 19:55 - 20:15 IST (release at 20:00 IST)
+            # 2. Thursday EIA Natural Gas Storage Report: 19:55 - 20:06 IST (release at 20:00 IST)
             if clean_sym in ("NATURALGAS", "NATGASMINI") and weekday == 3:
-                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 6):
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Thursday EIA NatGas storage blackout window ({hh:02d}:{mm:02d} IST)"
                     )
                     continue
 
-            # 3. Tuesday API Weekly Crude Inventory (American Petroleum Institute): 20:00 - 20:20 IST
+            # 3. Tuesday API Weekly Crude Inventory (American Petroleum Institute): 20:00 - 20:10 IST
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 1:
-                if hh == 20 and mm <= 20:
+                if hh == 20 and mm <= 10:
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Tuesday API crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
                     )
                     continue
 
-        # Golden Hours Window Check (17:30 to 22:30 IST)
-        from engine.quality_gate import is_mcx_golden_hours_window
+        # Golden Hours & Active International Window Checks
+        from engine.quality_gate import is_mcx_golden_hours_window, is_mcx_active_session_window
 
         is_golden_hours = is_mcx_golden_hours_window(now_ist)
+        is_active_mcx_session = is_mcx_active_session_window(now_ist)
 
         # Minimum move threshold for commodity trigger (0.6% for Gold/Silver/Copper, 1.0% for Crude/NatGas)
         min_chg = 1.0 if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI") else 0.6
@@ -325,6 +367,9 @@ def detect_commodity_breakouts(
         is_donchian_breakout = False
         is_utad_bear = False
         is_spring_bull = False
+        is_pullback_bear = False
+        is_pullback_bull = False
+        pullback_notes: list[str] = []
         is_1m_micro_bear = False
         is_1m_micro_bull = False
         poc_price = 0.0
@@ -359,9 +404,15 @@ def detect_commodity_breakouts(
                         if len(df_5m) >= 2
                         else cur_v
                     )
+                    prev2_v = (
+                        float(df_5m.iloc[-3].get("volume", 0.0) or 0.0)
+                        if len(df_5m) >= 3
+                        else cur_v
+                    )
                     rvol_cur = cur_v / max(1.0, avg_v) if avg_v > 0 else 1.0
                     rvol_prev = prev_v / max(1.0, avg_v) if avg_v > 0 else 1.0
-                    rvol = round(max(rvol_prev, rvol_cur), 2)
+                    rvol_prev2 = prev2_v / max(1.0, avg_v) if avg_v > 0 else 1.0
+                    rvol = round(max(rvol_prev2, rvol_prev, rvol_cur), 2)
             except Exception:
                 rvol = 1.0
 
@@ -583,9 +634,18 @@ def detect_commodity_breakouts(
             if (
                 df_1m is None
                 and is_authentic_live
-                and is_golden_hours
+                and (is_golden_hours or is_active_mcx_session)
                 and clean_sym
-                in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI", "GOLD", "GOLDM")
+                in (
+                    "CRUDEOIL",
+                    "CRUDEOILM",
+                    "NATURALGAS",
+                    "NATGASMINI",
+                    "GOLD",
+                    "GOLDM",
+                    "SILVER",
+                    "SILVERM",
+                )
             ):
                 near_high_probe = (
                     nearest_round_high > 0 and abs(ltp - nearest_round_high) <= (ltp * 0.004)
@@ -689,6 +749,113 @@ def detect_commodity_breakouts(
             ):
                 is_spring_bull = True
 
+            # 6. Trend Pullback & S-R Rejection (Optimal Trade Entry - OTE)
+            # In an established macro trend, catches counter-trend relief rallies that stall at
+            # structural supply (15m 50-EMA, Daily Pivots, Prior Day Low/High) printing rejection wicks.
+            ema50_15m = 0.0
+            ema20_15m = 0.0
+            if len(df_5m) >= 20:
+                try:
+                    closes_5m = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
+                    span_50 = min(150, max(20, len(closes_5m)))
+                    span_20 = min(60, max(10, len(closes_5m) // 2))
+                    ema50_15m = float(closes_5m.ewm(span=span_50, adjust=False).mean().iloc[-1])
+                    ema20_15m = float(closes_5m.ewm(span=span_20, adjust=False).mean().iloc[-1])
+                except Exception as e_ema_mcx:
+                    logger.debug(
+                        f"[CommodityDetector] MTF EMA skipped for {clean_sym}: {e_ema_mcx}"
+                    )
+
+            pdl_val = 0.0
+            pdh_val = 0.0
+            daily_s1 = 0.0
+            daily_r1 = 0.0
+            try:
+                dt_col = df_5m.index
+                today_str = now_ist.strftime("%Y-%m-%d")
+                yesterday_df = df_5m[dt_col.strftime("%Y-%m-%d") != today_str]
+                if len(yesterday_df) >= 10:
+                    y_high = float(yesterday_df["high"].max())
+                    y_low = float(yesterday_df["low"].min())
+                    y_close = float(yesterday_df["close"].iloc[-1])
+                    pdh_val = y_high
+                    pdl_val = y_low
+                    y_pivot = (y_high + y_low + y_close) / 3.0
+                    daily_s1 = 2.0 * y_pivot - y_high
+                    daily_r1 = 2.0 * y_pivot - y_low
+            except Exception as e_yd:
+                logger.debug(f"[CommodityDetector] Prior session pivot calculation skipped: {e_yd}")
+
+            # A. Bearish Pullback Rejection (Sell the Rally in a Downtrend):
+            macro_bear = (
+                chg_prev <= -0.6 or chg_open <= -0.6 or (vwap > 0 and ltp <= vwap * 0.998)
+            ) and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m <= ema50_15m * 1.002)
+            has_bear_pullback = trough_recent > 0 and (
+                cur_high >= trough_recent * 1.0035 or chg_from_low >= 0.35
+            )
+            hit_resistance = False
+            res_reason = ""
+            if ema50_15m > 0 and abs(cur_high - ema50_15m) / cur_high <= 0.0035:
+                hit_resistance = True
+                res_reason = f"15m 50-EMA (₹{ema50_15m:,.1f})"
+            elif daily_s1 > 0 and abs(cur_high - daily_s1) / cur_high <= 0.0040:
+                hit_resistance = True
+                res_reason = f"Daily S1 Pivot (₹{daily_s1:,.1f})"
+            elif pdl_val > 0 and abs(cur_high - pdl_val) / cur_high <= 0.0040:
+                hit_resistance = True
+                res_reason = f"Prior Day Low Re-test (₹{pdl_val:,.1f})"
+            elif peak_recent > 0 and abs(cur_high - peak_recent) / cur_high <= 0.0025:
+                hit_resistance = True
+                res_reason = f"Supply Zone Resistance (₹{peak_recent:,.1f})"
+
+            has_bear_rejection = (
+                upper_wick_ratio >= 0.14 or cur_close < cur_open or is_1m_micro_bear
+            ) and (cur_close < cur_high or is_1m_micro_bear)
+            if (
+                not is_locked_bear
+                and macro_bear
+                and has_bear_pullback
+                and hit_resistance
+                and has_bear_rejection
+            ):
+                is_pullback_bear = True
+                pullback_notes.append(f"Pullback Fade at {res_reason}")
+
+            # B. Bullish Pullback Bounce (Buy the Dip in an Uptrend):
+            macro_bull = (
+                chg_prev >= 0.6 or chg_open >= 0.6 or (vwap > 0 and ltp >= vwap * 1.002)
+            ) and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m >= ema50_15m * 0.998)
+            has_bull_pullback = peak_recent > 0 and (
+                cur_low <= peak_recent * 0.9965 or chg_from_high >= 0.35
+            )
+            hit_support = False
+            sup_reason = ""
+            if ema50_15m > 0 and abs(cur_low - ema50_15m) / cur_low <= 0.0035:
+                hit_support = True
+                sup_reason = f"15m 50-EMA (₹{ema50_15m:,.1f})"
+            elif daily_r1 > 0 and abs(cur_low - daily_r1) / cur_low <= 0.0040:
+                hit_support = True
+                sup_reason = f"Daily R1 Pivot (₹{daily_r1:,.1f})"
+            elif pdh_val > 0 and abs(cur_low - pdh_val) / cur_low <= 0.0040:
+                hit_support = True
+                sup_reason = f"Prior Day High Re-test (₹{pdh_val:,.1f})"
+            elif trough_recent > 0 and abs(cur_low - trough_recent) / cur_low <= 0.0025:
+                hit_support = True
+                sup_reason = f"Demand Zone Support (₹{trough_recent:,.1f})"
+
+            has_bull_bounce = (
+                lower_wick_ratio >= 0.14 or cur_close > cur_open or is_1m_micro_bull
+            ) and (cur_close > cur_low or is_1m_micro_bull)
+            if (
+                not is_locked_bull
+                and macro_bull
+                and has_bull_pullback
+                and hit_support
+                and has_bull_bounce
+            ):
+                is_pullback_bull = True
+                pullback_notes.append(f"Dip Reclaim at {sup_reason}")
+
             # US Open Transition Gate (18:15 to 19:15 IST):
             transition_gate_passed = (
                 (not is_us_open_transition)
@@ -699,6 +866,8 @@ def detect_commodity_breakouts(
                 or is_smc_bear
                 or is_utad_bear
                 or is_spring_bull
+                or is_pullback_bull
+                or is_pullback_bear
                 or is_mcx_open_drive_bull
                 or is_mcx_open_drive_bear
             )
@@ -710,6 +879,7 @@ def detect_commodity_breakouts(
                     or is_smc_bull
                     or is_thrust_bull
                     or is_spring_bull
+                    or is_pullback_bull
                     or is_mcx_open_drive_bull
                 ):
                     is_bullish = True
@@ -720,6 +890,7 @@ def detect_commodity_breakouts(
                     or is_smc_bear
                     or is_thrust_bear
                     or is_utad_bear
+                    or is_pullback_bear
                     or is_mcx_open_drive_bear
                 ):
                     is_bearish = True
@@ -727,11 +898,11 @@ def detect_commodity_breakouts(
 
             # Golden Hours (17:30 - 22:30 IST) Trend-Following Invariant:
             # During the US active pit session, strictly veto counter-trend bets against VWAP,
-            # UNLESS a confirmed Wyckoff UTAD or Spring structural reversal is triggered.
+            # UNLESS a confirmed Wyckoff UTAD, Spring, or Pullback Rejection is triggered.
             if is_golden_hours and has_real_vwap:
-                if ltp >= vwap * 1.001 and not is_utad_bear:
+                if ltp >= vwap * 1.001 and not (is_utad_bear or is_pullback_bear):
                     is_bearish = False  # Strictly ban counter-trend shorts / PE buys above VWAP
-                elif ltp <= vwap * 0.999 and not is_spring_bull:
+                elif ltp <= vwap * 0.999 and not (is_spring_bull or is_pullback_bull):
                     is_bullish = False  # Strictly ban counter-trend longs / CE buys below VWAP
         else:
             strict_min_chg = max(min_chg * 1.2, 0.9)
@@ -772,12 +943,12 @@ def detect_commodity_breakouts(
             # Natural Gas mean-reverts violently near round numbers; enforce tighter RSI bounds (68.0 max)
             # Crude Oil / Bullion breakout ceiling capped at 74.0 to prevent top-tick exhaustion FOMO entries
             max_bull_rsi = (
-                68.0
+                (74.0 if is_breakout_thrust else 68.0)
                 if clean_sym in ("NATURALGAS", "NATGASMINI")
                 else (74.0 if is_breakout_thrust else 70.0)
             )
             min_bear_rsi = (
-                32.0
+                (18.0 if (is_donchian_bear or is_thrust_bear or is_smc_bear) else 32.0)
                 if clean_sym in ("NATURALGAS", "NATGASMINI")
                 else (18.0 if (is_donchian_bear or is_thrust_bear or is_smc_bear) else 26.0)
             )
@@ -803,16 +974,30 @@ def detect_commodity_breakouts(
                 if c_macro and getattr(c_macro, "status", "") == "ONLINE":
                     if clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM", "SILMIC"):
                         b_bias = getattr(c_macro.bullion, "bullion_bias", "NEUTRAL")
-                        if is_bullish and b_bias == "STRONG_HEADWIND" and rvol < 2.0:
-                            logger.info(
-                                f"[CommodityDetector] Bullish {clean_sym} vetoed by macro headwind: {'; '.join(c_macro.bullion.notes)}"
-                            )
-                            continue
-                        elif is_bearish and b_bias == "STRONG_TAILWIND" and rvol < 2.0:
-                            logger.info(
-                                f"[CommodityDetector] Bearish {clean_sym} vetoed by macro tailwind: {'; '.join(c_macro.bullion.notes)}"
-                            )
-                            continue
+                        has_confirmed_breakout = (
+                            is_donchian_breakout
+                            or is_thrust_bull
+                            or is_thrust_bear
+                            or is_smc_bull
+                            or is_smc_bear
+                            or abs(chg) >= 1.0
+                        )
+                        if is_bullish and b_bias == "STRONG_HEADWIND":
+                            if has_confirmed_breakout or rvol >= 1.5:
+                                c_macro_tags.append("Macro Headwind Friction (DXY Surge)")
+                            else:
+                                logger.info(
+                                    f"[CommodityDetector] Bullish {clean_sym} vetoed by macro headwind: {'; '.join(c_macro.bullion.notes)}"
+                                )
+                                continue
+                        elif is_bearish and b_bias == "STRONG_TAILWIND":
+                            if has_confirmed_breakout or rvol >= 1.5:
+                                c_macro_tags.append("Macro Counter-Trend Friction (Soft DXY)")
+                            else:
+                                logger.info(
+                                    f"[CommodityDetector] Bearish {clean_sym} vetoed by macro tailwind: {'; '.join(c_macro.bullion.notes)}"
+                                )
+                                continue
                         if (
                             is_bullish
                             and getattr(c_macro.bullion, "silver_outperformance_favored", False)
@@ -823,16 +1008,30 @@ def detect_commodity_breakouts(
                             c_macro_tags.append("Macro Tailwind (Weak DXY/Falling Yields)")
                     elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
                         e_bias = getattr(c_macro.energy, "energy_bias", "NEUTRAL")
-                        if is_bullish and e_bias == "BEARISH_CONTRACTION" and rvol < 2.0:
-                            logger.info(
-                                f"[CommodityDetector] Bullish {clean_sym} vetoed by global crude contraction"
-                            )
-                            continue
-                        elif is_bearish and e_bias == "BULLISH_EXPANSION" and rvol < 2.0:
-                            logger.info(
-                                f"[CommodityDetector] Bearish {clean_sym} vetoed by global crude surge"
-                            )
-                            continue
+                        has_confirmed_crude_breakout = (
+                            is_donchian_breakout
+                            or is_thrust_bull
+                            or is_thrust_bear
+                            or is_smc_bull
+                            or is_smc_bear
+                            or abs(chg) >= 1.0
+                        )
+                        if is_bullish and e_bias == "BEARISH_CONTRACTION":
+                            if has_confirmed_crude_breakout or rvol >= 1.5:
+                                c_macro_tags.append("Global Crude Contraction Friction")
+                            else:
+                                logger.info(
+                                    f"[CommodityDetector] Bullish {clean_sym} vetoed by global crude contraction"
+                                )
+                                continue
+                        elif is_bearish and e_bias == "BULLISH_EXPANSION":
+                            if has_confirmed_crude_breakout or rvol >= 1.5:
+                                c_macro_tags.append("Global Crude Surge Friction")
+                            else:
+                                logger.info(
+                                    f"[CommodityDetector] Bearish {clean_sym} vetoed by global crude surge"
+                                )
+                                continue
                         if is_bullish and e_bias == "BULLISH_EXPANSION":
                             c_macro_tags.append("Global Crude Surge (Brent & WTI > +1%)")
             except Exception as e_cmacro:
@@ -843,45 +1042,83 @@ def detect_commodity_breakouts(
 
                 macro_snap = get_macro_snapshot()
                 if macro_snap:
+                    has_confirmed_breakout = (
+                        is_donchian_breakout
+                        or is_thrust_bull
+                        or is_thrust_bear
+                        or is_smc_bull
+                        or is_smc_bear
+                        or abs(chg) >= 1.0
+                    )
                     if clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM"):
                         dxy_chg = macro_snap.dxy_change
                         if dxy_chg is not None:
                             if is_bullish and dxy_chg >= 0.25:
-                                logger.debug(
-                                    f"[CommodityDetector] Bullish {clean_sym} vetoed by surging DXY (+{dxy_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Macro DXY Divergence Headwind (+{dxy_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bullish {clean_sym} vetoed by surging DXY (+{dxy_chg:.2f}%)"
+                                    )
+                                    continue
                             elif is_bearish and dxy_chg <= -0.25:
-                                logger.debug(
-                                    f"[CommodityDetector] Bearish {clean_sym} vetoed by collapsing DXY ({dxy_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Macro DXY Divergence Tailwind ({dxy_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bearish {clean_sym} vetoed by collapsing DXY ({dxy_chg:.2f}%)"
+                                    )
+                                    continue
                     elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
                         brent_chg = macro_snap.crude_change
                         if brent_chg is not None:
                             if is_bullish and brent_chg <= -1.2:
-                                logger.debug(
-                                    f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Brent ({brent_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Brent Divergence Headwind ({brent_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Brent ({brent_chg:.2f}%)"
+                                    )
+                                    continue
                             elif is_bearish and brent_chg >= 1.2:
-                                logger.debug(
-                                    f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Brent (+{brent_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Brent Divergence Tailwind (+{brent_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Brent (+{brent_chg:.2f}%)"
+                                    )
+                                    continue
                     elif clean_sym in ("NATURALGAS", "NATGASMINI"):
                         ng_chg = getattr(macro_snap, "natural_gas_change", None)
                         if ng_chg is not None:
                             if is_bullish and ng_chg <= -2.0:
-                                logger.debug(
-                                    f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Henry Hub NatGas ({ng_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Henry Hub Divergence Headwind ({ng_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bullish {clean_sym} vetoed by collapsing Henry Hub NatGas ({ng_chg:.2f}%)"
+                                    )
+                                    continue
                             elif is_bearish and ng_chg >= 2.0:
-                                logger.debug(
-                                    f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Henry Hub NatGas (+{ng_chg:.2f}%)"
-                                )
-                                continue
+                                if has_confirmed_breakout or rvol >= 1.5:
+                                    c_macro_tags.append(
+                                        f"Henry Hub Divergence Tailwind (+{ng_chg:.2f}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[CommodityDetector] Bearish {clean_sym} vetoed by surging Henry Hub NatGas (+{ng_chg:.2f}%)"
+                                    )
+                                    continue
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Macro snapshot check exception: {e}")
 
@@ -889,16 +1126,16 @@ def detect_commodity_breakouts(
         if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):
             wday = now_ist.weekday()
             hh, mm = now_ist.hour, now_ist.minute
-            # Crude: Wednesday EIA Weekly Petroleum Status Report (19:55 - 20:15 IST)
+            # Crude: Wednesday EIA Weekly Petroleum Status Report (19:55 - 20:06 IST)
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and wday == 2:
-                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 6):
                     logger.info(
                         f"[CommodityDetector] 🛑 EIA Crude Inventory Blackout active for {clean_sym} ({hh:02d}:{mm:02d} IST). Suppressing routine candidate generation."
                     )
                     continue
-            # NatGas: Thursday EIA Natural Gas Storage Report (19:55 - 20:15 IST)
+            # NatGas: Thursday EIA Natural Gas Storage Report (19:55 - 20:06 IST)
             if clean_sym in ("NATURALGAS", "NATGASMINI") and wday == 3:
-                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 6):
                     logger.info(
                         f"[CommodityDetector] 🛑 EIA Natural Gas Storage Blackout active for {clean_sym} ({hh:02d}:{mm:02d} IST). Suppressing routine candidate generation."
                     )
@@ -931,6 +1168,7 @@ def detect_commodity_breakouts(
         # Institutional Smart Money Concepts (SMC) & Price Action Confluence
         smc_tags: list[str] = []
         smc_tags.extend(c_macro_tags)
+        smc_tags.extend(pullback_notes)
         if is_mcx_open_drive_bull:
             smc_tags.append("MCX Bullish Opening Drive (Open==Low)")
         elif is_mcx_open_drive_bear:
@@ -1213,14 +1451,26 @@ def detect_commodity_breakouts(
         chase_pts = get_commodity_max_chase(clean_sym, risk_pts)
 
         if is_bullish:
-            sl_price = round(ltp - risk_pts, 2)
-            default_t1 = round(ltp + 2.8 * risk_pts, 2)
-            default_t2 = round(ltp + 5.0 * risk_pts, 2)
-            default_t3 = round(ltp + 8.0 * risk_pts, 2)
+            if is_pullback_bull:
+                sl_price = round(cur_low - max(0.20 * base_atr, 4.0), 2)
+                t1_target = (
+                    peak_recent
+                    if (peak_recent > 0 and peak_recent > (ltp + 1.5 * abs(ltp - sl_price)))
+                    else round(ltp + 2.5 * abs(ltp - sl_price), 2)
+                )
+                t1_price = round(t1_target, 2)
+                t2_price = round(ltp + 4.5 * abs(ltp - sl_price), 2)
+                t3_price = round(ltp + 7.5 * abs(ltp - sl_price), 2)
+            else:
+                sl_price = round(ltp - risk_pts, 2)
+                default_t1 = round(ltp + 2.8 * risk_pts, 2)
+                default_t2 = round(ltp + 5.0 * risk_pts, 2)
+                default_t3 = round(ltp + 8.0 * risk_pts, 2)
 
             # Volume Profile rotation: Target 1 = Session POC, Target 2 = VAH
             if (
-                (is_spring_bull or is_donchian_breakout)
+                not is_pullback_bull
+                and (is_spring_bull or is_donchian_breakout)
                 and poc_price > 0
                 and (poc_price - ltp) >= (1.0 * risk_pts)
             ):
@@ -1237,7 +1487,7 @@ def detect_commodity_breakouts(
                 if t2_price <= t1_price + 0.5 * risk_pts:
                     t2_price = round(max(default_t2, t1_price + 1.5 * risk_pts), 2)
                 t3_price = round(max(default_t3, t2_price + 2.0 * risk_pts), 2)
-            else:
+            elif not is_pullback_bull:
                 t1_price = default_t1
                 t2_price = default_t2
                 t3_price = default_t3
@@ -1265,7 +1515,10 @@ def detect_commodity_breakouts(
                     f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}."
                 )
 
-            if is_sq_fired:
+            if is_pullback_bull:
+                headline = f"🎯 [MCX] BULLISH DIP RECLAIM (OTE): {clean_sym} (₹{ltp:,.1f})"
+                summary = f"Institutional Trend Pullback in {clean_sym}: Bounce confirmed at {sup_reason if 'sup_reason' in locals() and sup_reason else 'structural support'}. Structural SL at ₹{sl_price:,.1f}."
+            elif is_sq_fired:
                 headline = f"⚡ MCX SQUEEZE EXPANSION: {clean_sym} +{chg:.1f}% Fire (₹{ltp:,.1f})"
                 summary = f"Institutional volatility expansion in {clean_sym}: Coiling squeeze fired bullishly. Trading at ₹{ltp:,.1f} (+{chg:.1f}%) with VWAP support at ₹{vwap:,.1f}."
             elif is_donchian_breakout:
@@ -1291,14 +1544,26 @@ def detect_commodity_breakouts(
                 summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). Session momentum active."
             action = "BUY_FUTURES"
         else:
-            sl_price = round(ltp + risk_pts, 2)
-            default_t1 = round(ltp - 2.8 * risk_pts, 2)
-            default_t2 = round(ltp - 5.0 * risk_pts, 2)
-            default_t3 = round(ltp - 8.0 * risk_pts, 2)
+            if is_pullback_bear:
+                sl_price = round(cur_high + max(0.20 * base_atr, 4.0), 2)
+                t1_target = (
+                    trough_recent
+                    if (trough_recent > 0 and trough_recent < (ltp - 1.5 * abs(sl_price - ltp)))
+                    else round(ltp - 2.5 * abs(sl_price - ltp), 2)
+                )
+                t1_price = round(t1_target, 2)
+                t2_price = round(ltp - 4.5 * abs(sl_price - ltp), 2)
+                t3_price = round(ltp - 7.5 * abs(sl_price - ltp), 2)
+            else:
+                sl_price = round(ltp + risk_pts, 2)
+                default_t1 = round(ltp - 2.8 * risk_pts, 2)
+                default_t2 = round(ltp - 5.0 * risk_pts, 2)
+                default_t3 = round(ltp - 8.0 * risk_pts, 2)
 
             # Volume Profile rotation: Target 1 = Session POC, Target 2 = VAL
             if (
-                (is_utad_bear or is_donchian_breakout)
+                not is_pullback_bear
+                and (is_utad_bear or is_donchian_breakout)
                 and poc_price > 0
                 and (ltp - poc_price) >= (1.0 * risk_pts)
             ):
@@ -1315,7 +1580,7 @@ def detect_commodity_breakouts(
                 if t2_price >= t1_price - 0.5 * risk_pts:
                     t2_price = round(min(default_t2, t1_price - 1.5 * risk_pts), 2)
                 t3_price = round(min(default_t3, t2_price - 2.0 * risk_pts), 2)
-            else:
+            elif not is_pullback_bear:
                 t1_price = default_t1
                 t2_price = default_t2
                 t3_price = default_t3
@@ -1343,7 +1608,10 @@ def detect_commodity_breakouts(
                     f"Enter on 5m candle closing in breakdown direction below VWAP ₹{vwap:,.1f}."
                 )
 
-            if is_sq_fired:
+            if is_pullback_bear:
+                headline = f"🎯 [MCX] BEARISH PULLBACK FADE (OTE): {clean_sym} (₹{ltp:,.1f})"
+                summary = f"Institutional Trend Pullback in {clean_sym}: Rally faded at {res_reason if 'res_reason' in locals() and res_reason else 'structural resistance'}. Structural SL at ₹{sl_price:,.1f}."
+            elif is_sq_fired:
                 headline = f"⚡ MCX SQUEEZE EXPANSION: {clean_sym} {chg:.1f}% Fire (₹{ltp:,.1f})"
                 summary = f"Institutional volatility breakdown in {clean_sym}: Coiling squeeze fired bearishly. Trading at ₹{ltp:,.1f} ({chg:.1f}%) below VWAP ₹{vwap:,.1f}."
             elif is_donchian_breakout:
@@ -1367,6 +1635,7 @@ def detect_commodity_breakouts(
             else:
                 headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Drop @ ₹{ltp:,.1f}"
                 summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Session selling active."
+            action = "SELL_SHORT_FUTURES"
             action = "SELL_SHORT_FUTURES"
 
         # Empirical mathematical R:R calculation
@@ -1580,7 +1849,12 @@ def detect_commodity_breakouts(
             and opt_recommendation
             and not is_synthetic_options
             and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
-            and (is_golden_hours or rvol >= 1.5 or os.environ.get("CHANAKYA_TESTING") == "1")
+            and (
+                is_golden_hours
+                or is_active_mcx_session
+                or rvol >= 1.5
+                or os.environ.get("CHANAKYA_TESTING") == "1"
+            )
         )
 
         if should_use_option_primary:
@@ -1747,6 +2021,35 @@ def detect_commodity_breakouts(
             if opt_recommendation:
                 plan_dict["option_alternative"] = opt_recommendation
 
+        if clean_sym in ("SILVER", "SILVERM", "SILMIC"):
+            plan_dict["mini_alternative"] = {
+                "symbol": "MCX:SILVERM",
+                "lot_size": 5,
+                "description": "Silver Mini (5 kg)",
+                "micro_symbol": "MCX:SILMIC",
+                "micro_lot_size": 1,
+            }
+        elif clean_sym in ("GOLD", "GOLDM"):
+            plan_dict["mini_alternative"] = {
+                "symbol": "MCX:GOLDM",
+                "lot_size": 10,
+                "description": "Gold Mini (100g)",
+                "petal_symbol": "MCX:GOLDPETAL",
+                "petal_lot_size": 1,
+            }
+        elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
+            plan_dict["mini_alternative"] = {
+                "symbol": "MCX:CRUDEOILM",
+                "lot_size": 10,
+                "description": "Crude Oil Mini (10 bbl)",
+            }
+        elif clean_sym in ("NATURALGAS", "NATGASMINI"):
+            plan_dict["mini_alternative"] = {
+                "symbol": "MCX:NATGASMINI",
+                "lot_size": 250,
+                "description": "Natural Gas Mini (250 mmBtu)",
+            }
+
         sniper = adaptive_decision.sniper
         sniper_dict = None
         if sniper:
@@ -1846,43 +2149,40 @@ def detect_commodity_breakouts(
                     f"[CommodityDetector] Order book evaluation error for {clean_sym}: {e_ob}"
                 )
 
-            # Cumulative Volume Delta (CVD) & Multi-Bar Divergence Analysis
-            try:
-                from analysis.order_flow import analyze_order_flow
+        # Cumulative Volume Delta (CVD) & Multi-Bar Divergence Analysis
+        # Self-protecting: only evaluates when order flow snapshot reports authentic LIVE market state
+        try:
+            from analysis.order_flow import analyze_order_flow
 
-                of_snap = analyze_order_flow(f"MCX:{clean_sym}", timeframe="5m")
-                if of_snap and of_snap.market_state == "LIVE":
-                    if is_bullish:
-                        if of_snap.cvd_divergence in ("BULLISH_ABSORPTION", "AGGRESSIVE_BUYING"):
+            of_snap = analyze_order_flow(f"MCX:{clean_sym}", timeframe="5m")
+            if of_snap and of_snap.market_state == "LIVE":
+                if is_bullish:
+                    if of_snap.cvd_divergence in ("BULLISH_ABSORPTION", "AGGRESSIVE_BUYING"):
+                        conf_boost = min(22, conf_boost + 5)
+                        div_label = of_snap.cvd_divergence.replace("_", " ").title()
+                        smc_tags.append(f"CVD {div_label}")
+                    elif of_snap.cvd_divergence in ("BEARISH_EXHAUSTION", "AGGRESSIVE_SELLING"):
+                        # Institutional selling/exhaustion into bullish breakout = trap warning!
+                        conf_boost = max(0, conf_boost - 8)
+                        smc_tags.append(f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})")
+                elif is_bearish:
+                    if of_snap.cvd_divergence in ("BEARISH_EXHAUSTION", "AGGRESSIVE_SELLING"):
+                        conf_boost = min(22, conf_boost + 5)
+                        div_label = of_snap.cvd_divergence.replace("_", " ").title()
+                        smc_tags.append(f"CVD {div_label}")
+                    elif of_snap.cvd_divergence in ("BULLISH_ABSORPTION", "AGGRESSIVE_BUYING"):
+                        # Institutional absorption/buying into bearish breakdown:
+                        # Confirms UTAD bull trap reversal!
+                        if is_utad_bear:
                             conf_boost = min(22, conf_boost + 5)
-                            div_label = of_snap.cvd_divergence.replace("_", " ").title()
-                            smc_tags.append(f"CVD {div_label}")
-                        elif of_snap.cvd_divergence in ("BEARISH_EXHAUSTION", "AGGRESSIVE_SELLING"):
-                            # Institutional selling/exhaustion into bullish breakout = trap warning!
+                            smc_tags.append("Institutional CVD Absorption (Bull Trap Confirmed)")
+                        else:
                             conf_boost = max(0, conf_boost - 8)
                             smc_tags.append(f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})")
-                    elif is_bearish:
-                        if of_snap.cvd_divergence in ("BEARISH_EXHAUSTION", "AGGRESSIVE_SELLING"):
-                            conf_boost = min(22, conf_boost + 5)
-                            div_label = of_snap.cvd_divergence.replace("_", " ").title()
-                            smc_tags.append(f"CVD {div_label}")
-                        elif of_snap.cvd_divergence in ("BULLISH_ABSORPTION", "AGGRESSIVE_BUYING"):
-                            # Institutional absorption/buying into bearish breakdown:
-                            # Confirms UTAD bull trap reversal!
-                            if is_utad_bear:
-                                conf_boost = min(22, conf_boost + 5)
-                                smc_tags.append(
-                                    "Institutional CVD Absorption (Bull Trap Confirmed)"
-                                )
-                            else:
-                                conf_boost = max(0, conf_boost - 8)
-                                smc_tags.append(
-                                    f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})"
-                                )
-            except Exception as e_of:
-                logger.debug(
-                    f"[CommodityDetector] Order flow divergence evaluation error for {clean_sym}: {e_of}"
-                )
+        except Exception as e_of:
+            logger.debug(
+                f"[CommodityDetector] Order flow divergence evaluation error for {clean_sym}: {e_of}"
+            )
 
         final_conf = min(94, base_conf + conf_boost)
 

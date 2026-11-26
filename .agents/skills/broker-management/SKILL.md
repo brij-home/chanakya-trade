@@ -23,7 +23,8 @@ description: >-
 
 | Broker | Auth | Market Data | Execution | Callback URL | Notes |
 | :--- | :--- | :---: | :---: | :--- | :--- |
-| **Fyers** | OAuth2 Redirect | ✅ Free v3 API | ✅ | `/fyers/callback` | **Primary data broker** — live quotes & options chain |
+| **Fyers** | OAuth2 / TOTP | ✅ Prime v3 API | ✅ | `/fyers/callback` | **Primary data broker** — Split Data/Tx RateGate, 50-depth TBT (NSE/NFO), `OrderSocket`, Multiorder SPAN margin |
+| **Flattrade** | OAuth2 / TOTP | ✅ Pi Connect v2 | ✅ | `/flattrade/callback` | **Secondary hot standby failover** (decoupled from Fyers CB; `subscribe_websocket()`, `TPSeries`, option chains) |
 | **Zerodha Kite** | OAuth2 (Request Token) | ✅ Paid API | ✅ | `/zerodha/callback` | Industry standard execution broker |
 | **Angel One** | TOTP Auto-Login | ✅ SmartAPI Free | ✅ | — (no redirect) | Uses `ANGEL_TOTP_SECRET` for auto-auth |
 | **Upstox** | OAuth2 Redirect | ✅ Free API v3 | ✅ | `/upstox/callback` | Good options data via WebSocket |
@@ -36,7 +37,7 @@ description: >-
 
 ### Broker Routing Priority
 ```
-Fyers (data) → explicitly configured, source-qualified data provider; execution routes only to the selected authenticated execution broker. Mock is isolated to explicit demo and test paths.
+Fyers Prime (primary data + execution) ⇄ Flattrade Pi (secondary data failover when Fyers CB trips / empty chains); execution routes strictly to the explicit authenticated execution broker (runtime role locks preserved over env overrides). Mock is isolated to explicit demo and test paths.
 ```
 
 ---

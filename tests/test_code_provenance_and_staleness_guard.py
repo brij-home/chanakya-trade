@@ -234,3 +234,41 @@ def test_code_provenance_direct_endpoint():
     assert "uptime_seconds" in data
     assert "git_commit" in data
     assert "is_stale_in_memory" in data
+
+
+def test_code_provenance_stale_ok_nonblocking_during_scan(tmp_path: Path):
+    """Verify stale_ok=True returns cached report without waiting for concurrent scan_stale_files()."""
+    import threading
+
+    sentinel = CodeProvenanceSentinel(root_dir=tmp_path, boot_time=time.time() + 1000.0)
+    cached = sentinel.get_provenance()
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def slow_scan():
+        scan_started.set()
+        release_scan.wait(timeout=2.0)
+        return []
+
+    sentinel.scan_stale_files = slow_scan  # type: ignore[method-assign]
+    t = threading.Thread(target=lambda: sentinel.get_provenance(force_refresh=True))
+    t.start()
+    assert scan_started.wait(timeout=1.0)
+
+    t0 = time.monotonic()
+    res = sentinel.get_provenance(stale_ok=True)
+    elapsed = time.monotonic() - t0
+    release_scan.set()
+    t.join(timeout=2.0)
+
+    assert res is cached
+    assert elapsed < 0.25
+
+
+def test_sensex_contract_expiry_metadata_handles_date_object():
+    """Verify get_expiry_metadata preserves parsed_c.expiry_date (datetime.date) for BSE:SENSEX options."""
+    from engine.alert_expiry import get_expiry_metadata
+
+    meta = get_expiry_metadata(None, symbol="SENSEX", contract_symbol="BSE:SENSEX26NOV84600CE")
+    assert meta["raw_date"] == "2026-11-26"

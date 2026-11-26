@@ -21,8 +21,12 @@ from market.contract_selection import (
 from market.instruments import canonical_symbol
 
 AS_OF = datetime(2026, 11, 8, 20, 0, tzinfo=IST)
-EXPIRY = date(2026, 11, 17)
-EXPIRY_EPOCH = str(datetime(2026, 11, 17, 19, 30, tzinfo=IST).timestamp())
+EXPIRY = date.today() + timedelta(days=14)
+EXPIRY_EPOCH = str(
+    datetime.combine(EXPIRY, datetime.min.time(), tzinfo=IST)
+    .replace(hour=19, minute=30)
+    .timestamp()
+)
 
 
 def _row(
@@ -202,7 +206,7 @@ def test_active_grid_contains_only_listed_options(monkeypatch):
     monkeypatch.setattr(
         quotes_module,
         "get_quote",
-        lambda instruments: {"MCX:CRUDEOIL26NOVFUT": _quote(base=datetime.now(IST))},
+        lambda instruments: {k: _quote(base=datetime.now(IST)) for k in instruments},
     )
     monkeypatch.setattr(
         "brokers.fyers._resolve_commodity_contract",

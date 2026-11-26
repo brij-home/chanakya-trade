@@ -358,7 +358,7 @@ function parseCommand(input, contextSymbol = null) {
     }
 
     case 'tilt': case 'risk-status': {
-      return { endpoint: '/api/risk/preflight', body: { action: 'BUY', symbol: contextSymbol || 'NIFTY', qty: 50, price: 24500 }, cardType: 'markdown' }
+      return { endpoint: '/api/risk/behavioral_status', method: 'GET', body: null, cardType: 'markdown' }
     }
 
     default: {

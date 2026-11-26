@@ -45,6 +45,7 @@ class DataSyncScheduler:
         self._last_master_sync_date: Optional[str] = None
         self._last_premarket_sync_date: Optional[str] = None
         self._last_token_refresh_date: Optional[str] = None
+        self._last_fno_ban_sync_date: Optional[str] = None
         self._is_syncing = False
 
     def get_sync_status(self) -> Dict[str, Any]:
@@ -58,6 +59,7 @@ class DataSyncScheduler:
                 "last_master_sync_date": self._last_master_sync_date,
                 "last_premarket_sync_date": self._last_premarket_sync_date,
                 "last_token_refresh_date": self._last_token_refresh_date,
+                "last_fno_ban_sync_date": self._last_fno_ban_sync_date,
             }
 
     # ── 0a. Morning Broker Daily Token & TOTP Refresh ───────────────
@@ -131,7 +133,9 @@ class DataSyncScheduler:
 
     # ── 0. Pre-Market Daily Levels Priming ───────────────────────────
 
-    def sync_premarket_levels(self, force: bool = False) -> Dict[str, Any]:
+    def sync_premarket_levels(
+        self, force: bool = False, session_date: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Pre-market Priming Engine (08:30 - 09:12 IST):
         Pre-computes and primes DailyLevels (CPR, Camarilla, Classic Pivots, ATR-14,
@@ -144,30 +148,58 @@ class DataSyncScheduler:
 
         now_ist = datetime.now(IST)
         today_str = now_ist.strftime("%Y-%m-%d")
+        target_session = session_date or today_str
 
         if not force:
             if not is_trading_day(now_ist.date(), exchange="NSE"):
                 return {"status": "SKIPPED", "reason": f"{today_str} is not an NSE trading day"}
 
         logger.info(
-            "[DataSync] Starting pre-market DailyLevels priming across Indices & F&O Universe..."
+            f"[DataSync] Starting pre-market DailyLevels priming across Indices & F&O Universe for session {target_session}..."
         )
         store = get_daily_levels_store()
         fno_list = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
         indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
         all_targets = indices + [s for s in fno_list if s not in indices]
 
-        primed = store.prime_universe(symbols=all_targets, session_date=today_str)
-        self._last_premarket_sync_date = today_str
+        primed = store.prime_universe(symbols=all_targets, session_date=target_session)
+        self._last_premarket_sync_date = target_session
         logger.info(
-            f"[DataSync] Pre-market priming complete: {len(primed)} instruments cached in L1 RAM and disk."
+            f"[DataSync] Pre-market priming complete: {len(primed)} instruments cached in L1 RAM and disk for session {target_session}."
         )
         return {
             "status": "COMPLETED",
             "primed_count": len(primed),
-            "session_date": today_str,
+            "session_date": target_session,
             "indices_count": len(indices),
             "fno_count": len(fno_list),
+        }
+
+    def sync_daily_fno_ban(self, force: bool = False) -> Dict[str, Any]:
+        """Synchronize daily NSE F&O Ban Period securities from official exchange circular/CSV."""
+        from market.calendar import is_trading_day
+        from market.fno_ban import fetch_and_record_nse_fno_ban, fetch_and_record_nse_mwpl_limits
+
+        now_ist = datetime.now(IST)
+        today_str = now_ist.strftime("%Y-%m-%d")
+
+        if not force and not is_trading_day(now_ist.date(), exchange="NSE"):
+            return {"status": "SKIPPED", "reason": f"{today_str} is not an NSE trading day"}
+
+        snap = fetch_and_record_nse_fno_ban()
+        mwpl_snap = fetch_and_record_nse_mwpl_limits(ref_date=now_ist)
+        active_snap = mwpl_snap or snap
+        if active_snap is None:
+            return {"status": "UNAVAILABLE", "session_date": today_str}
+
+        with self._lock:
+            self._last_fno_ban_sync_date = today_str
+        return {
+            "status": "SUCCESS",
+            "session_date": active_snap.as_of_date,
+            "banned_count": len(active_snap.banned_symbols),
+            "banned_symbols": list(active_snap.banned_symbols),
+            "mwpl_limits_count": len(getattr(active_snap, "mwpl_limits", {}) or {}),
         }
 
     # ── 1. Daily EOD Bar Sync ────────────────────────────────────────
@@ -386,10 +418,13 @@ class DataSyncScheduler:
                 await asyncio.to_thread(self.sync_broker_tokens)
 
         # Check 0: Pre-Market Priming & Trading Hours Level Integrity (Weekdays)
-        # If pre-market (08:30+) or active trading hours (up to 15:30 IST), ensure today's levels are in RAM/disk
-        if now_ist.weekday() < 5 and (
-            8 <= now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 30)
-        ):
+        # If pre-market (08:30+) or active trading hours (up to derivative_close), ensure today's levels & F&O ban list are fresh
+        from market.rule_schedule import derivative_close
+
+        _deriv_close = derivative_close(now_ist.date())
+        if now_ist.weekday() < 5 and (now_ist.hour >= 8 and now_ist.time() <= _deriv_close):
+            if self._last_fno_ban_sync_date != today_str:
+                await asyncio.to_thread(self.sync_daily_fno_ban)
             if self._last_premarket_sync_date != today_str:
                 from engine.daily_levels import get_daily_levels_store
 
@@ -427,8 +462,8 @@ class DataSyncScheduler:
         with an immediate settling check on startup (2.0s delay).
         """
         try:
-            # Immediate bootstrap check: 2.0s delay for FastAPI & broker bootstrap
-            await asyncio.sleep(2.0)
+            # Stagger initial boot cadence check (12s) so live streams and auto-alert warmup settle first
+            await asyncio.sleep(12.0)
             if self._running:
                 await self._check_cadence()
         except asyncio.CancelledError:

@@ -28,7 +28,6 @@ logger = logging.getLogger("brokers.angelone")
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from brokers.base import (
@@ -46,12 +45,30 @@ from brokers.base import (
 )
 
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "angelone.json"
+from config.paths import app_data_path
+
+TOKEN_FILE = app_data_path("angelone.json")
 
 # Exchange constants
 NSE = "NSE"
 BSE = "BSE"
 NFO = "NFO"
+
+
+def _get_angel_fno_lot(underlying: str) -> int:
+    """Resolve authoritative contract lot size for Angel One option chains."""
+    try:
+        from market.instruments import get_fno_lot_size
+
+        clean = (
+            underlying.upper().replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").strip()
+        )
+        lot = get_fno_lot_size(clean)
+        if lot > 0:
+            return lot
+    except Exception as e_lot:
+        logger.debug(f"[angelone] Lot resolution fallback: {e_lot}")
+    return 1
 
 
 class AngelOneAPI(BrokerAPI):
@@ -528,7 +545,11 @@ class AngelOneAPI(BrokerAPI):
                             iv=float(c.get("impliedVolatility", 0)) or None,
                             bid=float(c.get("bidprice", 0)) or None,
                             ask=float(c.get("askPrice", 0)) or None,
-                            lot_size=int(c.get("lotSize", 50) or 50),
+                            lot_size=(
+                                int(c.get("lotSize", 0) or 0)
+                                if int(c.get("lotSize", 0) or 0) > 1
+                                else _get_angel_fno_lot(underlying)
+                            ),
                             exchange="NFO",
                         )
                     )

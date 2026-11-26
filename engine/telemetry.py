@@ -164,9 +164,17 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
             "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
             "CONNECTION CLOSED NORMALLY",
             "CODE 1000",
+            "CODE 1001",
+            "CLOUDFLARE WEBSOCKET PROXY RESTARTING",
+            "^TNX",
             "PING/PONG TIMED OUT",
             "WINERROR 10053",
             "WINERROR 10054",
+            "FORCIBLY CLOSED BY THE REMOTE HOST",
+            "RESET BY PEER",
+            "RATE GATE DENIED PERMIT",
+            "RATE GATE DENIED",
+            "DENIED PERMIT",
             "EVALUATION TIMEOUT",
             "FILE LOCKED BEYOND RETRY BUDGET",
         )
@@ -788,19 +796,31 @@ class TelemetryLogHandler(logging.Handler):
             if is_external_noise:
                 # Scraper ticker misses or normal code 1000 closures are P3 operational diagnostics
                 # Fyers broker socket invalid_symbols feedback is P3 informational audit
-                if any(
-                    k in msg.upper()
-                    for k in (
-                        "CODE -300",
-                        "-300",
-                        "CODE: -300",
-                        "INVALID_SYMBOLS",
-                        "INVALID SYMBOL",
-                        "INVALID SYMBOL PROVIDED",
-                        "PLEASE PROVIDE A VALID SYMBOL",
-                        "CONNECTION CLOSED NORMALLY",
-                        "CODE 1000",
+                # Remote teardowns, peer disconnects, and off-market host socket closures are routine P3 diagnostics
+                if (
+                    any(
+                        k in msg.upper()
+                        for k in (
+                            "CODE -300",
+                            "-300",
+                            "CODE: -300",
+                            "INVALID_SYMBOLS",
+                            "INVALID SYMBOL",
+                            "INVALID SYMBOL PROVIDED",
+                            "PLEASE PROVIDE A VALID SYMBOL",
+                            "CONNECTION CLOSED NORMALLY",
+                            "CODE 1000",
+                            "GOODBYE",
+                            "CONNECTION TO REMOTE HOST WAS LOST",
+                            "REMOTE HOST WAS LOST",
+                            "WINERROR 10054",
+                            "WINERROR 10053",
+                            "FORCIBLY CLOSED BY THE REMOTE HOST",
+                            "REMOTE DISCONNECTED",
+                            "RESET BY PEER",
+                        )
                     )
+                    or prio == "P3"
                 ):
                     severity = "INFO"
                     priority = "P3"
@@ -809,43 +829,55 @@ class TelemetryLogHandler(logging.Handler):
                     severity = "WARNING"
                     priority = "P2"
                 else:
-                    severity = "INFO" if record.levelno < logging.ERROR else "WARNING"
-                    priority = "P3" if record.levelno < logging.ERROR else "P2"
-            else:
-                if any(
-                    k in msg.upper()
-                    for k in (
-                        "VETO",
-                        "MILESTONE",
-                        "INTEGRITY GATE",
-                        "CODE -300",
-                        "-300",
-                        "CODE: -300",
-                        "INVALID_SYMBOLS",
-                        "INVALID SYMBOL",
-                        "INVALID SYMBOL PROVIDED",
-                        "PLEASE PROVIDE A VALID SYMBOL",
-                        "DELISTED",
-                        "EXPIRED",
-                        "SUPPRESS",
-                        "POLARIZATION",
-                        "REWRITING",
-                        "IN-FLIGHT WARNING",
-                        "THROTTLED OR HIGH DEMAND",
-                        "CONNECTION TO REMOTE HOST WAS LOST",
-                        "REMOTE HOST WAS LOST",
-                        "GOODBYE",
-                        "JSONDECODEERROR",
-                        "OPTIONS-CHAIN-V3",
-                        "PROTOCOLERROR",
-                        "REMOTE DISCONNECTED",
-                        "DISCARDED PHANTOM DIRTY TICK",
-                        "PHANTOM DIRTY TICK",
-                        "SILENCE WATCHDOG",
-                        "PACKET FREEZE DETECTED",
-                        "PROACTIVELY DROPPED INVALID SYMBOL",
-                        "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
+                    severity = (
+                        "INFO" if (record.levelno < logging.ERROR or prio == "P3") else "WARNING"
                     )
+                    priority = "P3" if (record.levelno < logging.ERROR or prio == "P3") else "P2"
+            else:
+                if (
+                    any(
+                        k in msg.upper()
+                        for k in (
+                            "VETO",
+                            "MILESTONE",
+                            "INTEGRITY GATE",
+                            "CODE -300",
+                            "-300",
+                            "CODE: -300",
+                            "INVALID_SYMBOLS",
+                            "INVALID SYMBOL",
+                            "INVALID SYMBOL PROVIDED",
+                            "PLEASE PROVIDE A VALID SYMBOL",
+                            "DELISTED",
+                            "EXPIRED",
+                            "SUPPRESS",
+                            "POLARIZATION",
+                            "REWRITING",
+                            "IN-FLIGHT WARNING",
+                            "THROTTLED OR HIGH DEMAND",
+                            "CONNECTION TO REMOTE HOST WAS LOST",
+                            "REMOTE HOST WAS LOST",
+                            "GOODBYE",
+                            "JSONDECODEERROR",
+                            "OPTIONS-CHAIN-V3",
+                            "PROTOCOLERROR",
+                            "REMOTE DISCONNECTED",
+                            "DISCARDED PHANTOM DIRTY TICK",
+                            "PHANTOM DIRTY TICK",
+                            "SILENCE WATCHDOG",
+                            "PACKET FREEZE DETECTED",
+                            "PROACTIVELY DROPPED INVALID SYMBOL",
+                            "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
+                            "RATE GATE DENIED PERMIT",
+                            "RATE GATE DENIED",
+                            "DENIED PERMIT",
+                            "WINERROR 10054",
+                            "WINERROR 10053",
+                            "FORCIBLY CLOSED BY THE REMOTE HOST",
+                            "RESET BY PEER",
+                        )
+                    )
+                    or prio == "P3"
                 ):
                     severity = "INFO"
                     priority = "P3"

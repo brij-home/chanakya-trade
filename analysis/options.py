@@ -152,12 +152,21 @@ def _dte_years(expiry_str: str, as_of: Optional[datetime] = None) -> float:
     if delta_days < 0:
         return 0.0
 
+    from market.rule_schedule import derivative_close
+
     now_time = curr_ist.time()
-    market_close = dtime(15, 30)
+    market_close = derivative_close(today_ist, expiring_index=(delta_days == 0))
     market_open = dtime(9, 15)
+    total_session_mins = float(
+        max(
+            1,
+            (market_close.hour * 60 + market_close.minute)
+            - (market_open.hour * 60 + market_open.minute),
+        )
+    )
 
     if now_time < market_open:
-        rem_mins = 375.0
+        rem_mins = total_session_mins
     elif now_time >= market_close:
         rem_mins = 0.0
     else:
@@ -166,9 +175,9 @@ def _dte_years(expiry_str: str, as_of: Optional[datetime] = None) -> float:
         )
 
     if delta_days == 0:
-        # Clamp to at least 1 minute (1.0 / (375 * 365)) so T > 0 for BS calculations
+        # Clamp to at least 1 minute so T > 0 for BS calculations
         effective_mins = max(1.0, rem_mins)
-        return (effective_mins / 375.0) / 365.0
+        return (effective_mins / total_session_mins) / 365.0
     else:
         intraday_fraction = max(0.0, min(1.0, rem_mins / 375.0))
         return (delta_days + intraday_fraction) / 365.0
@@ -363,12 +372,37 @@ def compute_realized_volatility_rank_from_history(
 
 
 def compute_iv_rank_from_history(symbol: str, period: str = "1y") -> Optional[float]:
-    """Compatibility shim: underlying OHLC cannot establish historical IV rank."""
+    """Compute IV rank from persisted constant-30D option-IV observations (>= 20 sessions).
+
+    Returns None when fewer than 20 authentic option-IV observations exist — never
+    substitutes realized volatility or synthetic defaults.
+    """
     del period
     import logging
 
+    try:
+        from engine.iv_surface import compute_iv_rank_and_percentile, load_historical_30d_ivs
+
+        clean = (
+            str(symbol or "")
+            .upper()
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("-INDEX", "")
+            .strip()
+        )
+        history = load_historical_30d_ivs(clean, limit=252)
+        if len(history) >= 20:
+            rank, _, _ = compute_iv_rank_and_percentile(history[-1], history, min_samples=20)
+            if rank is not None:
+                return rank
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "Persisted IV history lookup error for %s: %s", symbol, exc
+        )
+
     logging.getLogger(__name__).info(
-        "IV rank unavailable for %s: no historical option-IV source is integrated", symbol
+        "IV rank unavailable for %s: fewer than 20 authentic option-IV sessions persisted", symbol
     )
     return None
 

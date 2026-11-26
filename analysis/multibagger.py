@@ -623,7 +623,31 @@ def generate_short_term_ticket(
         return {}
 
     atr = _compute_atr_14(ltp, df)
-    entry_price = round(pivot_price if (is_vcp and pivot_price > 0) else ltp, 2)
+    from analysis.pullback_engine import evaluate_anti_fomo_entry
+
+    anti_fomo = (
+        evaluate_anti_fomo_entry(
+            df,
+            ltp,
+            pivot_price=pivot_price if (is_vcp and pivot_price > 0) else 0.0,
+            direction="BULLISH",
+        )
+        if df is not None and not df.empty
+        else None
+    )
+    is_ext = bool(anti_fomo and anti_fomo.is_extended)
+    if is_ext and anti_fomo is not None:
+        entry_price = round(anti_fomo.pullback_limit_entry, 2)
+        strategy_action = "WAIT_FOR_PULLBACK_LIMIT"
+    else:
+        entry_price = round(
+            pivot_price
+            if (is_vcp and pivot_price > 0)
+            else (anti_fomo.recommended_entry if anti_fomo else ltp),
+            2,
+        )
+        strategy_action = "BUY_SWING_BREAKOUT"
+
     stop_loss = round(max(0.1, entry_price - (1.1 * atr)), 2)
     risk_per_share = max(0.5, entry_price - stop_loss)
 
@@ -636,8 +660,14 @@ def generate_short_term_ticket(
         "horizon_id": "SHORT_TERM",
         "horizon_label": "1–4 Weeks (Velocity Alpha & Swing Breakouts)",
         "action": "LONG (BUY)",
-        "strategy_action": "BUY_SWING_BREAKOUT",
+        "strategy_action": strategy_action,
         "entry_price": entry_price,
+        "pullback_limit_entry": anti_fomo.pullback_limit_entry if anti_fomo else entry_price,
+        "no_chase_boundary": anti_fomo.no_chase_boundary
+        if anti_fomo
+        else round(entry_price * 1.025, 2),
+        "is_extended": is_ext,
+        "extension_status": anti_fomo.extension_status if anti_fomo else "AT_PIVOT",
         "stop_loss": stop_loss,
         "risk_per_share": round(risk_per_share, 2),
         "target_1": target_1,
@@ -667,7 +697,30 @@ def generate_mid_term_compounder_ticket(
         return {}
 
     atr = _compute_atr_14(ltp, df)
-    entry_price = round(pivot_price if (is_vcp and pivot_price > 0) else ltp, 2)
+    from analysis.pullback_engine import evaluate_anti_fomo_entry
+
+    anti_fomo = (
+        evaluate_anti_fomo_entry(
+            df,
+            ltp,
+            pivot_price=pivot_price if (is_vcp and pivot_price > 0) else 0.0,
+            direction="BULLISH",
+        )
+        if df is not None and not df.empty
+        else None
+    )
+    is_ext = bool(anti_fomo and anti_fomo.is_extended)
+    if is_ext and anti_fomo is not None:
+        entry_price = round(anti_fomo.pullback_limit_entry, 2)
+        strategy_action = "WAIT_FOR_PULLBACK_LIMIT"
+    else:
+        entry_price = round(
+            pivot_price
+            if (is_vcp and pivot_price > 0)
+            else (anti_fomo.recommended_entry if anti_fomo else ltp),
+            2,
+        )
+        strategy_action = "BUY_STAGE_2_COMPOUNDER"
 
     # Base structural stop floor (allows 6%–10% normal base consolidation)
     stop_loss = round(max(0.1, entry_price - (1.8 * atr)), 2)
@@ -689,8 +742,14 @@ def generate_mid_term_compounder_ticket(
         "horizon_id": "MID_TERM",
         "horizon_label": "1–6 Months (Stage 2 Positional Compounder)",
         "action": "LONG (BUY)",
-        "strategy_action": "BUY_STAGE_2_COMPOUNDER",
+        "strategy_action": strategy_action,
         "entry_price": entry_price,
+        "pullback_limit_entry": anti_fomo.pullback_limit_entry if anti_fomo else entry_price,
+        "no_chase_boundary": anti_fomo.no_chase_boundary
+        if anti_fomo
+        else round(entry_price * 1.025, 2),
+        "is_extended": is_ext,
+        "extension_status": anti_fomo.extension_status if anti_fomo else "AT_PIVOT",
         "stop_loss": stop_loss,
         "risk_per_share": round(risk_per_share, 2),
         "target_1": target_1,
@@ -724,24 +783,44 @@ def generate_generational_ticket(
     if ltp <= 0:
         return {}
 
+    from analysis.pullback_engine import evaluate_anti_fomo_entry
+
+    anti_fomo = (
+        evaluate_anti_fomo_entry(df, ltp, direction="BULLISH")
+        if df is not None and not df.empty
+        else None
+    )
+    is_ext = bool(anti_fomo and anti_fomo.is_extended)
+    entry_price = round(
+        anti_fomo.pullback_limit_entry if (is_ext and anti_fomo is not None) else ltp,
+        2,
+    )
+    strategy_action = "WAIT_FOR_ACCUMULATION_PULLBACK" if is_ext else "ACCUMULATE_CORE_COMPOUNDER"
+
     # Initial catastrophic stop: 15% structural stop or below rising 200-day SMA
-    sma_200 = ltp * 0.85
+    sma_200 = entry_price * 0.85
     if df is not None and len(df) >= 200:
         sma_200 = float(np.mean(df["close"].values[-200:]))
 
-    initial_stop = round(min(ltp * 0.85, sma_200 * 0.95), 2)
-    risk_pts = round(ltp - initial_stop, 2)
+    initial_stop = round(min(entry_price * 0.85, sma_200 * 0.95), 2)
+    risk_pts = max(1.0, round(entry_price - initial_stop, 2))
 
-    target_rerating = round(ltp * 1.50, 2)  # +50% PE expansion
-    target_compounder = round(ltp * 2.50, 2)  # +150% (2.5x)
-    target_multibagger = round(ltp * 5.00, 2)  # +400% (5x)
+    target_rerating = round(entry_price * 1.50, 2)  # +50% PE expansion
+    target_compounder = round(entry_price * 2.50, 2)  # +150% (2.5x)
+    target_multibagger = round(entry_price * 5.00, 2)  # +400% (5x)
 
     return {
         "horizon_id": "LONG_TERM",
         "horizon_label": "1–3+ Years (Generational Multibagger & Wealth Compounder)",
         "action": "LONG (BUY)",
-        "strategy_action": "ACCUMULATE_CORE_COMPOUNDER",
-        "entry_price": round(ltp, 2),
+        "strategy_action": strategy_action,
+        "entry_price": entry_price,
+        "pullback_limit_entry": anti_fomo.pullback_limit_entry if anti_fomo else entry_price,
+        "no_chase_boundary": anti_fomo.no_chase_boundary
+        if anti_fomo
+        else round(entry_price * 1.025, 2),
+        "is_extended": is_ext,
+        "extension_status": anti_fomo.extension_status if anti_fomo else "AT_PIVOT",
         "stop_loss": initial_stop,
         "risk_per_share": risk_pts,
         "target_1": target_rerating,
@@ -936,12 +1015,25 @@ def scan_multibagger_opportunity(
     # Synthesis Summaries
     summary = f"{clean_sym} ranks {category} (Multibagger Score: {composite_score}/100 | Best Horizon: {best_horizon}). Minervini: {passed_count}/8 passed. Weinstein Stage: {stage}. Sector Tailwind: {sector_tailwind}/100 ({sector})."
 
-    if is_vcp:
+    if primary_ticket.get("is_extended"):
+        pb_lim = primary_ticket.get("pullback_limit_entry", primary_ticket.get("entry_price", ltp))
+        nc_lim = primary_ticket.get("no_chase_boundary", pb_lim * 1.025)
+        catalyst = (
+            f"Overextended past structural base (Status: {primary_ticket.get('extension_status', 'OVEREXTENDED_WAIT')}). "
+            "Respect institutional Anti-FOMO discipline."
+        )
+        entry_strat = (
+            f"⏳ WAIT FOR PULLBACK (DO NOT CHASE ₹{ltp:.2f}): Place limit buy near ₹{pb_lim:.2f} "
+            f"(No-Chase cap: ₹{nc_lim:.2f}). Stop-loss ₹{primary_ticket.get('stop_loss', ltp * 0.92):.2f}."
+        )
+    elif is_vcp:
         catalyst = f"VCP Contraction active with pivot resistance at ₹{pivot_price:.2f}. Volatility is drying up prior to potential Stage 2 expansion."
-        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest). Stop-loss ₹{primary_ticket.get('stop_loss', ltp * 0.95):.2f}."
+        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest, No-Chase ≤ ₹{primary_ticket.get('no_chase_boundary', pivot_price * 1.025):.2f}). Stop-loss ₹{primary_ticket.get('stop_loss', ltp * 0.95):.2f}."
     elif stage == "STAGE_2_MARKUP":
         catalyst = "Established Stage 2 markup with rising 50/200 SMA alignment and positive institutional sector momentum."
-        entry_strat = f"Enter near ₹{ltp:.2f} on 20/50-day EMA pullbacks. Mid-Term Target ₹{mt_ticket.get('target_1', ltp * 1.30):.2f} with SL at ₹{mt_ticket.get('stop_loss', ltp * 0.92):.2f}. Zero 2R early exits."
+        pb_lim = primary_ticket.get("pullback_limit_entry", ltp)
+        nc_lim = primary_ticket.get("no_chase_boundary", ltp * 1.025)
+        entry_strat = f"Accumulate only inside No-Chase zone up to ₹{nc_lim:.2f} (ideal pullback limit ₹{pb_lim:.2f} at 20/50-EMA). Mid-Term Target ₹{mt_ticket.get('target_1', ltp * 1.30):.2f} with SL at ₹{mt_ticket.get('stop_loss', ltp * 0.92):.2f}. Zero 2R early exits."
     else:
         catalyst = "Consolidating or basing. Watch for Stage 2 volume breakout confirmation."
         entry_strat = "Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."

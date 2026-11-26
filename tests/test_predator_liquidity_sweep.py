@@ -87,9 +87,21 @@ def test_predator_bullish_spring():
     assert isinstance(alert, AutoAlert)
     assert alert.direction == "BULLISH"
     assert "PREDATOR_SWEEP" in alert.alert_type
-    assert alert.trigger_level == 24825.0
-    assert alert.stop_loss < 24775.0  # SL below sweep wick
-    assert alert.target_level > 24825.0
+    assert alert.underlying_spot == 24825.0
+    if alert.contract_symbol:
+        assert 0 < alert.stop_loss < alert.trigger_level < alert.target_level
+        spot_sl = float(
+            str(alert.actionable_plan["underlying_sl"]).replace("₹", "").replace(",", "")
+        )
+        spot_t1 = float(
+            str(alert.actionable_plan["underlying_target"]).replace("₹", "").replace(",", "")
+        )
+        assert spot_sl < 24775.0
+        assert spot_t1 > 24825.0
+    else:
+        assert alert.trigger_level == 24825.0
+        assert alert.stop_loss < 24775.0  # SL below sweep wick
+        assert alert.target_level > 24825.0
     assert alert.alert_id.startswith("aa-predator-sweep-nifty")
 
 
@@ -111,9 +123,21 @@ def test_predator_bearish_upthrust():
     assert alert is not None
     assert isinstance(alert, AutoAlert)
     assert alert.direction == "BEARISH"
-    assert alert.trigger_level == 24975.0
-    assert alert.stop_loss > 25025.0  # SL above sweep wick
-    assert alert.target_level < 24975.0
+    assert alert.underlying_spot == 24975.0
+    if alert.contract_symbol:
+        assert 0 < alert.stop_loss < alert.trigger_level < alert.target_level
+        spot_sl = float(
+            str(alert.actionable_plan["underlying_sl"]).replace("₹", "").replace(",", "")
+        )
+        spot_t1 = float(
+            str(alert.actionable_plan["underlying_target"]).replace("₹", "").replace(",", "")
+        )
+        assert spot_sl > 25025.0
+        assert spot_t1 < 24975.0
+    else:
+        assert alert.trigger_level == 24975.0
+        assert alert.stop_loss > 25025.0  # SL above sweep wick
+        assert alert.target_level < 24975.0
     assert alert.alert_id.startswith("aa-predator-sweep-banknifty")
 
 

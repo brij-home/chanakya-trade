@@ -521,36 +521,65 @@ def evaluate_century_compounder(
     )
 
     # ── Anti-FOMO Execution Blueprint ──────────────────────────
-    # Calculate fair value anchor from Volume Profile POC or 20-EMA base
+    # Calculate fair value anchor from Volume Profile POC or real 20-EMA base
     fair_value = ltp
-    fv_source = "20_EMA_BASE"
+    fv_source = "LTP_NO_OHLCV_ANCHOR"
     pivot = round(ltp * 1.02, 2)
+    anti_fomo = None
 
     if df is not None and len(df) >= 20:
         try:
+            from analysis.pullback_engine import evaluate_anti_fomo_entry
+            from analysis.technical import ema as _calc_ema
             from analysis.volume_profile import compute_volume_profile
+
+            close_s = df["close"].astype(float)
+            ema20_val = float(_calc_ema(close_s, 20).iloc[-1])
+            highs = df["high"].values if "high" in df.columns else df["close"].values
+            pivot = round(float(np.max(highs[-20:])), 2)
 
             poc_p, vah_p, val_p, _ = compute_volume_profile(df, num_bins=12)
             if poc_p > 0:
                 fair_value = round(poc_p, 2)
                 fv_source = "VOLUME_PROFILE_POC"
-            highs = df["high"].values if "high" in df.columns else df["close"].values
-            pivot = round(float(np.max(highs[-20:])), 2)
+            elif not np.isnan(ema20_val) and ema20_val > 0:
+                fair_value = round(ema20_val, 2)
+                fv_source = "20_EMA_BASE"
+
+            anti_fomo = evaluate_anti_fomo_entry(
+                df,
+                ltp,
+                pivot_price=pivot,
+                direction="BULLISH",
+                symbol=symbol,
+            )
         except Exception as e:
             logger.warning(
-                f"[century_compounder] Volume profile POC computation failed for {symbol}: {e}"
+                f"[century_compounder] Anti-FOMO fair value computation failed for {symbol}: {e}"
             )
 
     acc_low = round(fair_value * 0.98, 2)
     acc_high = round(fair_value * 1.025, 2)
-    no_chase = round(pivot * 1.025, 2)  # Hard +2.5% max boundary
-    pullback_limit = round(max(fair_value, pivot * 0.985), 2)
-    invalidation_sl = round(acc_low * 0.94, 2)  # Structural base low
+    no_chase = round(pivot * 1.025, 2)  # Hard +2.5% max boundary strictly anchored to pivot
+    if anti_fomo is not None and anti_fomo.pullback_limit_entry > 0:
+        pullback_limit = round(anti_fomo.pullback_limit_entry, 2)
+    else:
+        pullback_limit = round(max(fair_value, pivot * 0.985), 2)
+    invalidation_sl = round(min(acc_low, pullback_limit) * 0.94, 2)  # Structural base low
 
-    # Determine Action Directive
-    if ltp > no_chase:
+    # Determine Action Directive (Strict Zero-FOMO: check pivot chase + EMA20 ATR + 50-SMA extension)
+    is_extended = bool(ltp > no_chase or (anti_fomo is not None and anti_fomo.is_extended))
+    if is_extended:
         action_directive = "WAIT_FOR_PULLBACK"
-        dir_msg = f"DO NOT CHASE! Asset is +{((ltp - pivot) / pivot * 100):.1f}% past pivot. Place limit order at pullback level (₹{pullback_limit:,.1f})."
+        ext_reasons = []
+        if ltp > no_chase and pivot > 0:
+            ext_reasons.append(f"+{((ltp - pivot) / pivot * 100):.1f}% past pivot")
+        if anti_fomo is not None and anti_fomo.dist_ema20_atr > 2.0:
+            ext_reasons.append(f"+{anti_fomo.dist_ema20_atr:.1f}x ATR from 20-EMA")
+        if anti_fomo is not None and anti_fomo.dist_sma50_pct > 18.0:
+            ext_reasons.append(f"+{anti_fomo.dist_sma50_pct:.1f}% above 50-SMA")
+        reason_str = ", ".join(ext_reasons) if ext_reasons else "overextended from base"
+        dir_msg = f"DO NOT CHASE! Asset is {reason_str}. Place limit order at pullback level (₹{pullback_limit:,.1f})."
     elif acc_low <= ltp <= acc_high:
         action_directive = "ACCUMULATE_FAIR_VALUE"
         dir_msg = f"In Prime Accumulation Zone (₹{acc_low:,.1f} – ₹{acc_high:,.1f}) anchored to {fv_source}. Systematic position build recommended."
@@ -558,8 +587,9 @@ def evaluate_century_compounder(
         action_directive = "STALK_PIVOT"
         dir_msg = f"Coiling below breakout pivot (₹{pivot:,.1f}). Accumulate within range, trigger buy on volume breakout."
 
-    risk_pts = max(1.0, ltp - invalidation_sl)
-    rr_str = f"1:{(ltp * 1.0 / risk_pts):.1f}"
+    ref_entry = pullback_limit if is_extended else ltp
+    risk_pts = max(1.0, ref_entry - invalidation_sl)
+    rr_str = f"1:{(ref_entry * 1.0 / risk_pts):.1f}"
 
     anti_fomo = AntiFomoExecutionBlueprint(
         fair_value_anchor=fair_value,

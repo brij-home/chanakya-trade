@@ -173,6 +173,9 @@ def configure_sqlite_connection(
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
         conn.execute("PRAGMA temp_store = MEMORY")
+        # Cap idle WAL growth at 64 MB so write bursts truncate back cleanly on checkpoint.
+        conn.execute("PRAGMA journal_size_limit = 67108864")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
         if page_cache_kb > 0:
             conn.execute(f"PRAGMA cache_size = -{page_cache_kb}")
         if mmap_size > 0:

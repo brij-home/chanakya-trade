@@ -24,7 +24,6 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -44,9 +43,11 @@ from brokers.base import (
     UserProfile,
 )
 
+from config.paths import app_data_path
+
 log = logging.getLogger(__name__)
 
-TOKEN_FILE = Path.home() / ".trading_platform" / "shoonya.json"
+TOKEN_FILE = app_data_path("shoonya.json")
 DEFAULT_API_URL = "https://api.shoonya.com/NorenWClientTP/"
 DEFAULT_WS_URL = "wss://api.shoonya.com/NorenWSTP/"
 

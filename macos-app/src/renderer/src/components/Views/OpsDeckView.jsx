@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
 import { useToastStore } from '../../hooks/useToast'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
 import MultiSelectDropdown from '../Common/MultiSelectDropdown'
+import { createVisibilityInterval } from '../../utils/visibilityPoll'
 
 /**
  * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
@@ -137,6 +138,15 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const [showSentinelGuide, setShowSentinelGuide] = useState(false)
   const [showFlattradeWsModal, setShowFlattradeWsModal] = useState(false)
   const [copiedIncKey, setCopiedIncKey] = useState(null)
+  const copyResetTimerRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current)
+      }
+    }
+  }, [])
 
   // ── L2 Universe Depth Radar State ─────────────────────────────────
   const [radarItems, setRadarItems] = useState([])
@@ -202,8 +212,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   useEffect(() => {
     if (activeTab === 'dynamics') {
       fetchMarketDynamics()
-      const timer = setInterval(fetchMarketDynamics, 5000)
-      return () => clearInterval(timer)
+      return createVisibilityInterval(fetchMarketDynamics, 5000)
     }
   }, [activeTab, fetchMarketDynamics])
 
@@ -293,8 +302,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     if (activeTab === 'depth_radar') {
       fetchDepthRadar()
       if (radarAutoRefresh) {
-        const timer = setInterval(fetchDepthRadar, 5000)
-        return () => clearInterval(timer)
+        return createVisibilityInterval(fetchDepthRadar, 5000)
       }
     }
   }, [activeTab, fetchDepthRadar, radarAutoRefresh])
@@ -581,7 +589,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
       }
       navigator.clipboard.writeText(parts.join('\n'))
       setCopiedIncKey(incKey)
-      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      copyResetTimerRef.current = setTimeout(() => setCopiedIncKey(null), 2000)
       if (addToast) {
         addToast({ title: 'Copied to Clipboard', message: 'Incident error details copied.', type: 'info' })
       }
@@ -594,7 +603,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     try {
       navigator.clipboard.writeText(traceback || '')
       setCopiedIncKey(`${incKey}-tb`)
-      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      copyResetTimerRef.current = setTimeout(() => setCopiedIncKey(null), 2000)
       if (addToast) {
         addToast({ title: 'Traceback Copied', message: 'Full traceback copied to clipboard.', type: 'info' })
       }
@@ -1664,8 +1674,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                     <div className="grid grid-cols-2 gap-2 my-3 text-xs font-mono">
                       <div className="p-2 rounded bg-surface/70 border border-border/40">
                         <span className="text-[10px] text-muted block">Role Assignment</span>
-                        <span className="font-bold text-sapphire">
-                          {brokers.fyers?.role ? brokers.fyers.role.toUpperCase() : 'DATA & EXECUTION'}
+                        <span className={`font-bold ${brokers.fyers?.authenticated ? 'text-sapphire' : 'text-muted'}`}>
+                          {brokers.fyers?.role ? brokers.fyers.role.toUpperCase() : brokers.fyers?.authenticated ? 'DATA & EXECUTION' : 'UNASSIGNED'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-surface/70 border border-border/40">
@@ -1691,7 +1701,20 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
 
                   <div className="pt-2 border-t border-border/40 space-y-2">
                     <div className="flex items-center justify-between text-[10px] font-mono text-muted">
-                      <span>Circuit Breaker: <strong className={cb.state === 'CLOSED' ? 'text-emerald' : 'text-rose'}>{cb.state || 'CLOSED'}</strong></span>
+                      <div className="flex items-center gap-1.5">
+                        <span>Circuit Breaker: <strong className={cb.state === 'CLOSED' ? 'text-emerald' : cb.state === 'HALF_OPEN' ? 'text-gold' : 'text-rose'}>{cb.state || 'CLOSED'}</strong></span>
+                        {cb.state && cb.state !== 'CLOSED' && (
+                          <button
+                            type="button"
+                            onClick={cb.state === 'HALF_OPEN' ? handleResetBreaker : handleProbeBreaker}
+                            disabled={actionInProgress === 'reset_cb' || actionInProgress === 'probe_cb'}
+                            className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-panel hover:bg-highlight border border-border text-gold hover:text-text cursor-pointer transition-colors"
+                            title="Reset circuit breaker to CLOSED"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-panel text-muted border border-border">
                         Full Greeks • ATP • VWAP
                       </span>
