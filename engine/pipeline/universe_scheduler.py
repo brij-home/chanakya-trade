@@ -77,7 +77,74 @@ def score_symbol_velocity(
         (vol > 300_000) or (turnover_cr >= 10.0) or (is_fno and (vol / max(1, lot_sz) >= 60))
     )
     rvol_boost = 1.4 if (rvol_p >= 1.75 and chg >= 0.40) else 1.0
-    return chg * (1.5 if is_liquid else 1.0) * rvol_boost
+    drive_boost = 1.0
+    if chg >= 0.50 and ltp > 0:
+        open_p = float((q.get("open") if is_d else getattr(q, "open", 0.0)) or 0.0)
+        high_p = float((q.get("high") if is_d else getattr(q, "high", 0.0)) or 0.0)
+        low_p = float((q.get("low") if is_d else getattr(q, "low", 0.0)) or 0.0)
+        raw_chg = float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0)
+        day_rng = high_p - low_p
+        if day_rng > 0:
+            close_pos = (ltp - low_p) / day_rng
+            if (raw_chg > 0 and close_pos >= 0.72) or (raw_chg < 0 and close_pos <= 0.28):
+                drive_boost *= 1.30
+            if open_p > 0:
+                if (raw_chg > 0 and (open_p - low_p) / ltp <= 0.004) or (
+                    raw_chg < 0 and (high_p - open_p) / ltp <= 0.004
+                ):
+                    drive_boost *= 1.15
+            if (day_rng / ltp) * 100.0 >= 1.5 and rvol_p >= 1.5:
+                drive_boost *= 1.20
+
+    return chg * (1.5 if is_liquid else 1.0) * rvol_boost * drive_boost
+
+
+def identify_early_fno_movers(
+    equities: Sequence[str],
+    quotes_map: Optional[dict[str, Any]],
+    *,
+    top_n: int = 60,
+    min_move_pct: float = 0.5,
+) -> list[str]:
+    """Zero-chain full-F&O pre-filter surfacing opening drives & early velocity movers."""
+    policy = get_discovery_policy()
+    filtered: list[str] = []
+    for sym in equities:
+        clean = sym.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        if not clean:
+            continue
+        if policy.fno_only and not allows_context_symbol(sym if ":" in sym else f"NSE:{clean}"):
+            continue
+        filtered.append(sym)
+
+    if not quotes_map:
+        return filtered[: max(1, int(top_n))]
+
+    active_movers: list[tuple[float, str]] = []
+    quiet_pool: list[tuple[float, str]] = []
+    for sym in filtered:
+        clean = sym.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        q = quotes_map.get(f"NSE:{clean}") or quotes_map.get(f"BSE:{clean}") or quotes_map.get(sym)
+        score = score_symbol_velocity(sym, quotes_map)
+        chg = (
+            abs(
+                float(
+                    (q.get("change_pct") if isinstance(q, dict) else getattr(q, "change_pct", 0.0))
+                    or 0.0
+                )
+            )
+            if q
+            else 0.0
+        )
+        if chg >= float(min_move_pct):
+            active_movers.append((score, sym))
+        else:
+            quiet_pool.append((score, sym))
+
+    active_movers.sort(key=lambda item: item[0], reverse=True)
+    quiet_pool.sort(key=lambda item: item[0], reverse=True)
+    ranked = [sym for _, sym in active_movers] + [sym for _, sym in quiet_pool]
+    return ranked[: max(1, int(top_n))]
 
 
 def prioritize_equities_by_velocity(

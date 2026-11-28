@@ -11235,6 +11235,7 @@ class AutoAlertEngine:
                             is_milestone=is_milestone,
                             sig_id=sig_id,
                             disable_notification=disable_notification,
+                            repository=self._repository,
                         )
 
             except Exception as e:
@@ -18585,12 +18586,14 @@ class AutoAlertEngine:
         from engine.eod_store import get_cached_ohlcv_batch
 
         base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-        targets = list(base_indices)
-        for eq_sym in self._rank_candidates_by_velocity(
-            list(self.watched_equities), quotes_map=quotes_map
-        )[:10]:
-            if eq_sym not in targets:
-                targets.append(eq_sym)
+        targets = self._select_early_mover_targets(
+            quotes_map,
+            base_targets=base_indices,
+            max_total_targets=30,
+            anchor_count=12,
+            max_pool_depth=60,
+            counter_attr="_scalp_cycle_counter",
+        )
 
         clean_targets = [canonical_alert_symbol(s) for s in targets]
         eod_cache: dict[str, Any] = {}
@@ -18674,12 +18677,14 @@ class AutoAlertEngine:
         from market.history import get_ohlcv
 
         base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-        targets = list(base_indices)
-        for eq_sym in self._rank_candidates_by_velocity(
-            list(self.watched_equities), quotes_map=quotes_map
-        )[:10]:
-            if eq_sym not in targets:
-                targets.append(eq_sym)
+        targets = self._select_early_mover_targets(
+            quotes_map,
+            base_targets=base_indices,
+            max_total_targets=30,
+            anchor_count=12,
+            max_pool_depth=60,
+            counter_attr="_scalp_cycle_counter",
+        )
 
         clean_targets = [canonical_alert_symbol(s) for s in targets]
         eod_cache: dict[str, Any] = {}
@@ -18763,12 +18768,14 @@ class AutoAlertEngine:
         from market.history import get_ohlcv
 
         base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-        targets = list(base_indices)
-        for eq_sym in self._rank_candidates_by_velocity(
-            list(self.watched_equities), quotes_map=quotes_map
-        )[:10]:
-            if eq_sym not in targets:
-                targets.append(eq_sym)
+        targets = self._select_early_mover_targets(
+            quotes_map,
+            base_targets=base_indices,
+            max_total_targets=30,
+            anchor_count=12,
+            max_pool_depth=60,
+            counter_attr="_scalp_cycle_counter",
+        )
 
         clean_targets = [canonical_alert_symbol(s) for s in targets]
         eod_cache: dict[str, Any] = {}
@@ -18848,12 +18855,14 @@ class AutoAlertEngine:
         from market.history import get_ohlcv
 
         base_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-        targets = list(base_indices)
-        for eq_sym in self._rank_candidates_by_velocity(
-            list(self.watched_equities), quotes_map=quotes_map
-        )[:10]:
-            if eq_sym not in targets:
-                targets.append(eq_sym)
+        targets = self._select_early_mover_targets(
+            quotes_map,
+            base_targets=base_indices,
+            max_total_targets=30,
+            anchor_count=12,
+            max_pool_depth=60,
+            counter_attr="_scalp_cycle_counter",
+        )
 
         clean_targets = [canonical_alert_symbol(s) for s in targets]
         eod_cache: dict[str, Any] = {}
@@ -19004,6 +19013,44 @@ class AutoAlertEngine:
                     break
                 targets.append(s)
 
+        return targets[:max_total_targets]
+
+    def _select_early_mover_targets(
+        self,
+        quotes_map: Optional[dict[str, Any]],
+        *,
+        base_targets: Any = (),
+        max_total_targets: int = 30,
+        anchor_count: int = 12,
+        max_pool_depth: int = 60,
+        counter_attr: str = "_scalp_cycle_counter",
+    ) -> list[str]:
+        """Select velocity-prioritized + staggered F&O targets without static truncation."""
+        eq_cands = list(self.watched_equities)
+        base_list = list(base_targets)
+        if quotes_map:
+            from engine.pipeline.universe_scheduler import identify_early_fno_movers
+
+            ranked_eq = identify_early_fno_movers(
+                eq_cands, quotes_map=quotes_map, top_n=max_pool_depth
+            )
+            cycle_n = int(getattr(self, counter_attr, 0) or 0)
+            setattr(self, counter_attr, cycle_n + 1)
+            return self._select_staggered_targets(
+                ranked_eq,
+                cycle_step=cycle_n,
+                base_targets=base_list,
+                max_total_targets=max_total_targets,
+                anchor_count=anchor_count,
+                max_pool_depth=max_pool_depth,
+            )
+
+        targets = list(base_list)
+        for eq_sym in self._rank_candidates_by_velocity(eq_cands, quotes_map=quotes_map)[
+            : max(1, max_total_targets - len(targets))
+        ]:
+            if eq_sym not in targets:
+                targets.append(eq_sym)
         return targets[:max_total_targets]
 
     def scan_predator_liquidity_sweeps(
@@ -20292,11 +20339,21 @@ class AutoAlertEngine:
         else:
             eq_cands = list(self.watched_equities)
             if quotes_map and len(eq_cands) > 40:
-                target_list = self._rank_candidates_by_velocity(eq_cands, quotes_map=quotes_map)[
-                    :40
-                ]
+                from engine.pipeline.universe_scheduler import identify_early_fno_movers
+
+                ranked_eq = identify_early_fno_movers(eq_cands, quotes_map=quotes_map, top_n=120)
+                cycle_n = int(getattr(self, "_dryup_cycle_counter", 0) or 0)
+                self._dryup_cycle_counter = cycle_n + 1
+                target_list = self._select_staggered_targets(
+                    ranked_eq,
+                    cycle_step=cycle_n,
+                    base_targets=[],
+                    max_total_targets=65,
+                    anchor_count=35,
+                    max_pool_depth=120,
+                )
             else:
-                target_list = eq_cands[:40]
+                target_list = eq_cands[:65]
         clean_targets = [canonical_alert_symbol(s) for s in target_list]
         eod_cache: dict[str, Any] = {}
         try:
@@ -25038,8 +25095,8 @@ class AutoAlertEngine:
                 logger.debug(f"[AutoAlertEngine] Dynamic equity prioritization skipped: {e_sort}")
 
         # Step 1.8: In-Memory Universe Velocity Rotator (Frontier 4):
-        # Resolve active cycle targets (<= 30 targets: Benchmark Indices + Surge Stocks + Staggered Batches)
-        active_cycle_targets = self._get_prioritized_targets(max_targets=30)
+        # Resolve active cycle targets (<= 45 targets: Benchmark Indices + Surge Stocks + Staggered Batches)
+        active_cycle_targets = self._get_prioritized_targets(max_targets=45)
 
         # Step 1.9: Pre-populate chains_map ONLY for active top movers (capped at 10 equities)
         # to eliminate boot/cycle 30-60x /options-chain-v3 storms & DEPTH_CHAIN gate saturation.

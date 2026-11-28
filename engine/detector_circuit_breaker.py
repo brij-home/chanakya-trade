@@ -124,7 +124,7 @@ class DetectorCircuitBreaker:
         self.ledger_file = Path(ledger_file) if ledger_file else get_performance_ledger_file()
         self.rolling_window = rolling_window
         self.min_samples = min_samples
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._history: dict[str, deque[TradeOutcome]] = {}
         self._seen_outcomes: dict[str, str] = {}
         self._load()

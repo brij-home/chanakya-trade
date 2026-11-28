@@ -263,3 +263,199 @@ def test_confluence_renormalizes_when_preopen_and_rvol_unrecorded() -> None:
     )
     assert rep.total_score >= 70.0
     assert rep.is_qualified is True
+
+
+def test_confidence_calibrator_outlier_spread_and_net_rr_friction() -> None:
+    """Ignore corrupt >25% spread glitches and permit 25-40% friction when post-cost R:R >= 1.15."""
+    from engine.confidence_calibrator import calibrate_alert_confidence
+
+    high_rr_shriram = AutoAlert(
+        alert_id="aa-options-momentum-shriramfin-pe-940-0915-20261127",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="SHRIRAMFIN",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="SHRIRAMFIN 940 PE",
+        summary="Test",
+        ltp=40.0,
+        trigger_level=40.0,
+        stop_loss=33.0,  # 7 pt risk vs 32 pt T1 -> net R:R well > 1.15 even with ~28% friction
+        target_level=72.0,
+        strike=940.0,
+        option_type="PE",
+        lot_size=825,
+        confidence=88,
+        bid_ask_spread_pct=0.0,
+    )
+    # 40 -> 72 with tight stop and statutory charges is viable, never falsely capped at 72
+    rep_ok = calibrate_alert_confidence(high_rr_shriram, pillars=["LOCATION", "TRIGGER", "FLOW"])
+    assert rep_ok.high_friction_risk is False
+
+    corrupt_spread = AutoAlert(
+        alert_id="aa-index-call-setup-banknifty-ce-63600-0915-20261127",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        direction="BULLISH",
+        headline="BANKNIFTY 63600 CE",
+        summary="Test",
+        ltp=1441.65,
+        trigger_level=1441.65,
+        stop_loss=1280.0,
+        target_level=1700.0,
+        strike=63600.0,
+        option_type="CE",
+        lot_size=30,
+        confidence=86,
+        bid_ask_spread_pct=45.0,  # Broken ask-bid quote glitch (>25% at premium >= 50)
+    )
+    rep_clean = calibrate_alert_confidence(corrupt_spread, pillars=["LOCATION", "TRIGGER", "FLOW"])
+    assert rep_clean.high_friction_risk is False
+    assert any("outlier bid-ask spread" in n.lower() for n in rep_clean.notes)
+
+
+def test_free_index_router_stages_and_acknowledges_free_telegram_outbox(monkeypatch) -> None:
+    """FreeIndexRouter.dispatch must stage & acknowledge a FREE_TELEGRAM outbox record."""
+    from unittest.mock import MagicMock
+    from engine.free_index_router import FreeIndexRouter
+
+    monkeypatch.setenv("TELEGRAM_FREE_INDEX_ENABLED", "1")
+    monkeypatch.setenv("TELEGRAM_FREE_INDEX_CHAT_ID", "-100999999")
+    router = FreeIndexRouter()
+    repo = MagicMock()
+    repo.get_latest_outbox_version.return_value = 1
+
+    alert = AutoAlert(
+        alert_id="aa-strat-sensex-pe-84000-20261127",
+        alert_type="STRAT_2_1_2_BEARISH",
+        stage="IGNITED",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="SENSEX 84000 PE",
+        summary="Test",
+        ltp=320.0,
+        trigger_level=320.0,
+        stop_loss=265.0,
+        target_level=450.0,
+        strike=84000.0,
+        option_type="PE",
+        lot_size=20,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+        actionable_plan={"action": "BUY_PUT", "contract": "SENSEX 84000 PE"},
+    )
+
+    with patch("engine.alerts._telegram_notify", return_value=True):
+        ok = router.dispatch(alert, in_market=True, is_milestone=False, repository=repo)
+    assert ok is True
+    repo.save_alert_with_outbox.assert_called_once()
+    staged_entries = repo.save_alert_with_outbox.call_args[0][1]
+    assert staged_entries[0]["channel"] == "FREE_TELEGRAM"
+    repo.acknowledge_outbox_by_alert_channel.assert_called_once_with(
+        alert.alert_id, "FREE_TELEGRAM"
+    )
+
+
+def test_identify_early_fno_movers_surfaces_tail_leaders() -> None:
+    """Zero-chain full-F&O pre-filter must surface opening drives sitting past static index [:40]."""
+    from engine.pipeline.universe_scheduler import identify_early_fno_movers
+
+    universe = [f"STOCK{i}" for i in range(180)] + ["SOLARINDS", "BDL", "MAZDOCK"]
+    quotes = {
+        f"NSE:STOCK{i}": SimpleNamespace(
+            change_pct=0.2, open=100.0, high=101.0, low=99.5, last_price=100.2, volume=200000
+        )
+        for i in range(180)
+    }
+    quotes["NSE:SOLARINDS"] = SimpleNamespace(
+        change_pct=4.5,
+        open=1000.0,
+        high=1048.0,
+        low=999.0,
+        last_price=1045.0,
+        volume=650000,
+        rvol=2.6,
+    )
+    quotes["NSE:BDL"] = SimpleNamespace(
+        change_pct=3.8,
+        open=1200.0,
+        high=1246.0,
+        low=1198.0,
+        last_price=1244.0,
+        volume=800000,
+        rvol=2.1,
+    )
+    quotes["NSE:MAZDOCK"] = SimpleNamespace(
+        change_pct=3.2,
+        open=2100.0,
+        high=2169.0,
+        low=2098.0,
+        last_price=2167.0,
+        volume=500000,
+        rvol=1.9,
+    )
+
+    with patch("engine.position_sizer.get_lot_size", return_value=100):
+        top = identify_early_fno_movers(universe, quotes, top_n=10)
+    assert top[:3] == ["SOLARINDS", "BDL", "MAZDOCK"]
+
+
+def test_ws_subscription_manager_prunes_expired_purposes(monkeypatch, tmp_path) -> None:
+    """cleanse_expired_derivatives must remove expired contract entries from both symbols & _purposes."""
+    from market.ws_subscription_manager import WsSubscriptionManager
+
+    cache_file = tmp_path / "ws_active_subscriptions.json"
+    monkeypatch.setattr("market.ws_subscription_manager._get_cache_path", lambda: cache_file)
+    mgr = WsSubscriptionManager(max_subscriptions=200)
+    mgr._core_symbols.add("NSE:NIFTY25JAN24000CE")
+    mgr._purposes["NSE:NIFTY25JAN24000CE"] = "OPTION_GRID"
+    mgr._purposes["NSE:RELIANCE-EQ"] = "FNO_STOCK"
+
+    with patch(
+        "market.ws_subscription_manager.is_contract_expired",
+        side_effect=lambda s: "25JAN" in s,
+    ):
+        purged = mgr.cleanse_expired_derivatives()
+    assert "NSE:NIFTY25JAN24000CE" in purged
+    assert "NSE:NIFTY25JAN24000CE" not in mgr._purposes
+    assert mgr._purposes.get("NSE:RELIANCE-EQ") == "FNO_STOCK"
+
+
+def test_backfill_rebuild_dry_run_no_deadlock(tmp_path) -> None:
+    """backfill_detector_circuit_breaker(rebuild=True, dry_run=True) must not deadlock on _lock."""
+    from engine.detector_circuit_breaker import DetectorCircuitBreaker
+    from scripts.backfill_detector_circuit_breaker import backfill_detector_circuit_breaker
+
+    cb = DetectorCircuitBreaker(ledger_file=tmp_path / "cb.json")
+    sample_alert = {
+        "alert_id": "aa-options-momentum-tcs-pe-3000-20261127",
+        "alert_type": "OPTIONS_MOMENTUM",
+        "symbol": "TCS",
+        "direction": "BEARISH",
+        "stage": "SESSION_CLOSE_EXIT",
+        "target_status": "SESSION_CLOSE_EXIT",
+        "has_triggered": True,
+        "ltp": 65.0,
+        "trigger_level": 40.0,
+        "initial_stop_loss": 28.0,
+        "stop_loss": 28.0,
+        "target_level": 64.0,
+        "achieved_milestones": [],
+        "exit_price": 65.0,
+        "is_live": True,
+        "environment": "LIVE",
+        "created_at": "2026-11-27 09:26:00 IST",
+        "triggered_at": "2026-11-27 09:26:00 IST",
+    }
+    res = backfill_detector_circuit_breaker(
+        breaker=cb, alerts=[sample_alert], dry_run=True, rebuild=True
+    )
+    assert res["scanned"] == 1
+    assert res["recorded"] == 1

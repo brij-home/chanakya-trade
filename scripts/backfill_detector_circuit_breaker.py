@@ -8,6 +8,7 @@ idempotently into `detector_circuit_breaker` with provenance="ALERT_FORWARD_PATH
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -29,10 +30,31 @@ def backfill_detector_circuit_breaker(
     breaker: DetectorCircuitBreaker | None = None,
     alerts: list[dict] | None = None,
     dry_run: bool = False,
+    rebuild: bool = False,
 ) -> dict[str, int]:
     """Replay eligible terminal forward outcomes idempotently into DetectorCircuitBreaker."""
+    import tempfile
+
     cb = breaker or detector_circuit_breaker
-    raw_alerts = alerts if alerts is not None else load_persisted_alerts()
+    raw_alerts = list(alerts if alerts is not None else load_persisted_alerts())
+    raw_alerts.sort(key=lambda r: str(r.get("created_at") or ""))
+
+    if rebuild:
+        tmp_path = Path(tempfile.gettempdir()) / f"rebuilt_cb_{os.getpid()}.json"
+        if tmp_path.exists():
+            tmp_path.unlink()
+        target_cb = DetectorCircuitBreaker(
+            ledger_file=tmp_path if dry_run else cb.ledger_file,
+            rolling_window=cb.rolling_window,
+            min_samples=cb.min_samples,
+        )
+        with target_cb._lock:
+            target_cb._history.clear()
+            target_cb._seen_outcomes.clear()
+            if not dry_run:
+                target_cb._save_unlocked()
+    else:
+        target_cb = cb
 
     recorded = 0
     already_seen = 0
@@ -63,18 +85,18 @@ def backfill_detector_circuit_breaker(
         alert_type = str(item.get("alert_type") or "").upper().strip()
         dedup_key = f"{alert_type}:{alert_id}"
 
-        with cb._lock:
-            if dedup_key in cb._seen_outcomes:
+        with target_cb._lock:
+            if dedup_key in target_cb._seen_outcomes:
                 already_seen += 1
                 continue
 
         result = "WIN" if outcome.realized_r > 0 else ("LOSS" if outcome.realized_r < 0 else "FLAT")
-        if dry_run:
+        if dry_run and not rebuild:
             recorded += 1
             continue
 
         try:
-            cb.record_outcome(
+            target_cb.record_outcome(
                 alert_id=alert_id,
                 symbol=symbol,
                 alert_type=alert_type,
@@ -85,6 +107,19 @@ def backfill_detector_circuit_breaker(
             recorded += 1
         except ValueError:
             conflicts += 1
+
+    if rebuild and dry_run:
+        dry_metrics = target_cb.get_all_metrics()
+        if tmp_path.exists():
+            tmp_path.unlink()
+        print("Projected metrics after --rebuild:")
+        for det, metrics in sorted(dry_metrics.items()):
+            if metrics.get("sample_count", 0) > 0:
+                print(
+                    f"  {det:24s} n={metrics['sample_count']:3d} "
+                    f"W={metrics['win_rate'] * 100:5.1f}% E={metrics['expectancy']:+.3f}R "
+                    f"status={metrics['status']}"
+                )
 
     return {
         "scanned": len(raw_alerts),
@@ -104,10 +139,15 @@ def main() -> int:
         action="store_true",
         help="Inspect counts without mutating detector_performance.json",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild detector_performance.json strictly from clean terminal LIVE alert outcomes.",
+    )
     args = parser.parse_args()
 
-    summary = backfill_detector_circuit_breaker(dry_run=args.dry_run)
-    print(f"Backfill summary (dry_run={args.dry_run}): {summary}")
+    summary = backfill_detector_circuit_breaker(dry_run=args.dry_run, rebuild=args.rebuild)
+    print(f"Backfill summary (dry_run={args.dry_run}, rebuild={args.rebuild}): {summary}")
     for det, metrics in detector_circuit_breaker.get_all_metrics().items():
         if metrics.get("sample_count", 0) > 0:
             print(

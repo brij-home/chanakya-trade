@@ -226,23 +226,40 @@ class CalibrationRunner:
             # if iv_daily_surface depth is < 25 sessions (strictly preserves live chain records).
             fyers_iv_backfilled = 0
             try:
+                import os as _os
                 from brokers.session import get_data_broker
                 from engine.iv_history_backfill import backfill_priority_iv_universe
                 from engine.iv_surface import load_historical_30d_ivs
+                from market.calendar import is_market_open
 
-                brk = get_data_broker()
-                if brk is not None and getattr(brk, "has_token", lambda: False)():
-                    if any(
-                        len(load_historical_30d_ivs(s)) < 25
-                        for s in ("NIFTY", "BANKNIFTY", "SENSEX")
-                    ):
-                        bf_res = backfill_priority_iv_universe(
-                            ["NIFTY", "BANKNIFTY", "SENSEX", "RELIANCE", "HDFCBANK", "ICICIBANK"],
-                            broker=brk,
-                            lookback_days=90,
-                            target_min_sessions=25,
-                        )
-                        fyers_iv_backfilled = int(bf_res.get("total_persisted") or 0)
+                allow_intraday_bf = (
+                    _os.environ.get("CHANAKYA_ALLOW_INTRADAY_BACKFILL", "").strip() == "1"
+                )
+                if (not (is_market_open("NFO") or is_market_open("NSE"))) or allow_intraday_bf:
+                    brk = get_data_broker()
+                    if brk is not None and getattr(brk, "has_token", lambda: False)():
+                        if any(
+                            len(load_historical_30d_ivs(s)) < 25
+                            for s in ("NIFTY", "BANKNIFTY", "SENSEX")
+                        ):
+                            bf_res = backfill_priority_iv_universe(
+                                [
+                                    "NIFTY",
+                                    "BANKNIFTY",
+                                    "SENSEX",
+                                    "RELIANCE",
+                                    "HDFCBANK",
+                                    "ICICIBANK",
+                                ],
+                                broker=brk,
+                                lookback_days=90,
+                                target_min_sessions=25,
+                            )
+                            fyers_iv_backfilled = int(bf_res.get("total_persisted") or 0)
+                else:
+                    logger.info(
+                        "[CalibrationRunner] Skipping historical BS IV backfill during peak NSE/NFO session."
+                    )
             except Exception as exc_bf:
                 logger.debug(f"[CalibrationRunner] Historical BS IV backfill skipped: {exc_bf}")
 

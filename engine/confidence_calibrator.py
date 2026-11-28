@@ -150,15 +150,29 @@ def calibrate_alert_confidence(
                 or (metrics.get("liquidity") or {}).get("bid_ask_spread_pct")
                 or 0.0
             )
+            if bas_pct > 25.0 and entry >= 50.0:
+                notes.append(
+                    f"Ignored outlier bid-ask spread glitch ({bas_pct:.1f}% at entry ₹{entry:.1f})"
+                )
+                bas_pct = 0.0
             spread_per_unit = entry * (bas_pct / 100.0) if bas_pct > 0 else 0.0
-            cost_friction_pct = round(
-                ((stat_per_unit + spread_per_unit) / reward_per_unit) * 100.0, 2
-            )
-            if cost_friction_pct >= 25.0:
+            total_friction = stat_per_unit + spread_per_unit
+            cost_friction_pct = round((total_friction / reward_per_unit) * 100.0, 2)
+
+            sl_val = float(_alert_field(alert, "stop_loss", 0.0) or 0.0)
+            net_rr: Optional[float] = None
+            if sl_val > 0 and abs(entry - sl_val) > 0:
+                risk_per_unit = abs(entry - sl_val)
+                net_rr = (reward_per_unit - total_friction) / (risk_per_unit + total_friction)
+
+            if cost_friction_pct >= 40.0 or (
+                cost_friction_pct >= 25.0 and (net_rr is None or net_rr < 1.15)
+            ):
                 high_friction_risk = True
                 max_cap = min(max_cap, 72)
+                rr_note = f", net R:R={net_rr:.2f}" if net_rr is not None else ""
                 notes.append(
-                    f"High cost+spread friction ({cost_friction_pct:.1f}% of Target-1 distance)"
+                    f"High cost+spread friction ({cost_friction_pct:.1f}% of Target-1 distance{rr_note})"
                 )
         except Exception as e_cost:
             logger.debug(f"[ConfidenceCalibrator] Friction estimate skipped: {e_cost}")

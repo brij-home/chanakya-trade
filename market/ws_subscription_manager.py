@@ -499,7 +499,11 @@ class WsSubscriptionManager:
             with self._lock:
                 for p_sym, p_tag in loaded_purposes.items():
                     if isinstance(p_sym, str) and isinstance(p_tag, str):
-                        self._purposes[p_sym.upper().strip()] = p_tag.upper().strip()
+                        p_clean = p_sym.upper().strip()
+                        if is_contract_expired(p_clean):
+                            sanitized_needed = True
+                            continue
+                        self._purposes[p_clean] = p_tag.upper().strip()
                 for raw_sym in loaded_dynamic:
                     sym = _to_ws_symbol(raw_sym)
                     if not sym or not is_valid_ws_symbol(sym) or is_contract_expired(sym):
@@ -556,7 +560,16 @@ class WsSubscriptionManager:
                     del self._dynamic_symbols[sym]
                     purged.append(sym)
 
-            if purged:
+            purposes_pruned = 0
+            for sym in purged:
+                if self._purposes.pop(sym.upper().strip(), None) is not None:
+                    purposes_pruned += 1
+            for p_sym in list(self._purposes.keys()):
+                if is_contract_expired(p_sym):
+                    del self._purposes[p_sym]
+                    purposes_pruned += 1
+
+            if purged or purposes_pruned:
                 self._save_to_disk()
 
         if purged:
@@ -629,6 +642,9 @@ class WsSubscriptionManager:
                 if sym not in CORE_BASE_SYMBOLS and _is_closed_daytime_deriv(sym):
                     self._core_symbols.discard(sym)
                     purged.append(sym)
+
+            for sym in purged:
+                self._purposes.pop(sym.upper().strip(), None)
 
             if purged:
                 self._save_to_disk()
