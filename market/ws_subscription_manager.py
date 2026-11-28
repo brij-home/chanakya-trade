@@ -887,13 +887,25 @@ class WsSubscriptionManager:
     ) -> dict[str, str]:
         """Classify active subscriptions into explicit operational purpose buckets without deleting legacy items."""
         exposure_set = {s.upper().strip() for s in (active_exposure_symbols or []) if s}
+        try:
+            from config.market_universes import FNO_EQUITY_SYMBOLS
+
+            fno_set = {str(s).upper().strip() for s in FNO_EQUITY_SYMBOLS}
+        except Exception as e_fno:
+            logger.debug(f"[WsSubManager] FNO_EQUITY_SYMBOLS lookup skipped: {e_fno}")
+            fno_set = set()
+
         with self._lock:
             all_syms = self._core_symbols | set(self._dynamic_symbols.keys())
             for sym in all_syms:
                 su = sym.upper().strip()
                 if su in exposure_set:
                     self._purposes[su] = "EXPOSURE"
-                elif su in self._purposes and self._purposes[su] != "UNKNOWN_LEGACY":
+                elif su in self._purposes and self._purposes[su] not in (
+                    "UNKNOWN_LEGACY",
+                    "FNO_STOCK",
+                    "CONTEXT_CASH",
+                ):
                     continue
                 elif su.endswith("-INDEX"):
                     self._purposes[su] = "INDEX"
@@ -901,8 +913,22 @@ class WsSubscriptionManager:
                     ("CE", "PE", "FUT")
                 ):
                     self._purposes[su] = "OPTION_GRID"
+                elif su.startswith("MCX:"):
+                    self._purposes[su] = (
+                        "COMMODITY" if allows_context_symbol(su) else "UNKNOWN_LEGACY"
+                    )
+                elif (su.startswith("NSE:") or su.startswith("BSE:")) and (
+                    su.endswith("-EQ") or su.endswith("-BE")
+                ):
+                    bare = su.split(":", 1)[1].rsplit("-", 1)[0]
+                    if bare in fno_set:
+                        self._purposes[su] = "FNO_STOCK"
+                    elif allows_context_symbol(su):
+                        self._purposes[su] = "CONTEXT_CASH"
+                    else:
+                        self._purposes[su] = "UNKNOWN_LEGACY"
                 elif allows_context_symbol(su):
-                    self._purposes[su] = "FNO_STOCK"
+                    self._purposes[su] = "CONTEXT_CASH"
                 else:
                     self._purposes[su] = "UNKNOWN_LEGACY"
             return {k: self._purposes.get(k, "UNKNOWN_LEGACY") for k in all_syms}

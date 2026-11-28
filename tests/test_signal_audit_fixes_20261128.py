@@ -459,3 +459,17 @@ def test_backfill_rebuild_dry_run_no_deadlock(tmp_path) -> None:
     )
     assert res["scanned"] == 1
     assert res["recorded"] == 1
+
+
+def test_ws_subscription_purpose_distinguishes_fno_from_cash_context(monkeypatch, tmp_path) -> None:
+    """FNO_PRIORITY must classify F&O stocks as FNO_STOCK and cash equities as CONTEXT_CASH."""
+    from market.ws_subscription_manager import WsSubscriptionManager
+
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+    monkeypatch.setenv("SESSION_FOCUS_MODE", "FNO_PRIORITY")
+    mgr = WsSubscriptionManager(max_subscriptions=2500)
+    mgr._core_symbols.add("NSE:RELIANCE-EQ")
+    mgr._core_symbols.add("NSE:MODISONLTD-BE")
+    purposes = mgr.reconcile_subscription_purposes()
+    assert purposes["NSE:RELIANCE-EQ"] == "FNO_STOCK"
+    assert purposes["NSE:MODISONLTD-BE"] == "CONTEXT_CASH"
