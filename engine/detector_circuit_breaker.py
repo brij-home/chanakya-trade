@@ -423,6 +423,11 @@ class DetectorCircuitBreaker:
             keys = sorted(self._history.keys())
         return {k: self.get_metrics(k).to_dict() for k in keys}
 
+    def has_seen_outcome(self, dedup_key: str) -> bool:
+        """Return whether an outcome dedup key has already been recorded."""
+        with self._lock:
+            return dedup_key in self._seen_outcomes
+
     def reset_detector(self, alert_type: str) -> None:
         """Manually clears history for a detector (e.g. after parameter tuning or regime reset)."""
         clean_type = alert_type.upper().strip()

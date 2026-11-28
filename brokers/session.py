@@ -1316,11 +1316,13 @@ def _start_websocket(broker: BrokerAPI) -> None:
                             bid=event.bid or 0.0,
                             ask=event.ask or 0.0,
                         )
-                        with ws_manager._lock:
-                            ws_manager._ticks[event.canonical_instrument_id] = c_tick
-                            ws_manager._ticks[clean_sym] = c_tick
-                            if event.provider_symbol:
-                                ws_manager._ticks[event.provider_symbol] = c_tick
+                        tick_updates = {
+                            event.canonical_instrument_id: c_tick,
+                            clean_sym: c_tick,
+                        }
+                        if event.provider_symbol:
+                            tick_updates[event.provider_symbol] = c_tick
+                        ws_manager.update_ticks(tick_updates)
                 except Exception as e_tick:
                     logger.debug(f"[flattrade_ws] Tick handling error: {e_tick}")
 

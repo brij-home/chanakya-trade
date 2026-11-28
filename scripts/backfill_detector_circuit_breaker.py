@@ -48,11 +48,7 @@ def backfill_detector_circuit_breaker(
             rolling_window=cb.rolling_window,
             min_samples=cb.min_samples,
         )
-        with target_cb._lock:
-            target_cb._history.clear()
-            target_cb._seen_outcomes.clear()
-            if not dry_run:
-                target_cb._save_unlocked()
+        target_cb.reset_all()
     else:
         target_cb = cb
 
@@ -85,10 +81,9 @@ def backfill_detector_circuit_breaker(
         alert_type = str(item.get("alert_type") or "").upper().strip()
         dedup_key = f"{alert_type}:{alert_id}"
 
-        with target_cb._lock:
-            if dedup_key in target_cb._seen_outcomes:
-                already_seen += 1
-                continue
+        if target_cb.has_seen_outcome(dedup_key):
+            already_seen += 1
+            continue
 
         result = "WIN" if outcome.realized_r > 0 else ("LOSS" if outcome.realized_r < 0 else "FLAT")
         if dry_run and not rebuild:

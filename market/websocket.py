@@ -873,6 +873,13 @@ class WebSocketManager:
         tick = self.get_tick(instrument, max_age_seconds=max_age_seconds)
         return tick.ltp if tick and tick.ltp > 0 else None
 
+    def update_ticks(self, ticks_by_key: dict[str, Tick]) -> None:
+        """Atomically insert or update multiple symbol->Tick aliases under lock."""
+        if not ticks_by_key:
+            return
+        with self._lock:
+            self._ticks.update(ticks_by_key)
+
     def purge_symbols(self, symbols: list[str]) -> int:
         """Remove specified symbols and their canonical aliases from tick cache."""
         ws_syms: set[str] = set()

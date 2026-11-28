@@ -1093,6 +1093,13 @@ class DailyLevelsStore:
         """Alias for get_levels to maintain unified API parity."""
         return self.get_levels(symbol, session_date=session_date)
 
+    def clear_memory_cache(self) -> int:
+        """Evict all cached DailyLevels from RAM and return count removed."""
+        with self._lock:
+            cnt = len(self._memory_cache)
+            self._memory_cache.clear()
+            return cnt
+
 
 # Global Singleton Instance
 daily_levels_store = DailyLevelsStore()
@@ -1775,11 +1782,7 @@ def get_daily_levels_store() -> DailyLevelsStore:
 
 def clear_daily_levels_cache() -> int:
     """Evicts all cached DailyLevels from RAM. Used by memory_guard."""
-    store = get_daily_levels_store()
-    with store._lock:
-        cnt = len(store._memory_cache)
-        store._memory_cache.clear()
-        return cnt
+    return get_daily_levels_store().clear_memory_cache()
 
 
 try:

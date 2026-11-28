@@ -93,6 +93,11 @@ class VwapSessionCache:
                 self._current_date = today
             self._load_from_disk()
 
+    def get_cached_count(self) -> int:
+        """Return number of symbols currently cached in memory."""
+        with self._lock:
+            return len(self._memory_cache)
+
     def _get_effective_ttl(self, val: float) -> float:
         """
         Dynamically adjusts TTL:

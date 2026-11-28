@@ -1296,8 +1296,7 @@ async def api_fyers_budget():
         all_subs = ws_mgr.get_all_desired_subscriptions()
 
         vwap_cache = get_vwap_session_cache()
-        with vwap_cache._lock:
-            cached_vwap_count = len(vwap_cache._memory_cache)
+        cached_vwap_count = vwap_cache.get_cached_count()
 
         ws_diag = ws_mgr.get_diagnostics()
 
@@ -2071,8 +2070,7 @@ async def get_recent_metrics(
     from engine.observability import get_registry
 
     obs = get_registry()
-    with obs._lock:
-        events = list(obs._metrics)
+    events = obs.get_metrics_snapshot()
     if journey_id:
         events = [e for e in events if e.journey_id == journey_id]
     if failed_only:

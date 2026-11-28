@@ -376,6 +376,11 @@ class ObservabilityRegistry:
         with self._lock:
             self._metrics.clear()
 
+    def get_metrics_snapshot(self) -> list[MetricEvent]:
+        """Return a shallow thread-safe copy of recorded journey metrics."""
+        with self._lock:
+            return list(self._metrics)
+
     def get_slo_report(
         self,
         journey_id: Optional[str] = None,
