@@ -377,11 +377,12 @@ def detect_turtle_soup_sweep(
     option_type = None
     expiry_date_str = None
     resolved_opt = None
+    stock_lot = 1
 
     try:
         from engine.position_sizer import get_lot_size
 
-        stock_lot = get_lot_size(clean_sym)
+        stock_lot = int(get_lot_size(clean_sym) or 1)
         if is_index_symbol(clean_sym) or stock_lot > 1:
             resolved_opt = resolve_option_contract(
                 symbol=clean_sym,
@@ -396,7 +397,9 @@ def detect_turtle_soup_sweep(
                 contract_symbol = resolved_opt.contract_symbol
                 strike = resolved_opt.strike
                 option_type = "CE" if is_bullish else "PE"
-                expiry_date_str = resolved_opt.expiry_date
+                expiry_date_str = getattr(
+                    resolved_opt, "expiry", getattr(resolved_opt, "expiry_date", None)
+                )
     except Exception as e_suppressed:
         logger.debug(
             f"[engine.detectors.turtle_soup] Non-fatal exception suppressed: {e_suppressed}"
@@ -411,6 +414,31 @@ def detect_turtle_soup_sweep(
         getattr(resolved_opt, "t3_premium", 0.0) if has_opt else (opt_t2 * 1.25 if opt_t2 else 0.0)
     )
     opt_nc = round(opt_entry * 1.05, 2) if has_opt else 0.0
+    eff_lot_size = (
+        int(getattr(resolved_opt, "lot_size", 0) or 0)
+        if has_opt
+        else (stock_lot if stock_lot > 1 else 1)
+    )
+    if eff_lot_size <= 1 and (has_opt or is_index_symbol(clean_sym) or stock_lot > 1):
+        eff_lot_size = stock_lot if stock_lot > 1 else 1
+
+    opt_plan_dict = None
+    if has_opt:
+        if hasattr(resolved_opt, "as_dict"):
+            opt_plan_dict = resolved_opt.as_dict()
+        else:
+            opt_plan_dict = {
+                "contract_symbol": contract_symbol,
+                "strike": strike,
+                "option_type": option_type,
+                "expiry_date": expiry_date_str,
+                "entry_premium": opt_entry,
+                "sl_premium": opt_sl,
+                "t1_premium": opt_t1,
+                "t2_premium": opt_t2,
+                "t3_premium": opt_t3,
+                "lot_size": eff_lot_size,
+            }
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
@@ -427,6 +455,7 @@ def detect_turtle_soup_sweep(
         else f"1:{rr_ratio:.1f}",
         no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
+        lot_size=eff_lot_size,
         when_to_buy=(
             f"Limit order at OTE pullback near ₹{opt_entry:,.2f} ({contract_symbol})."
             if has_opt
@@ -437,23 +466,33 @@ def detect_turtle_soup_sweep(
             if has_opt
             else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
         ),
+        profit_rule="Scale 40% at Target 1 & SL to Cost; cover 40% at Target 2 & trail runner.",
         segment="FNO_INDEX"
         if is_index_symbol(clean_sym)
-        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
+        else ("FNO_STOCK" if (contract_symbol or stock_lot > 1) else "EQUITY"),
         contract=contract_symbol,
         strike=strike,
         option_type=option_type,
         expiry_date=expiry_date_str,
+        tactical_sl=f"₹{opt_sl:,.2f}" if has_opt else None,
+        structural_spot_sl=f"₹{stop_loss:,.2f} Spot Invalidation" if has_opt else None,
         extra_details={
-            "option_entry": f"₹{opt_entry:,.2f}" if has_opt else None,
-            "option_sl": f"₹{opt_sl:,.2f}" if has_opt else None,
-            "option_target_1": f"₹{opt_t1:,.2f}" if has_opt else None,
-            "option_target_2": f"₹{opt_t2:,.2f}" if has_opt else None,
-            "option_runner_target": f"₹{opt_t3:,.2f}" if has_opt else None,
-            "option_no_chase_boundary": f"₹{opt_nc:,.2f}" if has_opt else None,
+            "instrument_type": "OPTION",
+            "option_entry": f"₹{opt_entry:,.2f}",
+            "option_sl": f"₹{opt_sl:,.2f}",
+            "option_target_1": f"₹{opt_t1:,.2f}",
+            "option_target_2": f"₹{opt_t2:,.2f}",
+            "option_runner_target": f"₹{opt_t3:,.2f}",
+            "option_no_chase_boundary": f"₹{opt_nc:,.2f}",
+            "option_plan": opt_plan_dict,
             "underlying_spot": f"₹{curr_ltp:,.2f}",
             "underlying_sl": f"₹{stop_loss:,.2f}",
             "underlying_target": f"₹{target_1:,.2f}",
+            "spot_entry_range": f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+            "spot_stop_loss": stop_loss,
+            "spot_target_1": target_1,
+            "spot_target_2": target_2,
+            "structural_spot_sl": stop_loss,
         }
         if has_opt
         else {},
@@ -511,6 +550,12 @@ def detect_turtle_soup_sweep(
 
     act_plan = blueprint.to_dict()
 
+    confluences = [
+        f"Liquidity Sweep of {'Prior Low' if is_bullish else 'Prior High'} ₹{sweep_level:,.2f} ({sweep_wick_ratio * 100:.0f}% rejection wick)"
+    ]
+    if smt_confirmed and smt_sibling:
+        confluences.append(f"SMT Inter-Market Divergence ({smt_sibling})")
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type="TURTLE_SOUP_SWEEP",
@@ -519,7 +564,7 @@ def detect_turtle_soup_sweep(
         exchange=exchange,
         segment="FNO_INDEX"
         if is_index_symbol(clean_sym)
-        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
+        else ("FNO_STOCK" if (contract_symbol or stock_lot > 1) else "EQUITY"),
         direction=direction,
         headline=headline,
         summary=summary,
@@ -530,8 +575,16 @@ def detect_turtle_soup_sweep(
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
+        expiry_date=expiry_date_str,
+        derivative_type="OPT" if has_opt else None,
         option_premium=opt_entry if has_opt else None,
+        option_stop_loss=opt_sl if has_opt else None,
+        option_target_level=opt_t1 if has_opt else None,
+        tactical_sl=opt_sl if has_opt else None,
+        structural_spot_sl=stop_loss if has_opt else None,
+        underlying_sl=stop_loss if has_opt else None,
         underlying_spot=curr_ltp,
+        lot_size=eff_lot_size,
         confidence=confidence_val,
         time_horizon=horizon_val,
         eta_label=eta_desc,
@@ -547,6 +600,12 @@ def detect_turtle_soup_sweep(
             "rvol": rvol,
             "rr_ratio": rr_ratio,
             "vwap": vwap,
+            "lot_size": eff_lot_size,
+            "underlying_spot": curr_ltp,
+            "spot_stop_loss": stop_loss,
+            "spot_target_1": target_1,
+            "spot_target_2": target_2,
+            "confluence_factors": confluences,
             "smt_confirmed": smt_confirmed,
             "smt_sibling": smt_sibling,
             "fractal_blueprint": act_plan.get("fractal_blueprint"),

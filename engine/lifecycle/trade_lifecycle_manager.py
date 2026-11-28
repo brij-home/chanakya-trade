@@ -489,6 +489,35 @@ class TradeLifecycleManager:
         alert.target_status = eval_res.target_status
         alert.r_multiple = eval_res.r_multiple
         alert.pnl_pct = eval_res.pnl_pct
+        eval_pnl_pts = getattr(eval_res, "pnl_pts", None)
+        if eval_pnl_pts is not None:
+            alert.pnl_pts = eval_pnl_pts
+        elif cur_quote_ltp and cur_quote_ltp > 0:
+            is_opt_m = is_alert_option_premium_level(alert)
+            ref_e_m = float(
+                getattr(alert, "initial_entry_premium", None)
+                or getattr(alert, "entry_price", None)
+                or (getattr(alert, "option_premium", None) if is_opt_m else None)
+                or getattr(alert, "trigger_level", None)
+                or 0.0
+            )
+            if ref_e_m > 0:
+                if is_opt_m:
+                    from engine.alert_expiry import is_option_seller
+
+                    is_sell_m = is_option_seller(alert)
+                    alert.pnl_pts = round(
+                        (ref_e_m - cur_quote_ltp) if is_sell_m else (cur_quote_ltp - ref_e_m), 2
+                    )
+                else:
+                    is_short_m = str(getattr(alert, "direction", "BULLISH")).upper() in (
+                        "BEARISH",
+                        "SHORT",
+                        "SELL",
+                    )
+                    alert.pnl_pts = round(
+                        (ref_e_m - cur_quote_ltp) if is_short_m else (cur_quote_ltp - ref_e_m), 2
+                    )
         if getattr(eval_res, "strike_roll_recommendation", None):
             roll_rec = eval_res.strike_roll_recommendation
             alert.strike_roll_recommendation = roll_rec

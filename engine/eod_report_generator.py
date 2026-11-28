@@ -2085,7 +2085,13 @@ class EODReportGenerator:
             target_status = a.get("target_status") or "PENDING"
             ltp = float(a.get("ltp") or 0.0)
             entry = float(a.get("trigger_level") or a.get("entry_price") or ltp)
-            sl = float(a.get("stop_loss") or (entry * 0.95 if entry > 0 else 0.0))
+            mutated_sl = float(a.get("stop_loss") or (entry * 0.95 if entry > 0 else 0.0))
+            init_sl_disp = a.get("initial_stop_loss") or a.get("initial_invalidation_stop")
+            try:
+                init_sl_disp_f = float(init_sl_disp) if init_sl_disp else 0.0
+            except (TypeError, ValueError):
+                init_sl_disp_f = 0.0
+            sl = init_sl_disp_f if init_sl_disp_f > 0 else mutated_sl
             target = float(
                 a.get("target_level") or a.get("target_1") or (entry * 1.10 if entry > 0 else 0.0)
             )
@@ -2160,6 +2166,7 @@ class EODReportGenerator:
                 or "gapped below stop loss" in lower_inv
                 or "gapped above stop loss" in lower_inv
                 or "gapped over stop loss" in lower_inv
+                or (not a.get("triggered_at") and "hierarchical veto" in lower_inv)
                 or (not a.get("triggered_at") and "gapped" in lower_inv)
             )
             is_untriggered = (
@@ -2210,8 +2217,25 @@ class EODReportGenerator:
                 )
             )
 
-            # Compute theoretical points & risk
-            risk = abs(entry - sl) if abs(entry - sl) > 0.001 else 1.0
+            # Compute theoretical points & immutable initial risk (never ratcheted SL denominator)
+            init_sl_raw = a.get("initial_stop_loss") or a.get("initial_invalidation_stop")
+            try:
+                init_sl_f = float(init_sl_raw) if init_sl_raw else 0.0
+            except (TypeError, ValueError):
+                init_sl_f = 0.0
+            if init_sl_f > 0 and not (
+                is_option
+                and (
+                    (entry < 500.0 and init_sl_f >= 1000.0)
+                    or (entry > 0 and init_sl_f > 3.5 * entry)
+                )
+            ):
+                base_risk_sl = init_sl_f
+            else:
+                base_risk_sl = sl
+            min_risk_floor = max(0.20, entry * (0.04 if is_option else 0.003)) if entry > 0 else 1.0
+            raw_risk = abs(entry - base_risk_sl)
+            risk = raw_risk if raw_risk >= min_risk_floor else max(min_risk_floor, abs(entry - sl))
             # If invalidated due to velocity time-stop / stagnation scratch (not a stop loss hit),
             # exit occurs at market price (ltp), not at the full stop-loss.
             is_scratch_exit = bool(
@@ -2231,7 +2255,41 @@ class EODReportGenerator:
             else:
                 gain_pts = (entry - ltp) if not is_sl_hit else (entry - sl)
             gain_pct = (gain_pts / entry * 100.0) if entry > 0 else 0.0
-            r_mult = gain_pts / risk if risk > 0 else 0.0
+            r_mult = max(-5.0, min(10.0, gain_pts / risk)) if risk > 0 else 0.0
+
+            # Multi-leg neutral condors cannot be evaluated as a single spot price path (SAFETY_CONTRACTS.md)
+            if det == "DEFINED_RISK_NEUTRAL" and not is_pure_option:
+                outcome = "NEUTRAL_CONDOR_MONITORED"
+                untriggered_count += 1
+                if is_tg:
+                    tg_untriggered_count += 1
+                else:
+                    ui_untriggered_count += 1
+                journal_entries.append(
+                    TradeOutcomeSummary(
+                        alert_id=a.get("alert_id", ""),
+                        symbol=display_symbol,
+                        segment=seg,
+                        direction="NEUTRAL",
+                        entry_level=entry,
+                        stop_loss=sl,
+                        target_level=target,
+                        peak_gain_pct=0.0,
+                        realized_r=0.0,
+                        milestones=milestones,
+                        outcome=outcome,
+                        headline=a.get("headline", ""),
+                        invalidation_reason=inv_reason,
+                        strategy=det,
+                        exit_level=ltp if ltp > 0 else entry,
+                        pnl_pct=0.0,
+                        time_str=time_part,
+                        verdict_note="Multi-leg neutral condor monitored (leg-level payoff tracking excluded from directional R).",
+                        telegram_dispatched=is_tg,
+                        dispatched_channels=dispatched_channels,
+                    )
+                )
+                continue
 
             if is_untriggered:
                 if is_superseded:
@@ -2576,13 +2634,19 @@ class EODReportGenerator:
 
                 rca_buckets["SESSION_CUTOFF_STALL"].append(display_symbol)
 
+                from market.rule_schedule import intraday_squareoff_cutoff as _eod_sq_cutoff
+
+                _sq_str = _eod_sq_cutoff(
+                    datetime.strptime(date_str, "%Y-%m-%d").date(),
+                    is_derivative=True,
+                ).strftime("%H:%M")
                 rep_pnl = float(a.get("pnl_pct")) if a.get("pnl_pct") is not None else gain_pct
                 if r_achieved >= 0.5:
-                    verdict_note = f"Closed in profit at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
+                    verdict_note = f"Closed in profit at {_sq_str} IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
                 elif r_achieved <= -0.4:
-                    verdict_note = f"Closed in drawdown at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
+                    verdict_note = f"Closed in drawdown at {_sq_str} IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
                 else:
-                    verdict_note = f"Closed near breakeven at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
+                    verdict_note = f"Closed near breakeven at {_sq_str} IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
 
                 journal_entries.append(
                     TradeOutcomeSummary(
@@ -2630,9 +2694,15 @@ class EODReportGenerator:
                 detector_stats[det]["wins"] += 1
 
                 init_risk = float(
-                    a.get("initial_invalidation_stop") or (entry * 0.28 if is_option else risk)
+                    a.get("initial_stop_loss")
+                    or a.get("initial_invalidation_stop")
+                    or (entry * 0.28 if is_option else risk)
                 )
-                init_risk_pts = abs(entry - init_risk) if abs(entry - init_risk) > 0.01 else risk
+                init_risk_pts = (
+                    max(min_risk_floor, abs(entry - init_risk))
+                    if abs(entry - init_risk) > 0.01
+                    else risk
+                )
 
                 # Enforce Scale Separation Invariant (Invariant 14):
                 # Detect if option stop-loss was contaminated with underlying spot index/stock price
@@ -3014,14 +3084,20 @@ class EODReportGenerator:
                     corrective_action="Preserved standard base invalidation; loss contained strictly within 1.0R risk unit.",
                 )
             )
+        from market.rule_schedule import intraday_squareoff_cutoff as _eod_sq_label
+
+        _eod_sq_lbl = _eod_sq_label(
+            datetime.strptime(date_str, "%Y-%m-%d").date(),
+            is_derivative=True,
+        ).strftime("%H:%M")
         if rca_buckets["SESSION_CUTOFF_STALL"]:
             rca_summaries.append(
                 RCASummary(
                     category="SESSION_CUTOFF_STALL",
                     count=len(rca_buckets["SESSION_CUTOFF_STALL"]),
                     symbols=list(set(rca_buckets["SESSION_CUTOFF_STALL"])),
-                    root_cause="Intraday trades initiated after 13:30 IST lacked sufficient session runway before mandatory 15:15 IST square-off.",
-                    corrective_action="Enforce strict 14:00 IST entry cutoff: silence all new intraday spark alerts in the final 75 minutes of the session.",
+                    root_cause=f"Intraday trades initiated late lacked sufficient session runway before mandatory {_eod_sq_lbl} IST square-off.",
+                    corrective_action=f"Enforce minimum 20m runway before {_eod_sq_lbl} IST square-off cutoff on all new intraday options.",
                 )
             )
 
@@ -3072,7 +3148,7 @@ class EODReportGenerator:
         what_went_bad = []
         if eod_squareoff_count > 0:
             what_went_bad.append(
-                f"Session Runway Drag: {eod_squareoff_count} trades initiated in the afternoon stalled and were forcefully closed at 15:15 IST cutoff before hitting T1."
+                f"Session Runway Drag: {eod_squareoff_count} trades initiated late stalled and were forcefully closed at {_eod_sq_lbl} IST cutoff before hitting T1."
             )
         if loss_count > 0:
             what_went_bad.append(

@@ -589,7 +589,7 @@ def audit_forensics(
         from analysis.universe import get_stock_sector
 
         sec_id, _ = get_stock_sector(clean_sym)
-        if sec_id in ("banking", "financial_services"):
+        if sec_id in ("banking", "financial_services", "capital_markets", "insurance"):
             is_banking_or_financial = True
     except Exception as e_suppressed:
         logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")

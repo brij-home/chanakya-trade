@@ -742,6 +742,53 @@ class AutoAlert:
         elif self.structural_spot_sl is None and self.underlying_sl is not None:
             self.structural_spot_sl = self.underlying_sl
 
+        # Fallback structural underlying spot SL for option alerts lacking an explicit spot anchor
+        if (
+            self.structural_spot_sl is None
+            and is_opt_setup
+            and str(getattr(self, "alert_type", "") or "").upper() != "DEFINED_RISK_NEUTRAL"
+        ):
+            ref_spot_fb = float(
+                self.underlying_spot
+                or (self.metrics or {}).get("spot")
+                or (self.metrics or {}).get("underlying_spot")
+                or self.strike
+                or 0.0
+            )
+            if ref_spot_fb > 0:
+                atr_ref = float(
+                    (self.metrics or {}).get("atr_5m")
+                    or (self.metrics or {}).get("atr_15m")
+                    or (self.metrics or {}).get("atr")
+                    or 0.0
+                )
+                is_idx_fb = any(
+                    k in (self.symbol or "").upper()
+                    for k in ("NIFTY", "BANKNIFTY", "MIDCP", "SENSEX", "FINNIFTY", "BANKEX")
+                )
+                if atr_ref > 0 and atr_ref < ref_spot_fb * 0.03:
+                    spot_dist = max(ref_spot_fb * 0.0035, min(ref_spot_fb * 0.012, atr_ref * 1.5))
+                else:
+                    spot_dist = ref_spot_fb * (0.0045 if is_idx_fb else 0.0065)
+                op_u = str(self.option_type or "").upper()
+                dir_u = str(self.direction or "").upper()
+                if not op_u and self.contract_symbol:
+                    if str(self.contract_symbol).upper().endswith("CE"):
+                        op_u = "CE"
+                    elif str(self.contract_symbol).upper().endswith("PE"):
+                        op_u = "PE"
+                is_bear_spot = (op_u == "PE") or (
+                    op_u != "CE" and dir_u in ("BEARISH", "SHORT", "SELL")
+                )
+                derived_spot_sl = (
+                    round(ref_spot_fb + spot_dist, 2)
+                    if is_bear_spot
+                    else round(ref_spot_fb - spot_dist, 2)
+                )
+                self.structural_spot_sl = derived_spot_sl
+                if self.underlying_sl is None:
+                    self.underlying_sl = derived_spot_sl
+
         if self.disaster_stop_floor is None and is_opt_setup:
             opt_entry_ref = float(
                 self.initial_entry_premium
@@ -877,10 +924,18 @@ class AutoAlert:
         except Exception:
             if not self.segment:
                 self.segment = "EQUITY"
+        is_fno_contract = bool(
+            self.contract_symbol
+            or self.option_type in ("CE", "PE")
+            or (self.strike is not None and float(self.strike or 0) > 0)
+            or (self.segment in ("FNO_INDEX", "FNO_STOCK"))
+        )
         if self.lot_size is None:
             if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
                 try:
-                    self.lot_size = int(self.metrics["lot_size"])
+                    m_lot = int(self.metrics["lot_size"])
+                    if m_lot > 1 or not is_fno_contract:
+                        self.lot_size = m_lot
                 except (ValueError, TypeError) as e_suppressed:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
@@ -892,7 +947,11 @@ class AutoAlert:
                 and self.actionable_plan["lot_size"]
             ):
                 try:
-                    self.lot_size = int(self.actionable_plan["lot_size"])
+                    p_lot = int(self.actionable_plan["lot_size"])
+                    # ActionableBlueprint defaults lot_size=1; do not let that placeholder
+                    # mask canonical F&O contract lot resolution.
+                    if p_lot > 1 or not is_fno_contract:
+                        self.lot_size = p_lot
                 except (ValueError, TypeError) as e_suppressed:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
@@ -906,6 +965,11 @@ class AutoAlert:
                     ls = get_lot_size(self.contract_symbol) if self.contract_symbol else 0
                     if ls and ls > 1:
                         self.lot_size = ls
+                        if (
+                            isinstance(self.actionable_plan, dict)
+                            and int(self.actionable_plan.get("lot_size") or 0) <= 1
+                        ):
+                            self.actionable_plan["lot_size"] = ls
                 except Exception as e_suppressed:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
@@ -1094,8 +1158,17 @@ class AutoAlert:
             or sym_u.endswith("USDC")
             or sym_u.endswith("BTC")
         )
+        from market.instruments import COMMODITY_SYMBOLS
+
+        is_comm_eta = exch == "MCX" or seg == "COMMODITY" or sym_u in COMMODITY_SYMBOLS
         if is_crypto and (not self.eta_label or "15:15" in str(self.eta_label)):
             self.eta_label = "24h Rolling"
+        elif is_comm_eta and (not self.eta_label or "15:15" in str(self.eta_label)):
+            th = (self.time_horizon or "INTRADAY").upper()
+            if th in ("SCALP", "INTRADAY_SCALP_ONLY"):
+                self.eta_label = "15–45m Scalp"
+            else:
+                self.eta_label = "Today 23:15 IST"
         elif not self.eta_label:
             th = (self.time_horizon or "INTRADAY").upper()
             if th in ("SCALP", "INTRADAY_SCALP_ONLY"):
@@ -2328,6 +2401,30 @@ class AutoAlert:
             self.stage == "INVALIDATED"
             and getattr(self, "target_status", "") != "SETUP_DISQUALIFIED"
         ):
+            history = getattr(self, "stage_history", None) or []
+            if history:
+                entered_active = any(
+                    str(h.get("to_stage", "")).upper()
+                    in (
+                        "IGNITED",
+                        "TRIGGERED",
+                        "ACTIVE",
+                        "IN_FLIGHT",
+                        "T0_5_ACHIEVED",
+                        "DE_RISK_0_5R",
+                        "BREAKEVEN_LOCKED",
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "T3_ACHIEVED",
+                        "TARGET_ACHIEVED",
+                        "RUNNER_EXIT",
+                        "COMPLETED",
+                    )
+                    for h in history
+                    if isinstance(h, dict)
+                )
+                if not entered_active:
+                    return False
             return True
         milestones = getattr(self, "achieved_milestones", None) or []
         return any(
@@ -2347,6 +2444,28 @@ class AutoAlert:
             for m in milestones
         )
 
+    def ensure_initial_stage_history(
+        self,
+        *,
+        reason: str = "INITIAL_DETECTION",
+        actor: str = "SCANNER",
+    ) -> None:
+        """Seed initial lifecycle stage entry once at alert creation without mutating historical loads."""
+        if not isinstance(self.stage_history, list):
+            self.stage_history = []
+        if self.stage_history:
+            return
+        self.stage_history.append(
+            {
+                "from_stage": None,
+                "to_stage": str(self.stage or "EARLY_WARNING").upper().strip(),
+                "at": self.created_at or datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "reason": reason,
+                "actor": actor,
+                "ltp": self.ltp,
+            }
+        )
+
     def promote_stage(
         self,
         new_stage: str,
@@ -2357,7 +2476,7 @@ class AutoAlert:
         """
         Transitions alert across the 3-stage interception pipeline:
         STALK -> PRIMED -> IGNITED (or EARLY_WARNING -> PRIMED -> IGNITED).
-        Records an audit event and updates timestamps.
+        Records stage_history transition, audit event, and updates timestamps.
         """
         valid_stages = (
             "STALK",
@@ -2374,10 +2493,22 @@ class AutoAlert:
             return False
 
         old_stage = self.stage
-        self.stage = new_stage
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         if ltp is not None and ltp > 0:
             self.ltp = float(ltp)
-        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if not isinstance(self.stage_history, list):
+            self.stage_history = []
+        self.stage_history.append(
+            {
+                "from_stage": old_stage,
+                "to_stage": str(new_stage).upper().strip(),
+                "at": now_str,
+                "reason": reason,
+                "actor": actor,
+                "ltp": self.ltp,
+            }
+        )
+        self.stage = new_stage
         self.updated_at = now_str
 
         if new_stage == "IGNITED" and not self.triggered_at:

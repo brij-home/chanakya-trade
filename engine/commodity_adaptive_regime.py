@@ -339,7 +339,7 @@ def evaluate_commodity_eagle_regime(
     if chop_val is None:
         chop_val = 50.0
 
-    if chop_val >= 61.8:
+    if chop_val >= 60.0:
         chop_status = "SEVERE_CHOP"
     elif chop_val <= 38.2:
         chop_status = "TRENDING_EXPANSION"
@@ -489,28 +489,38 @@ def evaluate_commodity_tiger_mandate(
             action_guidance="Preserve capital. Cross-market macro flow strongly opposes trade direction.",
         )
 
-    # 2. Midday Volume Lull (11:30 – 15:30 IST) or Severe Chop
+    # 2. Midday Volume Lull (11:30 – 15:30 IST), Severe Chop, or Low-Volume Choppy Transition
+    _is_low_vol_chop = (eagle.chop_index is not None and eagle.chop_index >= 58.0) and rvol < 1.25
     if (
         eagle.is_midday_lull
         or eagle.chop_status == "SEVERE_CHOP"
         or eagle.adx_status == "NON_TRENDING"
+        or _is_low_vol_chop
     ):
-        # Exception: Only exceptional institutional expansion thrust (RVOL >= 1.8x and SMC confluence) can break out
-        if is_institutional_thrust and rvol >= 1.8 and has_smc_confluence:
+        # Exception: Verified institutional thrust (or Golden Hours >= 1.35x RVOL with SMC confluence)
+        if has_smc_confluence and (
+            (is_institutional_thrust and rvol >= 1.8)
+            or (eagle.is_golden_hours and rvol >= 1.35 and not eagle.is_midday_lull)
+        ):
             return CommodityTigerMandate(
                 mandate="MOMENTUM_EXPANSION",
                 allow_routine_breakouts=True,
                 allow_thrust_only=True,
                 suggested_strategy="BUY_MOMENTUM",
-                reason=f"🚀 Exceptional Institutional Thrust (RVOL {rvol:.1f}x) piercing midday lull with verified SMC confluence.",
+                reason=f"🚀 Institutional Expansion (RVOL {rvol:.1f}x) with verified SMC confluence.",
                 action_guidance="Execute with discipline on retest limit order.",
             )
+        lull_msg = (
+            "🐅 TIGER STALKING: Midday volume lull / sideways chop. Routine breakouts suppressed to prevent whipsaw bleeding."
+            if eagle.is_midday_lull
+            else "🐅 TIGER STALKING: High-chop / low-velocity consolidation. Routine breakouts suppressed until directional thrust expands."
+        )
         return CommodityTigerMandate(
             mandate="TIGER_STALKING_PRESERVE_CAPITAL",
             allow_routine_breakouts=False,
             allow_thrust_only=True,
             suggested_strategy="WAIT_IN_CASH",
-            reason="🐅 TIGER STALKING: Midday volume lull / sideways chop. Routine breakouts suppressed to prevent whipsaw bleeding.",
+            reason=lull_msg,
             action_guidance="Remain in cash or wait for US Pit Golden Hours (17:30 IST) when real institutional liquidity expands.",
         )
 

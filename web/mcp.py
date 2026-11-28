@@ -36,10 +36,39 @@ from web.routers.common import require_localhost
 logger = logging.getLogger("chanakya.web.mcp")
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
+SUPPORTED_MCP_VERSIONS = ("2024-11-05", "2025-03-26")
 MCP_SERVER_INFO = {
     "name": "chanakya-trade",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
+
+
+RESOURCES_REGISTRY: list[dict[str, Any]] = [
+    {
+        "uri": "chanakya://system/mode",
+        "name": "System Operating Mode & Discovery Policy",
+        "description": "Authoritative trading mode (DEMO/PAPER/LIVE) and active discovery policy profile (FNO_ONLY/FNO_PRIORITY/BALANCED).",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "chanakya://fyers/telemetry",
+        "name": "Fyers Prime Telemetry (RateGate, WS & TBT)",
+        "description": "Live RateGate DATA/TX quota utilization, WebSocket 5,000-slot usage, and 15-slot 50-level TBT allocation.",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "chanakya://alerts/auto",
+        "name": "Active Auto-Alerts",
+        "description": "Current STALK/PRIMED/IGNITED F&O alerts from AutoAlertEngine.",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "chanakya://portfolio/reconciliation",
+        "name": "Broker vs Internal Ledger Reconciliation",
+        "description": "Truthful broker-vs-ledger reconciliation status (UNAVAILABLE when disconnected).",
+        "mimeType": "application/json",
+    },
+]
 
 
 # ── Curated Institutional MCP Prompts ─────────────────────────────────────────
@@ -174,7 +203,7 @@ class MCPServer:
         self.sse_sessions: dict[str, asyncio.Queue] = {}
 
     def get_tools_list(self) -> list[dict[str, Any]]:
-        """Return tools formatted to MCP specification."""
+        """Return tools formatted to MCP specification with safety annotations."""
         tools = []
         for name, t in self.registry._tools.items():
             if t.get("permission") == "deny":
@@ -184,9 +213,52 @@ class MCPServer:
                     "name": name,
                     "description": t.get("description", ""),
                     "inputSchema": t.get("parameters", {"type": "object", "properties": {}}),
+                    "annotations": {
+                        "readOnlyHint": bool(t.get("is_read_only", False)),
+                        "destructiveHint": bool(t.get("is_destructive", False)),
+                        "idempotentHint": bool(t.get("is_read_only", False)),
+                    },
                 }
             )
         return tools
+
+    def get_resources_list(self) -> list[dict[str, Any]]:
+        """Return read-only operational MCP resources."""
+        return list(RESOURCES_REGISTRY)
+
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        """Resolve a chanakya:// read-only operational resource URI."""
+        if uri == "chanakya://system/mode":
+            from config.discovery_policy import get_discovery_policy
+            from engine.modes import get_trading_mode
+
+            mode_info = get_trading_mode()
+            ui_map = {"OBSERVE": "DEMO", "SIMULATE": "PAPER", "EXECUTE": "LIVE"}
+            return {
+                "mode": ui_map[mode_info.mode.value],
+                "backend_mode": mode_info.mode.value,
+                "discovery_policy": get_discovery_policy().to_dict(),
+            }
+        if uri == "chanakya://fyers/telemetry":
+            return self.registry.execute("get_fyers_telemetry", {})
+        if uri == "chanakya://alerts/auto":
+            from engine.auto_alert_engine import get_auto_alert_engine
+
+            eng = get_auto_alert_engine()
+            alerts = [a.to_dict() if hasattr(a, "to_dict") else a for a in eng.get_alerts(limit=50)]
+            return {"count": len(alerts), "alerts": alerts}
+        if uri == "chanakya://portfolio/reconciliation":
+            from engine.reconciliation import compute_reconciliation_report
+            from brokers.session import get_execution_broker
+
+            brk = get_execution_broker()
+            if not brk or getattr(brk, "_is_mock", False):
+                return {"status": "UNAVAILABLE", "reason": "Live execution broker not connected"}
+            try:
+                return compute_reconciliation_report()
+            except Exception as exc:
+                return {"status": "UNAVAILABLE", "reason": str(exc)}
+        raise KeyError(f"Unknown resource URI: {uri}")
 
     def get_prompts_list(self) -> list[dict[str, Any]]:
         """Return prompts formatted to MCP specification."""
@@ -231,14 +303,19 @@ class MCPServer:
 
         # 2. Handshake / Lifecycle
         if method == "initialize":
+            client_ver = str(params.get("protocolVersion") or "").strip()
+            negotiated = (
+                client_ver if client_ver in SUPPORTED_MCP_VERSIONS else self.protocol_version
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "protocolVersion": self.protocol_version,
+                    "protocolVersion": negotiated,
                     "capabilities": {
                         "tools": {"listChanged": False},
                         "prompts": {"listChanged": False},
+                        "resources": {"subscribe": False, "listChanged": False},
                     },
                     "serverInfo": self.server_info,
                 },
@@ -374,6 +451,50 @@ class MCPServer:
                 },
             }
 
+        # 6. Resources Discovery & Read
+        if method == "resources/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"resources": self.get_resources_list()},
+            }
+
+        if method == "resources/read":
+            uri = params.get("uri")
+            if not uri or not isinstance(uri, str):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": "Invalid params: 'uri' is required"},
+                }
+            try:
+                data = self.read_resource(uri)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": json.dumps(data, indent=2, default=str),
+                            }
+                        ]
+                    },
+                }
+            except KeyError as exc:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": str(exc)},
+                }
+            except Exception as exc:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32603, "message": f"Resource read failed: {exc}"},
+                }
+
         # Unknown method
         return {
             "jsonrpc": "2.0",
@@ -453,6 +574,7 @@ async def get_mcp_metadata(request: Request):
         "serverInfo": mcp_server.server_info,
         "toolCount": len(mcp_server.get_tools_list()),
         "promptCount": len(mcp_server.get_prompts_list()),
+        "resourceCount": len(mcp_server.get_resources_list()),
         "endpoints": {
             "jsonrpc_http": "/api/mcp",
             "sse_stream": "/api/mcp/sse",

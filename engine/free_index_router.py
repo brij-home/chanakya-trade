@@ -267,9 +267,11 @@ class FreeIndexRouter:
         is_milestone: bool = False,
         sig_id: Optional[str] = None,
         disable_notification: Optional[bool] = None,
+        repository: Any = None,
     ) -> bool:
         """
-        Formats and dispatches the alert to the Free Index Channel with thread linkage.
+        Formats and dispatches the alert to the Free Index Channel with thread linkage
+        and transactional FREE_TELEGRAM outbox audit parity.
         """
         chat_id = self.get_chat_id()
         if not chat_id:
@@ -317,6 +319,60 @@ class FreeIndexRouter:
             )
             return False
 
+        # Stage FREE_TELEGRAM outbox entry (best-effort durable audit parity)
+        def _resolve_repo() -> Any:
+            if repository is not None:
+                return repository
+            try:
+                from engine.storage.alert_repository import alert_repository
+
+                return alert_repository
+            except Exception:
+                return None
+
+        repo = _resolve_repo()
+        if aid:
+            try:
+                from engine.sqlite_store import alert_sqlite_store
+
+                latest_v = (
+                    int(repo.get_latest_outbox_version(aid))
+                    if repo is not None and hasattr(repo, "get_latest_outbox_version")
+                    else int(alert_sqlite_store.get_latest_outbox_version(aid) or 0)
+                )
+                ev_ver = max(1, latest_v + (1 if is_milestone else 0))
+                outbox_payload = {
+                    "alert_id": aid,
+                    "symbol": symbol,
+                    "stage": stage,
+                    "channel": "FREE_TELEGRAM",
+                    "free_chat_id": str(chat_id),
+                    "signal_id": str(sig_id or ""),
+                    "is_milestone": bool(is_milestone),
+                }
+                if repo is not None and hasattr(repo, "save_alert_with_outbox"):
+                    repo.save_alert_with_outbox(
+                        alert,
+                        [
+                            {
+                                "channel": "FREE_TELEGRAM",
+                                "event_version": ev_ver,
+                                "payload": outbox_payload,
+                            }
+                        ],
+                    )
+                else:
+                    alert_sqlite_store.stage_outbox_entry(
+                        alert_id=aid,
+                        channel="FREE_TELEGRAM",
+                        payload=outbox_payload,
+                        event_version=ev_ver,
+                    )
+            except Exception as e_stage:
+                logger.debug(
+                    f"[FreeIndexRouter] Outbox staging note for {aid} FREE_TELEGRAM: {e_stage}"
+                )
+
         # Resolve threading reply-to message ID in the Free Channel
         reply_to_message_id = None
         if is_milestone:
@@ -331,6 +387,19 @@ class FreeIndexRouter:
             except Exception as e:
                 logger.debug(f"[FreeIndexRouter] Could not resolve reply_to for {sig_id}: {e}")
 
+        def _ack_free_outbox() -> None:
+            if not aid:
+                return
+            try:
+                if repo is not None and hasattr(repo, "acknowledge_outbox_by_alert_channel"):
+                    repo.acknowledge_outbox_by_alert_channel(aid, "FREE_TELEGRAM")
+                else:
+                    from engine.sqlite_store import alert_sqlite_store
+
+                    alert_sqlite_store.acknowledge_outbox_by_alert_channel(aid, "FREE_TELEGRAM")
+            except Exception as e_ack:
+                logger.debug(f"[FreeIndexRouter] Outbox ack note for {aid}: {e_ack}")
+
         # Callback on successful Telegram dispatch to record thread message ID in Free Channel
         def _on_free_tg_sent(msg_id: int) -> None:
             try:
@@ -342,6 +411,7 @@ class FreeIndexRouter:
                     chat_id=chat_id,
                     alert_id=aid,
                 )
+                _ack_free_outbox()
                 logger.info(
                     f"[FreeIndexRouter] Recorded Free Channel thread root msg_id={msg_id} "
                     f"for {sig_id} in {chat_id}"
@@ -353,7 +423,7 @@ class FreeIndexRouter:
         try:
             from engine.alerts import _telegram_notify
 
-            _telegram_notify(
+            notify_res = _telegram_notify(
                 free_msg,
                 chat_id=chat_id,
                 signal_id=sig_id,
@@ -363,6 +433,8 @@ class FreeIndexRouter:
                 alert_id=aid,
                 is_update=is_milestone,
             )
+            if notify_res is True:
+                _ack_free_outbox()
 
             # Record audit trail
             if hasattr(alert, "record_audit"):

@@ -433,6 +433,7 @@ class WsSubscriptionManager:
         # Dynamic subscriptions tracked in OrderedDict for LRU eviction: symbol -> timestamp
         self._dynamic_symbols: OrderedDict[str, float] = OrderedDict()
         self._anchored_spots: dict[str, float] = {}
+        self._purposes: dict[str, str] = {}
         self._load_from_disk()
 
     def seed_active_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
@@ -489,10 +490,20 @@ class WsSubscriptionManager:
                 data = json.load(f)
             loaded_dynamic = data.get("dynamic", [])
             loaded_core = data.get("core", [])
+            loaded_purposes = (
+                data.get("purposes", {}) if isinstance(data.get("purposes"), dict) else {}
+            )
             now = time.time()
             sanitized_needed = False
 
             with self._lock:
+                for p_sym, p_tag in loaded_purposes.items():
+                    if isinstance(p_sym, str) and isinstance(p_tag, str):
+                        p_clean = p_sym.upper().strip()
+                        if is_contract_expired(p_clean):
+                            sanitized_needed = True
+                            continue
+                        self._purposes[p_clean] = p_tag.upper().strip()
                 for raw_sym in loaded_dynamic:
                     sym = _to_ws_symbol(raw_sym)
                     if not sym or not is_valid_ws_symbol(sym) or is_contract_expired(sym):
@@ -549,7 +560,16 @@ class WsSubscriptionManager:
                     del self._dynamic_symbols[sym]
                     purged.append(sym)
 
-            if purged:
+            purposes_pruned = 0
+            for sym in purged:
+                if self._purposes.pop(sym.upper().strip(), None) is not None:
+                    purposes_pruned += 1
+            for p_sym in list(self._purposes.keys()):
+                if is_contract_expired(p_sym):
+                    del self._purposes[p_sym]
+                    purposes_pruned += 1
+
+            if purged or purposes_pruned:
                 self._save_to_disk()
 
         if purged:
@@ -622,6 +642,9 @@ class WsSubscriptionManager:
                 if sym not in CORE_BASE_SYMBOLS and _is_closed_daytime_deriv(sym):
                     self._core_symbols.discard(sym)
                     purged.append(sym)
+
+            for sym in purged:
+                self._purposes.pop(sym.upper().strip(), None)
 
             if purged:
                 self._save_to_disk()
@@ -722,6 +745,7 @@ class WsSubscriptionManager:
                 payload = {
                     "core": list(self._core_symbols),
                     "dynamic": list(self._dynamic_symbols.keys()),
+                    "purposes": dict(self._purposes),
                 }
             temp = path.with_name(f"{path.stem}_{os.getpid()}_{time.time_ns()}.tmp")
             with open(temp, "w", encoding="utf-8") as f:
@@ -849,14 +873,79 @@ class WsSubscriptionManager:
             except Exception as exc:
                 logger.warning(f"[WsSubManager] Error subscribing on connect: {exc}", exc_info=True)
 
+    def assign_subscription_purpose(self, symbol: str, purpose: str) -> None:
+        """Tag a subscription with an explicit operational purpose."""
+        if not symbol:
+            return
+        with self._lock:
+            self._purposes[symbol.upper().strip()] = (
+                str(purpose or "UNKNOWN_LEGACY").upper().strip()
+            )
+
+    def reconcile_subscription_purposes(
+        self, active_exposure_symbols: Optional[list[str]] = None
+    ) -> dict[str, str]:
+        """Classify active subscriptions into explicit operational purpose buckets without deleting legacy items."""
+        exposure_set = {s.upper().strip() for s in (active_exposure_symbols or []) if s}
+        try:
+            from config.market_universes import FNO_EQUITY_SYMBOLS
+
+            fno_set = {str(s).upper().strip() for s in FNO_EQUITY_SYMBOLS}
+        except Exception as e_fno:
+            logger.debug(f"[WsSubManager] FNO_EQUITY_SYMBOLS lookup skipped: {e_fno}")
+            fno_set = set()
+
+        with self._lock:
+            all_syms = self._core_symbols | set(self._dynamic_symbols.keys())
+            for sym in all_syms:
+                su = sym.upper().strip()
+                if su in exposure_set:
+                    self._purposes[su] = "EXPOSURE"
+                elif su in self._purposes and self._purposes[su] not in (
+                    "UNKNOWN_LEGACY",
+                    "FNO_STOCK",
+                    "CONTEXT_CASH",
+                ):
+                    continue
+                elif su.endswith("-INDEX"):
+                    self._purposes[su] = "INDEX"
+                elif (su.startswith("NSE:") or su.startswith("BSE:")) and su.endswith(
+                    ("CE", "PE", "FUT")
+                ):
+                    self._purposes[su] = "OPTION_GRID"
+                elif su.startswith("MCX:"):
+                    self._purposes[su] = (
+                        "COMMODITY" if allows_context_symbol(su) else "UNKNOWN_LEGACY"
+                    )
+                elif (su.startswith("NSE:") or su.startswith("BSE:")) and (
+                    su.endswith("-EQ") or su.endswith("-BE")
+                ):
+                    bare = su.split(":", 1)[1].rsplit("-", 1)[0]
+                    if bare in fno_set:
+                        self._purposes[su] = "FNO_STOCK"
+                    elif allows_context_symbol(su):
+                        self._purposes[su] = "CONTEXT_CASH"
+                    else:
+                        self._purposes[su] = "UNKNOWN_LEGACY"
+                elif allows_context_symbol(su):
+                    self._purposes[su] = "CONTEXT_CASH"
+                else:
+                    self._purposes[su] = "UNKNOWN_LEGACY"
+            return {k: self._purposes.get(k, "UNKNOWN_LEGACY") for k in all_syms}
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return WebSocket subscription capacity, metrics, and breakdown."""
+        self.reconcile_subscription_purposes()
         with self._lock:
             core_syms = set(self._core_symbols)
             dyn_syms = set(self._dynamic_symbols)
             recent_dynamic = list(self._dynamic_symbols.keys())[-10:]
             anchored = dict(self._anchored_spots)
             max_subs = self._max_subscriptions
+            purposes_copy = {
+                s: self._purposes.get(s.upper().strip(), "UNKNOWN_LEGACY")
+                for s in (core_syms | dyn_syms)
+            }
 
         core_count = len(core_syms)
         dynamic_count = len(dyn_syms)
@@ -868,6 +957,10 @@ class WsSubscriptionManager:
             if profile == "FNO_ONLY"
             else []
         )
+        by_purpose: dict[str, int] = {}
+        for tag in purposes_copy.values():
+            by_purpose[tag] = by_purpose.get(tag, 0) + 1
+
         return {
             "max_capacity": max_subs,
             "total_subscribed": total,
@@ -877,6 +970,7 @@ class WsSubscriptionManager:
             "recent_symbols": recent_dynamic,
             "anchored_spots": anchored,
             "discovery_profile": profile,
+            "by_purpose": by_purpose,
             "retained_out_of_scope_symbols": retained_out_of_scope,
         }
 

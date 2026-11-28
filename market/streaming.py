@@ -198,14 +198,16 @@ class MarketDataStreamRegistry:
             try:
                 self._queue.get_nowait()
                 self._queue.put_nowait(event)
-            except queue.Empty as e_suppressed:
-                logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
-            self._dropped_events += 1
+            except (queue.Empty, queue.Full) as e_suppressed:
+                logger.debug(f"[market.streaming] Queue ring rotation skipped: {e_suppressed}")
+                self._dropped_events += 1
         for callback in callbacks:
             try:
                 callback(event)
-            except Exception:
-                # A consumer must not take down the data connection.
+            except Exception as e_cb:
+                # A consumer must not take down the data connection, but count genuine delivery drops.
+                self._dropped_events += 1
+                logger.debug(f"[market.streaming] Callback delivery dropped event: {e_cb}")
                 continue
 
     def latest(self, canonical_instrument_id: str) -> Optional[MarketDataEvent]:

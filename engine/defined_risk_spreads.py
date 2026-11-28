@@ -118,6 +118,61 @@ def _get_lot_size(symbol: str) -> int:
     return 100
 
 
+def _infer_implied_iv(
+    spot: float,
+    strike: float,
+    dte: int,
+    market_prem: float,
+    option_type: str,
+    default_iv: float = 0.25,
+) -> float:
+    """Bisect implied volatility from a real option premium so synthetic hedge legs stay calibrated."""
+    if spot <= 0 or strike <= 0 or market_prem <= 0:
+        return default_iv
+    lo, hi = 0.05, 1.50
+    for _ in range(24):
+        mid = 0.5 * (lo + hi)
+        est = bs_premium(spot, strike, max(1, dte), mid, option_type)
+        if est < market_prem:
+            lo = mid
+        else:
+            hi = mid
+    return round(0.5 * (lo + hi), 4)
+
+
+def _lookup_chain_premium(
+    symbol: str,
+    strike: float,
+    option_type: str,
+    expiry_date: Optional[str] = None,
+) -> Optional[float]:
+    """Fetch matching option contract LTP from live broker chain if connected."""
+    try:
+        from market.options import get_options_chain
+
+        chain = get_options_chain(symbol) or []
+        opt_u = option_type.upper()
+        matches = [
+            c
+            for c in chain
+            if getattr(c, "option_type", "").upper() == opt_u
+            and abs(float(getattr(c, "strike", 0.0) or 0.0) - float(strike)) < 0.01
+            and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+        ]
+        if not matches:
+            return None
+        if expiry_date:
+            exp_prefix = str(expiry_date)[:10]
+            exact_exp = [
+                c for c in matches if str(getattr(c, "expiry", "") or "")[:10] == exp_prefix
+            ]
+            if exact_exp:
+                return float(getattr(exact_exp[0], "last_price", 0.0))
+        return float(getattr(matches[0], "last_price", 0.0))
+    except Exception:
+        return None
+
+
 def build_defined_risk_spread(
     underlying: str,
     spot_price: float,
@@ -128,6 +183,9 @@ def build_defined_risk_spread(
     num_lots: int = 1,
     primary_strike: Optional[float] = None,
     primary_premium: Optional[float] = None,
+    expiry_date: Optional[str] = None,
+    short_strike: Optional[float] = None,
+    short_premium: Optional[float] = None,
 ) -> DefinedRiskSpread:
     """
     Construct a defined-risk hedged options spread with mathematical payout constraints.
@@ -174,11 +232,48 @@ def build_defined_risk_spread(
 
     if strategy == "BULL_CALL_SPREAD":
         sentiment = "BULLISH"
-        buy_strike = atm_strike
-        sell_strike = atm_strike + (2 * step)
+        buy_strike = primary_strike if primary_strike and primary_strike > 0 else atm_strike
+        buy_prem = (
+            float(primary_premium)
+            if primary_premium and primary_premium > 0
+            else bs_premium(spot, buy_strike, dte, iv, "CE")
+        )
+        eff_iv = (
+            _infer_implied_iv(spot, buy_strike, dte, buy_prem, "CE", default_iv=iv)
+            if primary_premium and primary_premium > 0
+            else iv
+        )
 
-        buy_prem = bs_premium(spot, buy_strike, dte, iv, "CE")
-        sell_prem = bs_premium(spot, sell_strike, dte, iv, "CE")
+        best_sell = (
+            float(short_strike)
+            if short_strike and short_strike > buy_strike
+            else buy_strike + (2 * step)
+        )
+        best_sell_prem = (
+            float(short_premium)
+            if short_premium and short_premium > 0
+            else (
+                _lookup_chain_premium(sym, best_sell, "CE", expiry_date=expiry_date)
+                or bs_premium(spot, best_sell, dte, eff_iv, "CE")
+            )
+        )
+        # If tight 2*step debit spread yields >= 90% cost/width (near-zero max profit), widen wing cleanly
+        if not (short_strike and short_strike > buy_strike) and not (
+            short_premium and short_premium > 0
+        ):
+            for mult in (2, 3, 4):
+                cand_s = buy_strike + (mult * step)
+                cand_p = _lookup_chain_premium(
+                    sym, cand_s, "CE", expiry_date=expiry_date
+                ) or bs_premium(spot, cand_s, dte, eff_iv, "CE")
+                width_c = cand_s - buy_strike
+                if width_c > 0 and (buy_prem - cand_p) < (width_c * 0.85):
+                    best_sell = cand_s
+                    best_sell_prem = cand_p
+                    break
+
+        sell_strike = best_sell
+        sell_prem = best_sell_prem
 
         legs.append(SpreadLeg(sym, "CE", buy_strike, "BUY", buy_prem, lots, total_qty, dte))
         legs.append(SpreadLeg(sym, "CE", sell_strike, "SELL", sell_prem, lots, total_qty, dte))
@@ -198,15 +293,49 @@ def build_defined_risk_spread(
         sentiment = "BEARISH"
         # Anchor long leg to alert's actual strike when available (prevents phantom ATM from spot)
         buy_strike = primary_strike if primary_strike and primary_strike > 0 else atm_strike
-        sell_strike = buy_strike - (2 * step)
 
-        # Use real market premium for long leg when provided; BS estimate for hedge leg
+        # Use real market premium for long leg when provided; chain quote or implied-IV BS estimate for hedge leg
         buy_prem = (
             float(primary_premium)
             if primary_premium and primary_premium > 0
             else bs_premium(spot, buy_strike, dte, iv, "PE")
         )
-        sell_prem = bs_premium(spot, sell_strike, dte, iv, "PE")
+        eff_iv = (
+            _infer_implied_iv(spot, buy_strike, dte, buy_prem, "PE", default_iv=iv)
+            if primary_premium and primary_premium > 0
+            else iv
+        )
+        best_sell = (
+            float(short_strike)
+            if short_strike and 0 < short_strike < buy_strike
+            else max(step, buy_strike - (2 * step))
+        )
+        best_sell_prem = (
+            float(short_premium)
+            if short_premium and short_premium > 0
+            else (
+                _lookup_chain_premium(sym, best_sell, "PE", expiry_date=expiry_date)
+                or bs_premium(spot, best_sell, dte, eff_iv, "PE")
+            )
+        )
+        if not (short_strike and 0 < short_strike < buy_strike) and not (
+            short_premium and short_premium > 0
+        ):
+            for mult in (2, 3, 4):
+                cand_s = buy_strike - (mult * step)
+                if cand_s <= 0:
+                    continue
+                cand_p = _lookup_chain_premium(
+                    sym, cand_s, "PE", expiry_date=expiry_date
+                ) or bs_premium(spot, cand_s, dte, eff_iv, "PE")
+                width_c = buy_strike - cand_s
+                if width_c > 0 and (buy_prem - cand_p) < (width_c * 0.85):
+                    best_sell = cand_s
+                    best_sell_prem = cand_p
+                    break
+
+        sell_strike = best_sell
+        sell_prem = best_sell_prem
 
         legs.append(SpreadLeg(sym, "PE", buy_strike, "BUY", buy_prem, lots, total_qty, dte))
         legs.append(SpreadLeg(sym, "PE", sell_strike, "SELL", sell_prem, lots, total_qty, dte))

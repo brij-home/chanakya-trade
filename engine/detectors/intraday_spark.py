@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, time as dtime
-import threading
 from typing import Any, Optional
 
 import numpy as np
@@ -214,8 +215,20 @@ def detect_intraday_mover_sparks(
     )
     is_nifty_markup = (nifty_chg >= 0.40) and ((nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True)
 
-    for sym in scan_universe:
+    mtf_rest_deadline = time.monotonic() + 14.0
+    scan_deadline = time.monotonic() + 20.0
+    for idx_sym, sym in enumerate(scan_universe):
         clean_sym = canonical_alert_symbol(sym)
+        if (
+            not is_test_env
+            and idx_sym > 0
+            and time.monotonic() >= scan_deadline
+            and classify_symbol_segment(clean_sym) != "INDEX"
+        ):
+            logger.debug(
+                f"[IntradaySpark] Scan deadline (20s) reached after {idx_sym}/{len(scan_universe)} symbols."
+            )
+            break
         q = (
             quotes_map.get(f"NSE:{clean_sym}")
             or quotes_map.get(clean_sym)
@@ -245,8 +258,15 @@ def detect_intraday_mover_sparks(
         if abs(chg) < min_move:
             continue
 
-        # Calculate TOD-RVOL using L1 session-cached 20-day average volume
+        # Calculate TOD-RVOL using L1 session-cached 20-day average volume and cached EOD df
         df = None
+        if not is_test_env:
+            try:
+                from engine.eod_store import get_eod_df
+
+                df = get_eod_df(clean_sym, days=30)
+            except Exception:
+                df = None
         avg_vol = get_cached_avg_volume_20(clean_sym)
         rvol = compute_time_of_day_rvol(vol, avg_vol, ref_dt=datetime.now(IST))
 
@@ -286,8 +306,9 @@ def detect_intraday_mover_sparks(
                 if seg != "INDEX" and abs(chg) < 1.20:
                     continue
             if 690 <= time_hm < 795 and seg != "INDEX":
-                # Midday lull (11:30-13:15): filter routine drift, allow institutional breakouts (|chg| >= 1.2% and rvol >= 1.25x)
-                if abs(chg) < 1.20 or rvol < 1.25:
+                # Midday lull (11:30-13:15): filter routine drift, allow institutional breakouts
+                # (|chg| >= 1.2% with >= 1.25x RVOL, or explosive >= 2.2x RVOL at >= 0.85% continuation)
+                if not ((abs(chg) >= 1.20 and rvol >= 1.25) or (abs(chg) >= 0.85 and rvol >= 2.2)):
                     continue
             if time_hm >= 840 and seg != "INDEX":
                 from engine.position_sizer import is_fno_symbol
@@ -819,7 +840,9 @@ def detect_intraday_mover_sparks(
                 except Exception:
                     df_5m = None
 
-            if df_5m is None or len(df_5m) < 6:
+            if (df_5m is None or len(df_5m) < 6) and (
+                is_test_env or time.monotonic() < mtf_rest_deadline
+            ):
                 from market.history import get_ohlcv
 
                 df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=3)
@@ -844,7 +867,9 @@ def detect_intraday_mover_sparks(
                 except Exception:
                     df_15m = None
 
-            if df_15m is None or len(df_15m) < 10:
+            if (df_15m is None or len(df_15m) < 10) and (
+                is_test_env or time.monotonic() < mtf_rest_deadline
+            ):
                 from market.history import get_ohlcv
 
                 df_15m = get_ohlcv(clean_sym, exchange="NSE", interval="15minute", days=5)
@@ -1168,6 +1193,7 @@ def detect_intraday_mover_sparks(
             plan["option_no_chase_boundary"] = f"₹{opt_nc:,.2f}" if opt_nc else None
             plan["tactical_sl"] = f"₹{opt_sl:,.2f}"
             plan["lot_size"] = opt_lot_sz
+            plan["profit_rule"] = "Book 50% at T1, trail stop to breakeven for T2 & Runner."
             plan["option_plan"] = resolved_opt.as_dict()
             plan["underlying_symbol"] = clean_sym
             plan["underlying_spot"] = f"₹{ltp:,.1f}"
@@ -1182,10 +1208,7 @@ def detect_intraday_mover_sparks(
             headline = (
                 f"🎯 [{opt_contract_sym or (str(int(opt_strike)) + ' ' + opt_type)}] {headline}"
             )
-            summary = (
-                f"{summary} | Option Plan: Buy {int(opt_strike)} {opt_type} near ₹{opt_ltp:,.2f} "
-                f"(SL ₹{opt_sl:,.2f}, T1 ₹{opt_t1:,.2f}). Spot Invalidation SL: ₹{sl_price:,.2f}."
-            )
+            summary = f"{summary} | Spot Invalidation SL: ₹{sl_price:,.2f}."
 
         alert = AutoAlert(
             alert_id=alert_id,
@@ -1203,6 +1226,7 @@ def detect_intraday_mover_sparks(
             target_level=t1_price,
             stop_loss=sl_price,
             no_chase_boundary=no_chase_lvl,
+            spot_no_chase_boundary=no_chase_lvl,
             decoupler_status=decoupler_status,
             confidence=min(
                 95,
@@ -1240,6 +1264,7 @@ def detect_intraday_mover_sparks(
                 "change_pct": chg,
                 "segment": alert_seg,
                 "atr": atr_val,
+                "spot_no_chase_boundary": no_chase_lvl,
                 "no_chase_boundary": no_chase_lvl,
                 "target_1": t1_price,
                 "target_2": t2_price,

@@ -368,12 +368,37 @@ def test_auto_alert_invalidation_detection_stop_loss():
     assert evaluate_alert_invalidation(put_opt_alert, current_ltp=16.55) is None
     assert evaluate_alert_invalidation(put_opt_alert, current_ltp=11.0) is None
 
-    # Option premium drops to 9.5 (breached SL 10.8) -> invalidated!
+    # Option premium drops to 10.4 (< SL 10.8, below 38% risk floor) without spot-shield anchor -> standard SL invalidation!
+    put_opt_nom = AutoAlert(
+        alert_id="opt-buy-pe-sbin-nom",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="⚡ PUT GAMMA BLAST: SBIN 1010 PE",
+        summary="Put capitulation",
+        ltp=16.55,
+        trigger_level=16.55,
+        target_level=36.4,
+        stop_loss=10.8,
+        strike=1010.0,
+        option_type="PE",
+        contract_symbol="SBIN1010PE",
+        underlying_spot=None,
+        option_premium=16.55,
+    )
+    reason_opt_sl = evaluate_alert_invalidation(put_opt_nom, current_ltp=10.4)
+    assert reason_opt_sl is not None
+    assert "Option premium collapsed to ₹10.4" in reason_opt_sl
+    assert "breached stop-loss ₹10.8" in reason_opt_sl
+    assert "Put gamma thesis invalidated" in reason_opt_sl
+
+    # Option premium drops to 9.5 (-42.6% drawdown >= 38% risk floor) -> catastrophic drawdown halt!
     reason_opt = evaluate_alert_invalidation(put_opt_alert, current_ltp=9.5)
     assert reason_opt is not None
-    assert "Option premium collapsed to ₹9.5" in reason_opt
-    assert "breached stop-loss ₹10.8" in reason_opt
-    assert "Put gamma thesis invalidated" in reason_opt
+    assert "38% risk floor" in reason_opt
+    assert "LTP ₹9.5" in reason_opt
 
     # OPTION SELLING / WRITING ALERT (Short CE / Short PE / Credit Writing)
     # Seller writes option at premium 50.0, target 10.0, stop loss 75.0
@@ -1527,7 +1552,11 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
     assert finnifty_exp.is_expired is True
     assert finnifty_exp.is_active is False
 
-    # 3. Active future contract: SBIN monthly expiring end of September
+    # 3. Active future contract: SBIN monthly with a future expiry relative to today
+    from datetime import datetime as _dt, timedelta as _td
+    from zoneinfo import ZoneInfo as _ZI
+
+    _future_expiry = (_dt.now(_ZI("Asia/Kolkata")) + _td(days=7)).strftime("%Y-%m-%d")
     sbin_active = AutoAlert(
         alert_id="t-active-sbin",
         alert_type="GAMMA_BLAST",
@@ -1542,7 +1571,7 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
         target_level=950.0,
         stop_loss=1040.0,
         created_at="2026-09-09 13:25:48 IST",
-        expiry_date="2026-11-26",
+        expiry_date=_future_expiry,
         strike=1010.0,
         option_type="PE",
         contract_symbol="SBIN1010PE",
@@ -2323,6 +2352,10 @@ def test_auto_alert_directional_whiplash_guard():
             "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
             return_value=(True, "", {}),
         ),
+        patch(
+            "analysis.sector_rotation.get_stock_tailwind",
+            return_value=None,
+        ),
     ):
         engine = AutoAlertEngine()
         engine._alerts = []
@@ -2373,7 +2406,7 @@ def test_auto_alert_directional_whiplash_guard():
         assert engine._alerts[0].alert_id == "whiplash-bull-1"
         assert engine._alerts[0].is_active is True
 
-        # Confirmed structural reversal with CHoCH cue
+        # Confirmed structural reversal with CHoCH cue & higher conviction/R:R supremacy
         bear_confirmed = AutoAlert(
             alert_id="whiplash-bear-confirmed",
             alert_type="SQUEEZE_BREAKDOWN",
@@ -2386,7 +2419,8 @@ def test_auto_alert_directional_whiplash_guard():
             ltp=2980.0,
             trigger_level=2980.0,
             stop_loss=3025.0,
-            target_level=2880.0,
+            target_level=2845.0,
+            confidence=88,
             metrics={"choch": True, "mss": True},
             is_live=True,
             environment="LIVE",
@@ -3800,6 +3834,7 @@ def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegr
         option_type="PE",
         strike=23000.0,
         contract_symbol="NIFTY23000PE",
+        underlying_spot=23000.0,
         confidence=90,
         telegram_dispatched=True,
         telegram_message_id=54321,
@@ -3808,7 +3843,10 @@ def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegr
     )
     engine._alerts.append(real_alert)
 
-    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 110.0)
+    monkeypatch.setattr(
+        "market.quotes.get_ltp",
+        lambda sym: 110.0 if "PE" in str(sym) or "CE" in str(sym) else 23200.0,
+    )
     inv_real = engine.check_and_alert_invalidations(exchanges=["NFO"])
     assert len(inv_real) == 1
     assert real_alert.is_invalidated is True

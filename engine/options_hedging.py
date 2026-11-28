@@ -597,9 +597,14 @@ def build_ratio_spread_1x2_plan(
         "sweet_spot_gain": sweet_spot_gain,
         "sweet_spot_strike": sell_strike,
         "upper_breakeven": upper_breakeven,
+        "lower_breakeven": upper_breakeven if not is_bullish else None,
         "lot_size": lot_sz,
         "risk_reward": rr_desc,
-        "invalidation_boundary": f"Exit if spot crosses ₹{upper_breakeven:,.0f} (Upper Tail Breakeven)",
+        "invalidation_boundary": (
+            f"Exit if spot crosses ₹{upper_breakeven:,.0f} (Upper Tail Breakeven)"
+            if is_bullish
+            else f"Exit if spot breaches ₹{upper_breakeven:,.0f} (Lower Tail Breakeven)"
+        ),
         "edge_note": "Zero-Cost Entry: 2x short legs completely finance the 1x long leg. ₹0 loss if trade thesis fails.",
         "legs": legs,
     }
@@ -627,7 +632,15 @@ def build_defined_risk_hedge_plan(
     Dynamically adapts between Debit Spreads (VIX <= 16.0) and Credit Spreads (VIX > 16.0),
     enforcing strike width rules and SEBI margin benefits.
     """
-    clean_sym = symbol.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
+    clean_sym = (
+        symbol.replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("MCX:", "")
+        .replace("BFO:", "")
+        .strip()
+        .upper()
+    )
     now_time = (now_dt or datetime.now(IST)).time()
     spot = float(spot or 0.0)
     opt_ltp = float(opt_ltp or 0.0)
@@ -635,6 +648,10 @@ def build_defined_risk_hedge_plan(
 
     if spot <= 0 or opt_ltp <= 0 or strike <= 0:
         return None
+
+    from market.instruments import COMMODITY_SYMBOLS
+
+    is_comm = clean_sym in COMMODITY_SYMBOLS
 
     # 1. Resolve lot size
     lot_sz = lot_size
@@ -728,8 +745,15 @@ def build_defined_risk_hedge_plan(
         )
         adaptive_regime_desc = f"{regime_label} ({int(width)} pt width)"
     else:
-        # Single-stock F&O: dynamic step based on stock price
-        if spot >= 5000:
+        # Commodity or Single-stock F&O: dynamic step from symbol master or price tier
+        if is_comm:
+            try:
+                from market.symbol_master import get_strike_step
+
+                step = float(get_strike_step(clean_sym, spot=spot) or 50.0)
+            except Exception:
+                step = 50.0
+        elif spot >= 5000:
             step = 100.0
         elif spot >= 2500:
             step = 50.0
@@ -893,20 +917,75 @@ def build_defined_risk_hedge_plan(
     short_delta = 0.28 if is_bullish else -0.28
     net_spread_delta = 0.22 if is_bullish else -0.22
     try:
-        from engine.options_backtest import bs_delta
+        from engine.options_backtest import bs_delta, bs_iv
         from engine.alert_expiry import get_expiry_metadata
+
+        eff_exp_for_greeks = expiry_date
+        if not eff_exp_for_greeks and chain:
+            eff_exp_for_greeks = getattr(chain[0], "expiry", None)
 
         dte = 7
         try:
-            exp_meta = get_expiry_metadata(expiry_date, None, clean_sym, None)
+            exp_meta = get_expiry_metadata(eff_exp_for_greeks, None, clean_sym, None)
             if exp_meta and exp_meta.get("dte") is not None:
                 dte = max(0, int(exp_meta["dte"]))
         except Exception as e_suppressed:
             logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
-        iv_val = max(0.10, (current_vix / 100.0) if current_vix else 0.14)
+        # Resolve asset-appropriate IV (chain contract IV -> BS market-price implied IV -> commodity IV -> India VIX)
+        chain_iv = 0.0
+        if chain:
+            for c_leg in chain:
+                if getattr(c_leg, "option_type", "") == opt_type and abs(
+                    float(getattr(c_leg, "strike", 0.0) or 0.0) - strike
+                ) <= (step * 0.35):
+                    raw_c_iv = float(
+                        getattr(c_leg, "iv", 0.0)
+                        or getattr(c_leg, "implied_volatility", 0.0)
+                        or 0.0
+                    )
+                    if raw_c_iv > 0:
+                        chain_iv = (raw_c_iv / 100.0) if raw_c_iv > 3.0 else raw_c_iv
+                        break
+
+        solved_long_iv = None
+        solved_short_iv = None
+        if chain_iv <= 0:
+            _dte_iv = max(1, dte)
+            if opt_ltp > 0 and spot > 0:
+                solved_long_iv = bs_iv(opt_ltp, spot, strike, _dte_iv, opt_type)
+            if sell_prem > 0 and spot > 0:
+                solved_short_iv = bs_iv(sell_prem, spot, sell_strike, _dte_iv, opt_type)
+
+        if chain_iv > 0:
+            iv_val = max(0.10, chain_iv)
+        elif solved_long_iv is not None and 0.08 <= solved_long_iv <= 2.50:
+            iv_val = solved_long_iv
+        elif is_comm:
+            _comm_iv_map = {
+                "CRUDEOIL": 0.34,
+                "CRUDEOILM": 0.34,
+                "NATURALGAS": 0.48,
+                "NATGASMINI": 0.48,
+                "GOLD": 0.16,
+                "GOLDM": 0.16,
+                "SILVER": 0.24,
+                "SILVERM": 0.24,
+                "COPPER": 0.22,
+                "ZINC": 0.20,
+                "ALUMINIUM": 0.20,
+            }
+            iv_val = _comm_iv_map.get(clean_sym, 0.30)
+        else:
+            iv_val = max(0.10, (current_vix / 100.0) if current_vix else 0.14)
+
+        short_iv_val = (
+            solved_short_iv
+            if (chain_iv <= 0 and solved_short_iv is not None and 0.08 <= solved_short_iv <= 2.50)
+            else iv_val
+        )
         long_delta = bs_delta(spot, strike, dte, iv_val, opt_type)
-        short_delta = bs_delta(spot, sell_strike, dte, iv_val, opt_type)
+        short_delta = bs_delta(spot, sell_strike, dte, short_iv_val, opt_type)
         net_spread_delta = round(long_delta - short_delta, 2)
     except Exception as e_suppressed:
         logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
@@ -943,9 +1022,9 @@ def build_defined_risk_hedge_plan(
     ]
 
     # Optional 1x2 Ratio Spread Alternative (Zero-Cost Asymmetric Upside)
-    # Compute if velocity is solid OR if this is a single stock / poor R:R debit spread
+    # Never emit unbounded-tail 1x2 ratio alternatives when defined-risk spread is mandated.
     ratio_plan = None
-    if vel_score >= 65.0 or (not is_idx) or is_poor_rr:
+    if (not vix_strategy.mandate_spread) and (vel_score >= 65.0 or (not is_idx) or is_poor_rr):
         try:
             ratio_plan = build_ratio_spread_1x2_plan(
                 symbol=clean_sym,
@@ -962,9 +1041,9 @@ def build_defined_risk_hedge_plan(
         except Exception:
             ratio_plan = None
 
-    # Single-Stock Sector Confluence & Headwind Filter
+    # Single-Stock Sector Confluence & Headwind Filter (skip for MCX commodities)
     stock_sector_warning = ""
-    if not is_idx:
+    if not is_idx and not is_comm:
         try:
             from analysis.sector_rotation import get_stock_tailwind
 
@@ -991,9 +1070,14 @@ def build_defined_risk_hedge_plan(
         except Exception as e_suppressed:
             logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
-    # Single-Stock Atomic Multi-Leg Execution Guard
+    # Single-Stock / Commodity Atomic Multi-Leg Execution Guard
     combo_execution_note = ""
-    if not is_idx:
+    if is_comm:
+        combo_execution_note = (
+            f"Commodity Option Liquidity Guard: Enter as atomic Limit Multi-Leg combo at Net Price (Limit ₹{net_debit:,.2f}). "
+            f"DO NOT enter legs individually via Market Orders to avoid bid-ask slippage."
+        )
+    elif not is_idx:
         combo_execution_note = (
             f"Stock Option Liquidity Guard: Enter as atomic Limit Multi-Leg combo at Net Price (Limit ₹{net_debit:,.2f}). "
             f"DO NOT enter legs individually via Market Orders to avoid bid-ask slippage."
@@ -1185,15 +1269,36 @@ def evaluate_naked_option_free_roll(
             "current_premium": current_ltp,
         }
 
-    # Resolve option details: strike & type
+    # Resolve option details: explicit strike attribute takes canonical precedence over symbol regex
+    # because weekly YYMMDD symbols like SENSEX26120384000PE concatenate date digits before strike.
     c_sym = str(getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or "")
-    m_strike = re.search(r"(\d{4,6})(CE|PE)", c_sym.upper())
-    if m_strike:
-        long_strike = float(m_strike.group(1))
-        opt_type = m_strike.group(2)
-    else:
-        long_strike = float(getattr(alert, "strike", 0.0) or 0.0)
-        opt_type = "CE" if (getattr(alert, "direction", "BULLISH") == "BULLISH") else "PE"
+    explicit_strike = float(getattr(alert, "strike", 0.0) or 0.0)
+    explicit_opt = str(getattr(alert, "option_type", "") or "").upper()
+    if explicit_opt not in ("CE", "PE"):
+        if c_sym.upper().endswith("CE"):
+            explicit_opt = "CE"
+        elif c_sym.upper().endswith("PE"):
+            explicit_opt = "PE"
+        else:
+            explicit_opt = "CE" if (getattr(alert, "direction", "BULLISH") == "BULLISH") else "PE"
+
+    long_strike = explicit_strike
+    opt_type = explicit_opt
+    if long_strike <= 0 and c_sym:
+        m_expiry_strike = re.search(
+            r"(?:\d{2}(?:[A-Z]{3}|\d{4}|\d[A-Z0-9]{2}))(\d+)(CE|PE)$",
+            c_sym.upper(),
+        )
+        if m_expiry_strike:
+            long_strike = float(m_expiry_strike.group(1))
+            opt_type = m_expiry_strike.group(2)
+        else:
+            m_strike = re.search(r"(\d{4,6})(CE|PE)", c_sym.upper())
+            if m_strike:
+                cand_s = float(m_strike.group(1))
+                if spot_price <= 0 or abs(cand_s - spot_price) / spot_price <= 0.35:
+                    long_strike = cand_s
+                opt_type = m_strike.group(2)
 
     raw_sym = str(getattr(alert, "symbol", "") or "NIFTY")
     clean_und = (
@@ -1256,11 +1361,19 @@ def evaluate_naked_option_free_roll(
     risk_free = net_locked_profit_pts >= 0.0
     risk_desc = "100% CAPITAL RISK-FREE (FREE-ROLL)" if risk_free else "DE-RISKED SPREAD"
 
-    rec = (
-        f"Sell {clean_und} {candidate_strike:,.0f} {opt_type} @ ~₹{credit_prem:,.1f}. "
-        f"Net cash flow: {'+' if net_locked_profit_pts >= 0 else ''}₹{net_locked_profit_pts:,.1f}/sh locked. "
-        f"Max payoff: ₹{max_upside_profit_pts:,.1f}/sh. Zero downside risk."
-    )
+    if risk_free:
+        rec = (
+            f"Sell {clean_und} {candidate_strike:,.0f} {opt_type} @ ~₹{credit_prem:,.1f}. "
+            f"Net credit locked: +₹{net_locked_profit_pts:,.1f}/sh. "
+            f"Max payoff: ₹{max_upside_profit_pts:,.1f}/sh. Zero downside risk."
+        )
+    else:
+        rem_risk = abs(net_locked_profit_pts)
+        rec = (
+            f"Sell {clean_und} {candidate_strike:,.0f} {opt_type} @ ~₹{credit_prem:,.1f}. "
+            f"De-risked vertical spread: Remaining max risk ₹{rem_risk:,.1f}/sh | "
+            f"Max payoff: ₹{max_upside_profit_pts:,.1f}/sh."
+        )
 
     return {
         "eligible": True,

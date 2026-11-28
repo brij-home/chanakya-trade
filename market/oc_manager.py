@@ -151,7 +151,7 @@ class OptionsChainManager:
                     return cached_chain
         return []
 
-    def refresh_symbol(self, symbol: str) -> bool:
+    def refresh_symbol(self, symbol: str, *, bypass_cache: bool = False) -> bool:
         """Refresh options chain for a single symbol and populate unified cache."""
         try:
             from market.fyers_circuit_breaker import get_fyers_circuit_breaker
@@ -168,7 +168,7 @@ class OptionsChainManager:
 
             from market.options import get_options_chain
 
-            chain = get_options_chain(symbol, bypass_cache=True)
+            chain = get_options_chain(symbol, bypass_cache=bypass_cache)
             self._last_refresh_ts[symbol] = time.time()
             if chain:
                 self._record_chain_iv_observation(symbol, chain)
@@ -182,7 +182,9 @@ class OptionsChainManager:
         try:
             from engine.iv_surface import (
                 build_iv_surface_snapshot,
+                compute_symbol_realized_vol_20d,
                 extract_surface_inputs_from_chain,
+                load_historical_30d_ivs,
                 record_iv_observation,
             )
             from market.quotes import get_ltp
@@ -205,6 +207,10 @@ class OptionsChainManager:
                 next_dte=inputs.get("next_dte"),
                 iv_25d_put=inputs.get("iv_25d_put"),
                 iv_25d_call=inputs.get("iv_25d_call"),
+                historical_30d_ivs=load_historical_30d_ivs(clean),
+                near_expiry=inputs.get("near_expiry"),
+                next_expiry=inputs.get("next_expiry"),
+                realized_vol_20d=compute_symbol_realized_vol_20d(clean),
             )
             record_iv_observation(snap)
             if clean not in _DEFAULT_INDEX_SUBSCRIPTIONS:

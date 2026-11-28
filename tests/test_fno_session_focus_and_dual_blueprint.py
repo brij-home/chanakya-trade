@@ -113,8 +113,8 @@ def test_regime_verdict_logic():
 
 
 def test_session_focus_mode_constant_default():
-    """The owner's default discovery scope is strict domestic F&O."""
-    assert SESSION_FOCUS_MODE == "FNO_ONLY"
+    """The owner's default discovery scope is FNO_PRIORITY."""
+    assert SESSION_FOCUS_MODE == "FNO_PRIORITY"
 
 
 @patch.dict(os.environ, {"SESSION_FOCUS_MODE": "FNO_PRIORITY"}, clear=False)

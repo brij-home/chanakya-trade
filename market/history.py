@@ -393,7 +393,17 @@ def get_ohlcv(
                             now_loc = datetime.now(IST).replace(tzinfo=None)
                             age_sec = (now_loc - latest_bar).total_seconds()
                             intv_sec = 300
-                            if kite_interval in ("1m", "1minute", "minute"):
+                            if kite_interval in ("5s", "5second", "5seconds"):
+                                intv_sec = 5
+                            elif kite_interval in ("10s", "10second", "10seconds"):
+                                intv_sec = 10
+                            elif kite_interval in ("15s", "15second", "15seconds"):
+                                intv_sec = 15
+                            elif kite_interval in ("30s", "30second", "30seconds"):
+                                intv_sec = 30
+                            elif kite_interval in ("45s", "45second", "45seconds"):
+                                intv_sec = 45
+                            elif kite_interval in ("1m", "1minute", "minute"):
                                 intv_sec = 60
                             elif kite_interval in ("3m", "3minute"):
                                 intv_sec = 180
@@ -405,7 +415,7 @@ def get_ohlcv(
                                 intv_sec = 1800
                             elif kite_interval in ("60m", "60minute", "1h"):
                                 intv_sec = 3600
-                            max_allowed_age = max(intv_sec * 1.5, 90.0)
+                            max_allowed_age = max(intv_sec * 1.5, 15.0 if intv_sec < 60 else 90.0)
                             if age_sec > max_allowed_age:
                                 is_stale = True
                     except Exception as e_stale:
@@ -527,6 +537,32 @@ def get_ohlcv(
                 provider_name = "binance"
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
+
+    # Tier 2.85: TickWarehouse Seconds Bars (5s/10s/15s/30s/45s) from live recorded ticks
+    _sec_intervals = {"5s": 5, "10s": 10, "15s": 15, "30s": 30, "45s": 45}
+    if not raw and not as_of and kite_interval in _sec_intervals and days <= 1 and not is_crypto:
+        try:
+            from engine.tick_warehouse import get_tick_warehouse
+
+            sec_df = get_tick_warehouse().build_seconds_bars(
+                f"{exchange}:{clean_sym}" if ":" not in symbol else symbol,
+                interval_sec=_sec_intervals[kite_interval],
+            )
+            if sec_df is None or sec_df.empty:
+                sec_df = get_tick_warehouse().build_seconds_bars(
+                    clean_sym, interval_sec=_sec_intervals[kite_interval]
+                )
+            if sec_df is not None and len(sec_df) >= 5:
+                sec_df.attrs["provenance"] = {
+                    "data_source": "TICK_WAREHOUSE_SECONDS",
+                    "provider": "tick_warehouse",
+                    "as_of": to_date.isoformat(),
+                    "snapshot_id": None,
+                    "reproducible": False,
+                }
+                return sec_df
+        except Exception as e_tw_sec:
+            logger.debug(f"[market.history] TickWarehouse seconds bars note: {e_tw_sec}")
 
     # Tier 2.9: In-RAM Synthesized Intraday Bars (LiveCandleWeaver / MarketMatrix)
     # Serves streaming WebSocket bars in 0.1ms without hitting broker REST /history endpoints
@@ -726,7 +762,7 @@ def get_ohlcv(
         except Exception as e_save:
             logger.debug(f"[market.history] Auto-saving broker bars to warehouse: {e_save}")
 
-    if not raw:
+    if not raw and kite_interval not in ("5s", "10s", "15s", "30s", "45s"):
         raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
         provider_name = "yfinance"
         # Cache successful daily fetches to disk for offline fallback

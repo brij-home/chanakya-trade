@@ -556,7 +556,12 @@ def test_outbox_gate_suppression_and_chat_id_routing(clean_outbox_env):
     qual_alert.option_type = "CE"
     qual_alert.option_premium = 6.0
     qual_alert.underlying_spot = 318.0
-    qual_alert.metrics = {"volume": 200000, "oi": 2500000, "vol_oi_ratio": 2.0}
+    qual_alert.metrics = {
+        "volume": 200000,
+        "oi": 2500000,
+        "vol_oi_ratio": 2.0,
+        "confluence_score": 82.0,
+    }
 
     staged_calls.clear()
     with (
@@ -568,11 +573,20 @@ def test_outbox_gate_suppression_and_chat_id_routing(clean_outbox_env):
         _mock.patch("engine.alerts._is_market_hours", return_value=True),
     ):
         pass
+    mock_confluence_qual = types.SimpleNamespace(
+        total_score=85.0,
+        is_qualified=True,
+        factors=[],
+    )
     with (
         _mock.patch("engine.signal_policy.evaluate_candidate_policy", return_value=mock_policy_res),
         _mock.patch(
             "engine.alert_scrutiny.alert_scrutiny_auditor.scrutinize_alert",
             return_value=mock_scrutiny_qual,
+        ),
+        _mock.patch(
+            "engine.confluence_engine.evaluate_confluence",
+            return_value=mock_confluence_qual,
         ),
         _mock.patch("engine.alerts._is_market_hours", return_value=True),
     ):

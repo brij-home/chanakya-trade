@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from config.constants import IST_ZONE as IST
 
@@ -112,10 +112,11 @@ class FyersCircuitBreaker:
         status_code: int = 0,
         error_message: str = "",
         is_429: bool = False,
+        retry_after_sec: Optional[float] = None,
     ) -> None:
         """
         Record failed Fyers call.
-        Trips immediately on HTTP 429, -360 rate limits, or token expiry (-16), or when failure threshold is reached.
+        Trips immediately on HTTP 429, -360 rate limits, or token expiry (-8/-15/-16/-17), or when failure threshold is reached.
         """
         now = time.time()
         trip_needed = False
@@ -132,14 +133,19 @@ class FyersCircuitBreaker:
             )
 
             # Check token expiration / invalid token errors (e.g. daily session reset at 06:30 IST)
-            is_token_expired = (
-                status_code in (-14, -15, -16, -17, 401, 403)
-                or "token is invalid" in err_lower
+            has_explicit_auth_msg = (
+                "token is invalid" in err_lower
                 or "token expired" in err_lower
                 or "invalid token" in err_lower
                 or "invalid or expired" in err_lower
                 or "could not authenticate" in err_lower
                 or "authentication failed" in err_lower
+            )
+            # Never treat a generic Cloudflare/transport "Bad request" 403 as session expiry
+            is_token_expired = (
+                status_code in (-8, -14, -15, -16, -17, 401)
+                or (status_code == 403 and err_lower.strip() != "bad request")
+                or has_explicit_auth_msg
             )
 
             # Check 429 Too Many Requests or -360 Rate Limit (10 req/s or 500 req/min rolling window on Prime)
@@ -175,13 +181,18 @@ class FyersCircuitBreaker:
                 reason = f"Fyers Token Invalid or Expired (code {status_code}): {error_message}"
             elif is_rate_limit:
                 trip_needed = True
-                self._active_cooldown_sec = (
-                    self._cooldown_sec
-                )  # 60s cooldown allows rolling window to reset
+                bounded_retry = (
+                    max(1.0, min(float(retry_after_sec), 300.0))
+                    if retry_after_sec is not None and float(retry_after_sec) > 0
+                    else 0.0
+                )
+                self._active_cooldown_sec = max(self._cooldown_sec, bounded_retry)
                 try:
                     from market.fyers_rate_gate import get_fyers_rate_gate
 
                     gate = get_fyers_rate_gate()
+                    if bounded_retry > 0:
+                        gate.notify_rate_limited(cooldown_sec=bounded_retry)
                     plan_name = gate.plan
                     limit_desc = (
                         f"10 req/s or 500 req/min ({plan_name} Plan)"

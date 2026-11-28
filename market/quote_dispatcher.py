@@ -74,18 +74,44 @@ class QuoteDispatcher:
     dynamically packed by character budget to guarantee immunity from HTTP 414.
     """
 
-    def __init__(self, chunk_size: Optional[int] = None) -> None:
+    def __init__(self, chunk_size: Optional[int] = None, *, use_v2: bool = False) -> None:
         self._rate_gate = get_fyers_rate_gate()
+        self._use_v2 = use_v2
         max_chunk = getattr(self._rate_gate, "quotes_chunk_size", FYERS_MAX_CHUNK_SIZE)
-        safe_max = min(max_chunk, SAFE_HTTP_MAX_CHUNK_SIZE)
-        self._chunk_size = min(chunk_size or safe_max, safe_max)
+        if use_v2:
+            self._chunk_size = min(chunk_size or max_chunk, max_chunk)
+        else:
+            safe_max = min(max_chunk, SAFE_HTTP_MAX_CHUNK_SIZE)
+            self._chunk_size = min(chunk_size or safe_max, safe_max)
         self._dispatch_lock = threading.Lock()
+
+    def fetch_quotes_bulk_v2(
+        self,
+        symbols: list[str],
+        category: FyersCallCategory = FyersCallCategory.SCANNER_QUOTE,
+        timeout_sec: float = 10.0,
+    ) -> dict[str, Any]:
+        """Batch up to 1,000 symbols/request using Fyers Prime POST quotes_v2 when supported."""
+        max_chunk = int(
+            getattr(self._rate_gate, "quotes_chunk_size", FYERS_MAX_CHUNK_SIZE)
+            or FYERS_MAX_CHUNK_SIZE
+        )
+        return self.fetch_quotes_batch(
+            symbols,
+            category=category,
+            timeout_sec=timeout_sec,
+            chunk_override=max_chunk,
+            max_chars_override=1_000_000,
+        )
 
     def fetch_quotes_batch(
         self,
         symbols: list[str],
         category: FyersCallCategory = FyersCallCategory.SCANNER_QUOTE,
         timeout_sec: float = 10.0,
+        *,
+        chunk_override: Optional[int] = None,
+        max_chars_override: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Fetch quotes for a list of symbols in serialized chunks under rate gate control.
@@ -124,9 +150,11 @@ class QuoteDispatcher:
         ]
 
         if unresolved:
-            # Dynamically chunk unresolved symbols by symbol count AND URL byte budget
+            # Dynamically chunk unresolved symbols by symbol count AND URL byte budget (unless POST v2)
+            eff_chunk = chunk_override or self._chunk_size
+            eff_chars = max_chars_override or (1_000_000 if self._use_v2 else SAFE_URL_MAX_CHARS)
             chunks = chunk_symbols_for_quotes(
-                unresolved, max_symbols=self._chunk_size, max_chars=SAFE_URL_MAX_CHARS
+                unresolved, max_symbols=eff_chunk, max_chars=eff_chars
             )
 
             with self._dispatch_lock:

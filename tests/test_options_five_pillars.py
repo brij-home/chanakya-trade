@@ -732,3 +732,155 @@ def test_dealer_delta_exposure_dex_calculation():
     assert "dex_neutral_strike" in gex_res
     assert gex_res["call_dex"] < 0.0
     assert gex_res["put_dex"] > 0.0
+
+
+def test_sensex_weekly_contract_free_roll_strike_and_debit_honesty():
+    """Weekly YYMMDD contracts like SENSEX26120384000PE must use explicit strike (84000) not 384000,
+    and net-debit vertical spreads must never claim 'Zero downside risk'."""
+    alert = SimpleNamespace(
+        symbol="SENSEX",
+        contract_symbol="BSE:SENSEX26120384000PE",
+        strike=84000.0,
+        option_type="PE",
+        direction="BEARISH",
+        entry_price=749.9,
+        stop_loss=622.93,
+        is_t1_achieved=True,
+        achieved_milestones=["TARGET_1"],
+    )
+    res = evaluate_naked_option_free_roll(alert, current_ltp=1064.9, spot_price=83722.54)
+    assert res["eligible"] is True
+    assert res["long_strike"] == 84000.0
+    assert res["short_strike_candidate"] == 83600.0
+    assert res["spread_width"] == 400.0
+    assert res["max_upside_profit_pts"] < 400.0  # Never 300,175.0/sh!
+    if res["net_locked_profit_pts"] < 0:
+        assert res["is_guaranteed_profit"] is False
+        assert "Zero downside risk" not in res["recommendation"]
+        assert "Remaining max risk" in res["recommendation"]
+
+
+def test_convert_to_free_roll_renders_update_and_coherent_no_chase():
+    """CONVERT_TO_FREE_ROLL stage must render as an UPDATE card (never NEW CALL), and
+    stale BUY no_chase <= entry must never be emitted inverted."""
+    from bot.alert_templates import render_auto_alert
+
+    alert = SimpleNamespace(
+        alert_id="aa-options_momentum-sensex-pe-20261127",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="CONVERT_TO_FREE_ROLL",
+        target_status="CONVERT_TO_FREE_ROLL",
+        direction="BEARISH",
+        strike=84000.0,
+        option_type="PE",
+        contract_symbol="BSE:SENSEX26120384000PE",
+        entry_price=749.9,
+        initial_entry_premium=749.9,
+        option_premium=1064.9,
+        ltp=1064.9,
+        underlying_spot=83722.54,
+        stop_loss=622.93,
+        initial_stop_loss=622.93,
+        target_1=914.9,
+        target_2=1034.9,
+        target_level=914.9,
+        lot_size=20,
+        no_chase_boundary=697.8,
+        headline="🛡️ Free-Roll Wing Lock: Convert SENSEX naked option into zero-downside spread",
+        summary="Sell SENSEX 83,600 PE @ ~₹524.9.",
+        actionable_plan={
+            "action": "BUY",
+            "free_roll_plan": {
+                "eligible": True,
+                "short_strike_candidate": 83600.0,
+                "option_type": "PE",
+                "estimated_credit_collected": 524.9,
+                "net_locked_profit_pts": -225.0,
+                "max_upside_profit_pts": 175.0,
+                "is_guaranteed_profit": False,
+            },
+        },
+        achieved_milestones=["T1_ACHIEVED", "T2_ACHIEVED", "CONVERT_TO_FREE_ROLL"],
+        environment="LIVE",
+        is_live=True,
+        is_realtime=True,
+        created_at="2026-11-27 09:29:00 IST",
+        updated_at="2026-11-27 15:05:41 IST",
+    )
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "NEW CALL" not in rendered
+    assert "UPDATE" in rendered
+    assert "WING CONVERSION" in rendered
+    assert "Zero downside risk" not in rendered
+    assert "₹300,175" not in rendered
+
+    # Also verify NEW CALL card never prints No-Chase below BUY entry
+    alert.stage = "IGNITED"
+    alert.target_status = None
+    alert.achieved_milestones = []
+    rendered_new = render_auto_alert(alert, in_market=True)
+    assert "above ₹697.8" not in rendered_new
+
+
+def test_target2_recomputes_stale_zero_pnl_pts_and_formats_strike_roll_cleanly():
+    """TARGET_2 alerts with stale pnl_pts=0.0 must recompute Move/R accurately,
+    and Strike Roll must format readable option contracts without duplicate Est labels."""
+    from bot.alert_templates import render_auto_alert
+
+    alert = SimpleNamespace(
+        alert_id="aa-strat-sensex-pe-20261127",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        alert_type="STRAT_2_1_2_BEARISH",
+        stage="TARGET_2",
+        target_status="T2_ACHIEVED",
+        direction="BEARISH",
+        strike=84000.0,
+        option_type="PE",
+        contract_symbol="BSE:SENSEX26D0384000PE",
+        entry_price=749.90,
+        initial_entry_premium=749.90,
+        option_premium=1053.00,
+        ltp=1053.00,
+        underlying_spot=83722.54,
+        stop_loss=914.88,
+        initial_stop_loss=622.93,
+        trailing_stop=914.88,
+        target_1=914.90,
+        target_2=1034.90,
+        target_moonshot=1237.33,
+        lot_size=20,
+        pnl_pts=0.0,
+        pnl_pct=40.4,
+        r_multiple=0.0,
+        strike_roll_recommendation={
+            "action": "ROLL_DOWN",
+            "current_strike": 84000.0,
+            "recommended_strike": 83700.0,
+            "recommended_contract": "BSE:SENSEX26D0383700PE",
+            "pnl_pct": 40.4,
+            "locked_profit_pts": 303.1,
+            "reinvest_capital_pts": 866.8,
+            "recommended_premium": 866.8,
+            "target_delta": 0.48,
+        },
+        achieved_milestones=["T1_ACHIEVED", "TARGET_2"],
+        environment="LIVE",
+        is_live=True,
+        is_realtime=True,
+        created_at="2026-11-27 09:29:00 IST",
+        updated_at="2026-11-27 15:09:33 IST",
+    )
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "+₹0.00" not in rendered
+    assert "+₹303.10" in rendered
+    assert "+0.0R" not in rendered
+    assert "+2.39R" in rendered or "+2.4R" in rendered
+    assert "BSE:SENSEX26D0383700PE" not in rendered
+    assert "SENSEX 83700 PE" in rendered
+    assert "Book <code>84000</code>" in rendered
+    assert "(Est ~₹866.8)" not in rendered

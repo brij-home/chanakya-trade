@@ -347,3 +347,44 @@ def test_trend_day_pullback_index_regime_gate(monkeypatch):
     )
     assert alert is not None, "Bullish continuation should trigger when NIFTY 50 is above VWAP"
     assert alert.direction == "BULLISH"
+
+
+def test_sensex_zero_volume_index_pullback_no_fake_dryup_and_builds_hedge_plan(monkeypatch):
+    """Spot index bars with 0 volume must never emit VOL_DRYUP_0.00X and must attach a concrete SENSEX hedge_plan."""
+    from bot.alert_templates import render_auto_alert
+
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+    df_5m = _generate_synthetic_trend_df(direction="BEARISH")
+    # Simulate BSE SENSEX spot feed with zero candle volume
+    df_5m["volume"] = 0.0
+    last_ltp = float(df_5m["close"].iloc[-1])
+    test_dt = datetime(2026, 11, 27, 12, 33, tzinfo=IST)
+
+    alert = detect_trend_day_pullback(
+        symbol="SENSEX",
+        df_5m=df_5m,
+        ltp=last_ltp,
+        now_dt=test_dt,
+        exchange="BSE",
+        segment="FNO_INDEX",
+        rvol_val=1.4,
+    )
+
+    assert alert is not None
+    assert alert.exchange == "BFO"
+    sigs = alert.metrics.get("signals", [])
+    assert not any("VOL_DRYUP_0.00" in str(s) for s in sigs)
+    assert alert.metrics.get("pullback_vol_ratio") is None
+    assert alert.metrics.get("is_volume_dryup") is False
+
+    hp = alert.actionable_plan.get("hedge_plan")
+    assert isinstance(hp, dict)
+    assert hp.get("buy_leg") and hp.get("sell_leg")
+
+    alert.actionable_plan["execution_style_mandate"] = "HEDGED_SPREAD_MANDATORY"
+    hp["preferred_vehicle"] = "SPREAD_ONLY"
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "Vol Dryup 0.00X" not in rendered
+    assert "DEFINED-RISK HEDGE SPREAD" in rendered
+    assert "illiquid strikes" not in rendered.lower()
+    assert "EXECUTE HEDGED SPREAD" in rendered

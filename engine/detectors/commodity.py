@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -448,12 +449,32 @@ def detect_commodity_breakouts(
             and (vwap <= 0 or ltp <= vwap * 1.001)
         )
 
+        is_structural_rollover_bull = bool(
+            (is_golden_hours or is_active_mcx_session)
+            and has_real_vwap
+            and low_p > 0
+            and ltp >= vwap * 1.0015
+            and chg_from_low >= 0.70
+            and roc_15m >= 0.15
+            and rvol >= 1.05
+        )
+        is_structural_rollover_bear = bool(
+            (is_golden_hours or is_active_mcx_session)
+            and has_real_vwap
+            and high_p > 0
+            and ltp <= vwap * 0.9985
+            and chg_from_high >= 0.70
+            and roc_15m <= -0.15
+            and rvol >= 1.05
+        )
+
         has_bull_chg = (
             (chg_prev >= min_chg)
             or (chg_open >= min_chg)
             or (chg_from_low >= min_chg * 1.2 and roc_15m >= 0.5)
             or is_golden_thrust_bull
             or is_mcx_open_drive_bull
+            or is_structural_rollover_bull
         )
         has_bear_chg = (
             (chg_prev <= -min_chg)
@@ -461,7 +482,19 @@ def detect_commodity_breakouts(
             or (chg_from_high >= min_chg * 1.2 and roc_15m <= -0.5)
             or is_golden_thrust_bear
             or is_mcx_open_drive_bear
+            or is_structural_rollover_bear
         )
+        # Prevent stale morning drift from triggering flat daytime option/futures alerts
+        if (
+            is_authentic_live
+            and not is_golden_hours
+            and not is_opening_drive_window
+            and rvol < 1.10
+        ):
+            if roc_15m < 0.12:
+                has_bull_chg = False
+            if roc_15m > -0.12:
+                has_bear_chg = False
 
         # Smart Money Concepts (SMC) & Market Structure Analysis
         smc_report = None
@@ -716,6 +749,7 @@ def detect_commodity_breakouts(
                     logger.debug(f"[CommodityDetector] 1m micro-rejection calc error: {e_1m_calc}")
 
             # UTAD: Poked above prior_high or round strike (e.g. 8824 >= 8800), then failed back below on volume
+            _allow_1m_override = bool(is_1m_micro_bear and (not is_authentic_live or rvol >= 1.10))
             has_utad_poke = (
                 peak_recent >= prior_high * 0.9995
                 or peak_recent >= nearest_round_high
@@ -724,15 +758,18 @@ def detect_commodity_breakouts(
             if (
                 not is_locked_bear
                 and has_utad_poke
-                and (ltp <= nearest_round_high or ltp <= prior_high * 0.998 or is_1m_micro_bear)
-                and (cur_close <= cur_open or ltp <= cur_open or is_1m_micro_bear)
-                and (bear_close_ratio >= 0.45 or upper_wick_ratio >= 0.35 or is_1m_micro_bear)
-                and (roc_15m <= -0.15 or is_1m_micro_bear)
-                and (rvol >= 1.10 or is_1m_micro_bear)
+                and (ltp <= nearest_round_high or ltp <= prior_high * 0.998 or _allow_1m_override)
+                and (cur_close <= cur_open or ltp <= cur_open or _allow_1m_override)
+                and (bear_close_ratio >= 0.45 or upper_wick_ratio >= 0.35 or _allow_1m_override)
+                and (roc_15m <= -0.15 or _allow_1m_override)
+                and (rvol >= 1.10 or (not is_authentic_live and is_1m_micro_bear))
             ):
                 is_utad_bear = True
 
             # Spring: Poked below prior_low or round strike, then reclaimed above on volume
+            _allow_1m_bull_override = bool(
+                is_1m_micro_bull and (not is_authentic_live or rvol >= 1.10)
+            )
             has_spring_poke = (
                 trough_recent <= prior_low * 1.0005
                 or trough_recent <= nearest_round_low
@@ -741,11 +778,15 @@ def detect_commodity_breakouts(
             if (
                 not is_locked_bull
                 and has_spring_poke
-                and (ltp >= nearest_round_low or ltp >= prior_low * 1.002 or is_1m_micro_bull)
-                and (cur_close >= cur_open or ltp >= cur_open or is_1m_micro_bull)
-                and (bull_close_ratio >= 0.45 or lower_wick_ratio >= 0.35 or is_1m_micro_bull)
-                and (roc_15m >= 0.15 or is_1m_micro_bull)
-                and (rvol >= 1.10 or is_1m_micro_bull)
+                and (
+                    ltp >= nearest_round_low or ltp >= prior_low * 1.002 or _allow_1m_bull_override
+                )
+                and (cur_close >= cur_open or ltp >= cur_open or _allow_1m_bull_override)
+                and (
+                    bull_close_ratio >= 0.45 or lower_wick_ratio >= 0.35 or _allow_1m_bull_override
+                )
+                and (roc_15m >= 0.15 or _allow_1m_bull_override)
+                and (rvol >= 1.10 or (not is_authentic_live and is_1m_micro_bull))
             ):
                 is_spring_bull = True
 
@@ -808,20 +849,31 @@ def detect_commodity_breakouts(
                 hit_resistance = True
                 res_reason = f"Supply Zone Resistance (₹{peak_recent:,.1f})"
 
+            min_pb_rvol = 1.15 if not is_golden_hours else 1.00
             has_bear_rejection = (
                 upper_wick_ratio >= 0.14 or cur_close < cur_open or is_1m_micro_bear
             ) and (cur_close < cur_high or is_1m_micro_bear)
+            bear_pb_vwap_ok = (
+                (vwap <= 0)
+                or (ltp <= vwap * 1.0015)
+                or (upper_wick_ratio >= 0.35 and cur_close < cur_open)
+            )
+            bear_pb_rsi_ok = (not is_authentic_live) or (rsi_5m is None) or (rsi_5m <= 62.0)
             if (
                 not is_locked_bear
                 and macro_bear
                 and has_bear_pullback
                 and hit_resistance
                 and has_bear_rejection
+                and bear_pb_vwap_ok
+                and bear_pb_rsi_ok
+                and (not is_authentic_live or rvol >= min_pb_rvol)
             ):
                 is_pullback_bear = True
                 pullback_notes.append(f"Pullback Fade at {res_reason}")
 
             # B. Bullish Pullback Bounce (Buy the Dip in an Uptrend):
+            # Never qualify a falling knife below VWAP or in oversold breakdown (RSI < 38) as an uptrend dip.
             macro_bull = (
                 chg_prev >= 0.6 or chg_open >= 0.6 or (vwap > 0 and ltp >= vwap * 1.002)
             ) and (ema20_15m == 0.0 or ema50_15m == 0.0 or ema20_15m >= ema50_15m * 0.998)
@@ -846,12 +898,25 @@ def detect_commodity_breakouts(
             has_bull_bounce = (
                 lower_wick_ratio >= 0.14 or cur_close > cur_open or is_1m_micro_bull
             ) and (cur_close > cur_low or is_1m_micro_bull)
+            bull_pb_vwap_ok = (
+                (vwap <= 0)
+                or (ltp >= vwap * 0.9985)
+                or (
+                    lower_wick_ratio >= 0.35
+                    and cur_close > cur_open
+                    and (rsi_5m is None or rsi_5m >= 40.0)
+                )
+            )
+            bull_pb_rsi_ok = (not is_authentic_live) or (rsi_5m is None) or (rsi_5m >= 38.0)
             if (
                 not is_locked_bull
                 and macro_bull
                 and has_bull_pullback
                 and hit_support
                 and has_bull_bounce
+                and bull_pb_vwap_ok
+                and bull_pb_rsi_ok
+                and (not is_authentic_live or rvol >= min_pb_rvol)
             ):
                 is_pullback_bull = True
                 pullback_notes.append(f"Dip Reclaim at {sup_reason}")
@@ -873,7 +938,7 @@ def detect_commodity_breakouts(
             )
 
             if transition_gate_passed:
-                if (
+                cand_bull = (
                     is_donchian_bull
                     or is_vwap_trend_bull
                     or is_smc_bull
@@ -881,10 +946,8 @@ def detect_commodity_breakouts(
                     or is_spring_bull
                     or is_pullback_bull
                     or is_mcx_open_drive_bull
-                ):
-                    is_bullish = True
-                    is_donchian_breakout = is_donchian_bull
-                elif (
+                )
+                cand_bear = (
                     is_donchian_bear
                     or is_vwap_trend_bear
                     or is_smc_bear
@@ -892,17 +955,36 @@ def detect_commodity_breakouts(
                     or is_utad_bear
                     or is_pullback_bear
                     or is_mcx_open_drive_bear
-                ):
+                )
+                # Suppress counter-VWAP side BEFORE direction priority selection so a weak pullback tag
+                # does not shadow a valid trend-aligned reversal on the VWAP side of the tape.
+                if (is_golden_hours or is_authentic_live) and has_real_vwap:
+                    if ltp <= vwap * 0.9985 and not (is_spring_bull and rvol >= 1.2):
+                        cand_bull = False
+                    if ltp >= vwap * 1.0015 and not (is_utad_bear and rvol >= 1.2):
+                        cand_bear = False
+
+                if cand_bull and not cand_bear:
+                    is_bullish = True
+                    is_donchian_breakout = is_donchian_bull
+                elif cand_bear and not cand_bull:
                     is_bearish = True
                     is_donchian_breakout = is_donchian_bear
+                elif cand_bull and cand_bear:
+                    # Prefer explicit structural reversal or VWAP side when both trigger simultaneously
+                    if has_real_vwap and ltp < vwap:
+                        is_bearish = True
+                        is_donchian_breakout = is_donchian_bear
+                    else:
+                        is_bullish = True
+                        is_donchian_breakout = is_donchian_bull
 
-            # Golden Hours (17:30 - 22:30 IST) Trend-Following Invariant:
-            # During the US active pit session, strictly veto counter-trend bets against VWAP,
-            # UNLESS a confirmed Wyckoff UTAD, Spring, or Pullback Rejection is triggered.
-            if is_golden_hours and has_real_vwap:
-                if ltp >= vwap * 1.001 and not (is_utad_bear or is_pullback_bear):
+            # Session-Wide VWAP Trend-Following Invariant:
+            # Ban counter-VWAP bets unless a verified high-RVOL reversal (Wyckoff Spring/UTAD) triggered.
+            if (is_golden_hours or is_authentic_live) and has_real_vwap:
+                if ltp >= vwap * 1.0015 and not (is_utad_bear and rvol >= 1.2):
                     is_bearish = False  # Strictly ban counter-trend shorts / PE buys above VWAP
-                elif ltp <= vwap * 0.999 and not (is_spring_bull or is_pullback_bull):
+                elif ltp <= vwap * 0.9985 and not (is_spring_bull and rvol >= 1.2):
                     is_bullish = False  # Strictly ban counter-trend longs / CE buys below VWAP
         else:
             strict_min_chg = max(min_chg * 1.2, 0.9)
@@ -953,14 +1035,22 @@ def detect_commodity_breakouts(
                 else (18.0 if (is_donchian_bear or is_thrust_bear or is_smc_bear) else 26.0)
             )
 
-            if is_bullish and (rsi_5m > max_bull_rsi or (rsi_5m > 66.0 and has_bearish_div)):
+            if is_bullish and (
+                rsi_5m > max_bull_rsi
+                or (rsi_5m > 66.0 and has_bearish_div)
+                or (rsi_5m < 38.0 and not (is_spring_bull and rvol >= 1.5))
+            ):
                 logger.debug(
-                    f"[CommodityDetector] Suppressed bullish {clean_sym}: Overbought RSI ({rsi_5m:.1f} > {max_bull_rsi}) exhaustion/divergence risk"
+                    f"[CommodityDetector] Suppressed bullish {clean_sym}: RSI corridor breach ({rsi_5m:.1f}; min=38.0, max={max_bull_rsi})"
                 )
                 continue
-            elif is_bearish and (rsi_5m < min_bear_rsi or (rsi_5m < 32.0 and has_bullish_div)):
+            elif is_bearish and (
+                rsi_5m < min_bear_rsi
+                or (rsi_5m < 32.0 and has_bullish_div)
+                or (rsi_5m > 62.0 and not (is_utad_bear and rvol >= 1.5))
+            ):
                 logger.debug(
-                    f"[CommodityDetector] Suppressed bearish {clean_sym}: Oversold RSI ({rsi_5m:.1f} < {min_bear_rsi}) washout/divergence risk"
+                    f"[CommodityDetector] Suppressed bearish {clean_sym}: RSI corridor breach ({rsi_5m:.1f}; min={min_bear_rsi}, max=62.0)"
                 )
                 continue
 
@@ -1229,17 +1319,40 @@ def detect_commodity_breakouts(
         if smc_report is not None:
             if smc_report.confirmation_confirmed and smc_report.confirmation_candle:
                 cand_name = str(smc_report.confirmation_candle).strip()
-                has_wick_tag = any(
-                    "shooting star" in t.lower()
-                    or "rejection wick" in t.lower()
-                    or "pin bar" in t.lower()
-                    for t in smc_tags
+                cand_low = cand_name.lower()
+                is_bear_candle = any(
+                    k in cand_low
+                    for k in (
+                        "shooting star",
+                        "bearish",
+                        "evening star",
+                        "gravestone",
+                        "dark cloud",
+                    )
                 )
-                if not (
-                    has_wick_tag
-                    and any(k in cand_name.lower() for k in ("pin bar", "shooting star", "hammer"))
-                ):
-                    smc_tags.append(f"Confirmed: {cand_name}")
+                is_bull_candle = any(
+                    k in cand_low
+                    for k in ("hammer", "bullish", "morning star", "piercing", "dragonfly")
+                )
+                if (is_bullish and is_bear_candle) or (is_bearish and is_bull_candle):
+                    if is_authentic_live and not (is_spring_bull or is_utad_bear):
+                        logger.info(
+                            f"[CommodityDetector] 🛑 Opposing confirmation candle ({cand_name}) vetoed {clean_sym} direction"
+                        )
+                        is_bullish = False
+                        is_bearish = False
+                else:
+                    has_wick_tag = any(
+                        "shooting star" in t.lower()
+                        or "rejection wick" in t.lower()
+                        or "pin bar" in t.lower()
+                        for t in smc_tags
+                    )
+                    if not (
+                        has_wick_tag
+                        and any(k in cand_low for k in ("pin bar", "shooting star", "hammer"))
+                    ):
+                        smc_tags.append(f"Confirmed: {cand_name}")
 
             if smc_report.divergence_type and smc_report.divergence_bias:
                 div_bias = smc_report.divergence_bias
@@ -1263,7 +1376,22 @@ def detect_commodity_breakouts(
         ):
             if smc_report.confirmation_confirmed is False and rvol < 1.5:
                 if is_bullish or is_bearish:
-                    smc_tags.append("⚠️ Awaiting Candle Confirmation")
+                    counter_vwap_unconfirmed = bool(
+                        has_real_vwap
+                        and (
+                            (is_bullish and ltp < vwap * 0.999)
+                            or (is_bearish and ltp > vwap * 1.001)
+                        )
+                    )
+                    if is_authentic_live and (counter_vwap_unconfirmed or rvol < 1.35):
+                        logger.info(
+                            f"[CommodityDetector] 🛑 Unconfirmed {smc_report.setup_type} on {clean_sym} "
+                            f"(RVOL={rvol:.2f}x, ltp=₹{ltp:,.1f} vs VWAP=₹{vwap:,.1f}); suppressing knife-catch."
+                        )
+                        is_bullish = False
+                        is_bearish = False
+                    else:
+                        smc_tags.append("⚠️ Awaiting Candle Confirmation")
 
         # Volume Profile
         if df_5m is not None and len(df_5m) >= 10:
@@ -1421,12 +1549,23 @@ def detect_commodity_breakouts(
                 logger.debug(f"[CommodityDetector] MTF check exception: {e_mtf}")
 
         if mtf_data:
-            if mtf_data.get("wall_collision") and rvol < 1.8 and is_authentic_live:
-                logger.info(
-                    f"[CommodityDetector] 🛑 Suppressed {clean_sym}: 1H structural wall collision within {mtf_data.get('distance_pct', 0.0)}% and RVOL {rvol}x < 1.8x."
+            mtf_align_count = int(mtf_data.get("alignment_count", 0) or 0)
+            is_active_breakout_extension = bool(
+                rvol >= 1.15
+                and (
+                    is_donchian_breakout
+                    or is_utad_bear
+                    or is_spring_bull
+                    or (is_golden_hours and mtf_align_count >= 2)
                 )
-                continue
-            mtf_align_count = mtf_data.get("alignment_count", 0)
+            )
+            if mtf_data.get("wall_collision") and rvol < 1.8 and is_authentic_live:
+                if not is_active_breakout_extension:
+                    logger.info(
+                        f"[CommodityDetector] 🛑 Suppressed {clean_sym}: 1H structural wall collision within {mtf_data.get('distance_pct', 0.0)}% and RVOL {rvol}x < 1.8x."
+                    )
+                    continue
+                smc_tags.append(f"Breaking 1H Pivot ({mtf_data.get('distance_pct', 0.0)}%)")
             if mtf_align_count >= 2:
                 smc_tags.append(f"MTF Trend Aligned ({mtf_align_count}/3)")
 
@@ -1453,14 +1592,15 @@ def detect_commodity_breakouts(
         if is_bullish:
             if is_pullback_bull:
                 sl_price = round(cur_low - max(0.20 * base_atr, 4.0), 2)
+                pb_risk = max(1.0, abs(ltp - sl_price))
                 t1_target = (
                     peak_recent
-                    if (peak_recent > 0 and peak_recent > (ltp + 1.5 * abs(ltp - sl_price)))
-                    else round(ltp + 2.5 * abs(ltp - sl_price), 2)
+                    if (peak_recent > 0 and peak_recent > (ltp + 1.5 * pb_risk))
+                    else round(ltp + 2.5 * pb_risk, 2)
                 )
                 t1_price = round(t1_target, 2)
-                t2_price = round(ltp + 4.5 * abs(ltp - sl_price), 2)
-                t3_price = round(ltp + 7.5 * abs(ltp - sl_price), 2)
+                t2_price = round(max(ltp + 4.5 * pb_risk, t1_price + max(1.0, 1.5 * pb_risk)), 2)
+                t3_price = round(max(ltp + 7.5 * pb_risk, t2_price + max(1.5, 2.0 * pb_risk)), 2)
             else:
                 sl_price = round(ltp - risk_pts, 2)
                 default_t1 = round(ltp + 2.8 * risk_pts, 2)
@@ -1546,14 +1686,15 @@ def detect_commodity_breakouts(
         else:
             if is_pullback_bear:
                 sl_price = round(cur_high + max(0.20 * base_atr, 4.0), 2)
+                pb_risk = max(1.0, abs(sl_price - ltp))
                 t1_target = (
                     trough_recent
-                    if (trough_recent > 0 and trough_recent < (ltp - 1.5 * abs(sl_price - ltp)))
-                    else round(ltp - 2.5 * abs(sl_price - ltp), 2)
+                    if (trough_recent > 0 and trough_recent < (ltp - 1.5 * pb_risk))
+                    else round(ltp - 2.5 * pb_risk, 2)
                 )
                 t1_price = round(t1_target, 2)
-                t2_price = round(ltp - 4.5 * abs(sl_price - ltp), 2)
-                t3_price = round(ltp - 7.5 * abs(sl_price - ltp), 2)
+                t2_price = round(min(ltp - 4.5 * pb_risk, t1_price - max(1.0, 1.5 * pb_risk)), 2)
+                t3_price = round(min(ltp - 7.5 * pb_risk, t2_price - max(1.5, 2.0 * pb_risk)), 2)
             else:
                 sl_price = round(ltp + risk_pts, 2)
                 default_t1 = round(ltp - 2.8 * risk_pts, 2)
@@ -1675,12 +1816,55 @@ def detect_commodity_breakouts(
                 )
 
                 opt_type = "CE" if is_bullish else "PE"
-                filtered = [
+                from datetime import date as _date
+
+                _today_ist = now_ist.date() if hasattr(now_ist, "date") else _date.today()
+
+                def _is_unexpired_opt(contract: Any) -> bool:
+                    exp_raw = getattr(contract, "expiry", None)
+                    if isinstance(exp_raw, _date):
+                        exp_d = exp_raw.date() if hasattr(exp_raw, "hour") else exp_raw
+                        return exp_d >= _today_ist
+                    if isinstance(exp_raw, str) and exp_raw.strip():
+                        raw_str = exp_raw.strip()
+                        try:
+                            return _date.fromisoformat(raw_str[:10]) >= _today_ist
+                        except ValueError as e_iso_exp:
+                            logger.debug(
+                                f"[commodity] ISO expiry parse fallback for {raw_str}: {e_iso_exp}"
+                            )
+                        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+                            try:
+                                parsed = datetime.strptime(raw_str, fmt)
+                                if isinstance(parsed, datetime):
+                                    return parsed.date() >= _today_ist
+                            except (TypeError, ValueError):
+                                continue
+                        return False
+                    sym_str = str(getattr(contract, "symbol", "") or "")
+                    m_iso = re.search(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", sym_str)
+                    if m_iso:
+                        try:
+                            return (
+                                _date(int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3)))
+                                >= _today_ist
+                            )
+                        except ValueError:
+                            return False
+                    return True
+
+                raw_filtered = [
                     c
                     for c in chain
                     if getattr(c, "option_type", "") == opt_type
                     and float(getattr(c, "last_price", 0.0) or 0.0) > 0
                 ]
+                unexpired_opts = [c for c in raw_filtered if _is_unexpired_opt(c)]
+                filtered = (
+                    unexpired_opts
+                    if (unexpired_opts or not (is_test_env or is_mock_chain))
+                    else raw_filtered
+                )
                 if filtered:
                     atm_band = ltp * 0.03
                     atm_candidates = [
@@ -1716,6 +1900,8 @@ def detect_commodity_breakouts(
                         delta_tier = "OTM (Δ<0.40)"
 
                     dte_warning = None
+                    opt_exp_iso = None
+                    opt_dte_val = None
                     try:
                         expiry = getattr(closest_opt, "expiry", None)
                         if expiry:
@@ -1726,6 +1912,7 @@ def detect_commodity_breakouts(
                                 if isinstance(expiry, _date)
                                 else _date.fromisoformat(str(expiry)[:10])
                             )
+                            opt_exp_iso = exp_date.isoformat()
                             try:
                                 from config.constants import now_ist as _now_ist_fn
 
@@ -1733,6 +1920,7 @@ def detect_commodity_breakouts(
                             except Exception:
                                 _today_ist = _date.today()
                             dte = (exp_date - _today_ist).days
+                            opt_dte_val = dte
                             if dte <= 5:
                                 dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
                     except Exception as e_suppressed:
@@ -1748,35 +1936,107 @@ def detect_commodity_breakouts(
                     opt_runner = round(opt_prem + 7.5 * opt_risk, 1)
                     opt_no_chase = round(opt_prem + 0.15 * opt_risk, 1)
 
-                    opt_rr_calc = round(
-                        abs(opt_t1 - opt_prem) / max(0.01, abs(opt_prem - opt_sl)), 1
-                    )
-                    opt_rr_str = f"1:{opt_rr_calc}"
+                    try:
+                        from engine.option_target_calibration import (
+                            compute_option_adr_headroom_targets,
+                            evaluate_option_friction_viability,
+                        )
 
-                    readable_contract = format_readable_option_symbol(
-                        closest_opt.symbol,
-                        strike=strike_val,
-                        option_type=opt_type,
-                        expiry=getattr(closest_opt, "expiry", None),
-                    )
-                    opt_recommendation = {
-                        "contract": closest_opt.symbol,
-                        "readable_contract": readable_contract,
-                        "strike": strike_val,
-                        "option_type": opt_type,
-                        "ltp": opt_prem,
-                        "stop_loss": opt_sl,
-                        "target_1": opt_t1,
-                        "target_2": opt_t2,
-                        "target_3": opt_runner,
-                        "runner_target": opt_runner,
-                        "no_chase_boundary": opt_no_chase,
-                        "risk_reward": opt_rr_str,
-                        "max_loss_capped": round(opt_prem * lot_sz, 0),
-                        "delta_tier": delta_tier,
-                        "dte_warning": dte_warning,
-                        "is_synthetic": is_synthetic_options,
-                    }
+                        _mcx_adr_est = (
+                            round(base_atr * 12.0, 2) if base_atr and base_atr > 0 else None
+                        )
+                        _mcx_cal = compute_option_adr_headroom_targets(
+                            spot=ltp,
+                            opt_ltp=opt_prem,
+                            opt_sl=opt_sl,
+                            raw_t1=opt_t1,
+                            option_type=opt_type,
+                            strike=strike_val,
+                            dte_days=opt_dte_val,
+                            spot_atr=_mcx_adr_est,
+                            day_high=high_p if high_p > 0 else None,
+                            day_low=low_p if low_p > 0 else None,
+                            now_dt=now_ist,
+                            segment="COMMODITY",
+                            min_rr=1.25,
+                        )
+                        if _mcx_cal.was_adr_capped:
+                            opt_t1 = round(_mcx_cal.calibrated_t1, 1)
+                            opt_t2 = round(min(opt_t2, _mcx_cal.calibrated_t2), 1)
+                            opt_runner = round(min(opt_runner, _mcx_cal.calibrated_t3), 1)
+                        # Enforce strict monotonic option target hierarchy (opt_ltp < T1 < T2 < T3)
+                        min_step = max(0.5, round(opt_risk * 0.5, 1))
+                        if opt_t2 <= opt_t1:
+                            opt_t2 = round(opt_t1 + min_step, 1)
+                        if opt_runner <= opt_t2:
+                            opt_runner = round(opt_t2 + min_step, 1)
+
+                        _mcx_bid = float(
+                            getattr(closest_opt, "best_bid", 0.0)
+                            or getattr(closest_opt, "bid", 0.0)
+                            or 0.0
+                        )
+                        _mcx_ask = float(
+                            getattr(closest_opt, "best_ask", 0.0)
+                            or getattr(closest_opt, "ask", 0.0)
+                            or 0.0
+                        )
+                        _mcx_fric = evaluate_option_friction_viability(
+                            entry_price=opt_prem,
+                            target_1=opt_t1,
+                            stop_loss=opt_sl,
+                            quantity=lot_sz,
+                            bid=_mcx_bid,
+                            ask=_mcx_ask,
+                            segment="COMMODITY",
+                            max_spread_pct=5.5,
+                            max_friction_drag_pct=28.0,
+                            min_net_rr=1.05,
+                        )
+                        if is_authentic_live and not _mcx_fric["viable"]:
+                            logger.info(
+                                f"[CommodityDetector] Option {closest_opt.symbol} rejected pre-creation on friction/spread: {_mcx_fric['reason']}; routing to Futures."
+                            )
+                            closest_opt = None
+                    except Exception as _e_mcx_cal:
+                        logger.debug(
+                            f"[CommodityDetector] Option ADR/friction calibration skipped for {clean_sym}: {_e_mcx_cal}"
+                        )
+
+                    if closest_opt is None:
+                        opt_recommendation = None
+                    else:
+                        opt_rr_calc = round(
+                            abs(opt_t1 - opt_prem) / max(0.01, abs(opt_prem - opt_sl)), 1
+                        )
+                        opt_rr_str = f"1:{opt_rr_calc}"
+
+                        readable_contract = format_readable_option_symbol(
+                            closest_opt.symbol,
+                            strike=strike_val,
+                            option_type=opt_type,
+                            expiry=opt_exp_iso or getattr(closest_opt, "expiry", None),
+                        )
+                        opt_recommendation = {
+                            "contract": closest_opt.symbol,
+                            "readable_contract": readable_contract,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "expiry": opt_exp_iso,
+                            "dte": opt_dte_val,
+                            "ltp": opt_prem,
+                            "stop_loss": opt_sl,
+                            "target_1": opt_t1,
+                            "target_2": opt_t2,
+                            "target_3": opt_runner,
+                            "runner_target": opt_runner,
+                            "no_chase_boundary": opt_no_chase,
+                            "risk_reward": opt_rr_str,
+                            "max_loss_capped": round(opt_prem * lot_sz, 0),
+                            "delta_tier": delta_tier,
+                            "dte_warning": dte_warning,
+                            "is_synthetic": is_synthetic_options,
+                        }
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Options chain resolution error: {e}")
                 opt_recommendation = None
@@ -1836,9 +2096,11 @@ def detect_commodity_breakouts(
         )
 
         # Strict Institutional Options Safety Filter:
-        # Naked option buying on MCX is only prioritized for ATM/ITM (Delta >= 0.50)
-        # during US Golden Hours (17:30 - 22:30 IST) or when institutional thrust is confirmed (RVOL >= 1.5).
-        # Outside these conditions, Futures is the primary vehicle to eliminate theta decay and wide spreads.
+        # Naked option buying on MCX requires BOTH ATM/ITM Delta (>= 0.50) AND either
+        # US Golden Hours (17:30 - 22:30 IST) with >= 1.15x volume OR verified institutional
+        # thrust (RVOL >= 1.75 / CVD >= 2.0 / squeeze fire). Outside those conditions
+        # (including dead 15:30 - 17:30 pre-US overlap), default to Futures to eliminate
+        # 45m theta stagnation scratches.
         opt_delta_safe = bool(
             opt_recommendation
             and opt_recommendation.get("delta_tier") in ("ATM (Δ≈0.50)", "ITM (Δ>0.50)")
@@ -1848,12 +2110,11 @@ def detect_commodity_breakouts(
             not is_base_metal
             and opt_recommendation
             and not is_synthetic_options
-            and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
+            and (opt_delta_safe or not is_authentic_live)
             and (
-                is_golden_hours
-                or is_active_mcx_session
-                or rvol >= 1.5
-                or os.environ.get("CHANAKYA_TESTING") == "1"
+                (is_golden_hours and rvol >= 1.15)
+                or (rvol >= 1.75 and (roc_15m >= 0.35 if is_bullish else roc_15m <= -0.35))
+                or not is_authentic_live
             )
         )
 
@@ -2185,6 +2446,11 @@ def detect_commodity_breakouts(
             )
 
         final_conf = min(94, base_conf + conf_boost)
+        if is_authentic_live:
+            _mtf_cnt = int(mtf_data.get("alignment_count", 1)) if mtf_data else 1
+            _chop_v = float(chop_idx) if "chop_idx" in locals() and chop_idx is not None else 0.0
+            if rvol < 1.10 or _chop_v >= 58.0 or _mtf_cnt == 0:
+                final_conf = min(final_conf, 76)
 
         if should_use_option_primary and opt_recommendation:
             primary_ltp = opt_recommendation["ltp"]
@@ -2308,6 +2574,8 @@ def detect_commodity_breakouts(
             alert.derivative_type = "OPT"
             alert.strike = opt_recommendation["strike"]
             alert.option_type = opt_recommendation["option_type"]
+            if opt_recommendation.get("expiry"):
+                alert.expiry_date = opt_recommendation["expiry"]
             alert.option_premium = opt_recommendation["ltp"]
             alert.option_stop_loss = opt_recommendation["stop_loss"]
             alert.option_target_1 = opt_recommendation["target_1"]
@@ -2326,6 +2594,8 @@ def detect_commodity_breakouts(
             alert.option_premium = None
             alert.underlying_spot = ltp
 
+        if hasattr(alert, "normalize_target_hierarchy"):
+            alert.normalize_target_hierarchy()
         found.append(alert)
 
     return found

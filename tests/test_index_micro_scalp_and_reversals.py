@@ -205,7 +205,7 @@ def test_predatory_reversal_interception_logic():
         summary="Nifty Put Setup on structural reversal",
         ltp=158.0,
         trigger_level=158.0,
-        target_level=210.0,
+        target_level=225.0,
         stop_loss=118.0,
         confidence=95,
         underlying_spot=22540.0,

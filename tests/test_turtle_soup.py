@@ -129,3 +129,153 @@ def test_turtle_soup_genuine_breakout_ignored():
     alert = detect_turtle_soup_sweep("NSE:HDFCBANK", df=df, ltp=prior_high + 23.0)
     # Genuine breakout should NOT trigger a Turtle Soup reversal!
     assert alert is None
+
+
+def test_turtle_soup_option_contract_rendering_bearish_and_bullish(monkeypatch):
+    """
+    Regression test for RVNL 195 PE coordinate collision & Lot=1 leak:
+    Verifies both BEARISH (PE) and BULLISH (CE) TURTLE_SOUP_SWEEP alerts with
+    resolved option contracts render in option-premium coordinates with real lot sizes,
+    never mixing spot entry (e.g. ₹191.0) with option SL/targets (₹9.38 / ₹12.69).
+    """
+    from unittest.mock import patch
+    from bot.alert_templates import render_asymmetric_alert, render_auto_alert
+    from engine.option_resolver import ResolvedOptionPlan
+
+    # 1. Legacy/dict payload matching the exact RVNL 195 PE live incident
+    legacy_rvnl = {
+        "alert_id": "aa-turtle-soup-sweep-rvnl-upthrust-20261127",
+        "alert_type": "TURTLE_SOUP_SWEEP",
+        "symbol": "RVNL",
+        "segment": "FNO_STOCK",
+        "direction": "BEARISH",
+        "confidence": 82,
+        "ltp": 11.04,
+        "trigger_level": 11.04,
+        "stop_loss": 9.38,
+        "target_level": 12.69,
+        "underlying_spot": 191.41,
+        "structural_spot_sl": 194.20,
+        "contract_symbol": "NFO:RVNL26DEC195PE",
+        "strike": 195.0,
+        "option_type": "PE",
+        "option_premium": 11.04,
+        "expiry_date": "2026-12-29",
+        "lot_size": 1,  # Legacy leaked placeholder default
+        "signal_ref": "#SIG_RVNL_195PE_27NOV_1255",
+        "actionable_plan": {
+            "action": "BUY_PUT",
+            "entry_range": "₹10.82 – ₹11.26",
+            "trigger_level": 11.04,
+            "stop_loss": "₹9.38",
+            "target_1": "₹12.69",
+            "target_2": "₹14.35",
+            "risk_reward": "1:2.2",
+            "no_chase_boundary": 11.59,
+            "lot_size": 1,
+            "underlying_sl": "₹194.20",
+        },
+    }
+
+    msg_legacy = render_asymmetric_alert(legacy_rvnl, in_market=True)
+    assert "TURTLE SOUP SHORT (BEARISH UPTHRUST)" in msg_legacy
+    assert "Action: BUY RVNL 195 PE" in msg_legacy
+    assert "₹10.82 – ₹11.26" in msg_legacy
+    assert "(Lot: 1925)" in msg_legacy
+    assert "Lot: 1)" not in msg_legacy
+    assert "SHORT (SELL)" not in msg_legacy
+    assert "₹191.0 – ₹191.8" not in msg_legacy
+    assert "Risk: ₹182.03" not in msg_legacy
+    assert "SL (Option):</b> <code>₹9.38</code> (Risk: ₹1.66 | ₹3,196/lot)" in msg_legacy
+    assert "Structural SL (Spot):</b> <code>₹194.20</code>" in msg_legacy
+    assert "T1 (+2R):</b> <code>₹12.69</code>" in msg_legacy
+    assert "T2 (+4R):</b> <code>₹14.35</code>" in msg_legacy
+    assert "(Downside)" not in msg_legacy
+
+    # 2. Full detector -> AutoAlert -> render_auto_alert for BEARISH Upthrust (PE)
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *args, **kwargs: None)
+    df_bear = _generate_synthetic_base(n_bars=22, base_price=190.0)
+    prior_high = float(df_bear["high"].iloc[:-2].max())
+    df_bear.iloc[-1] = {
+        "open": prior_high - 1.0,
+        "high": prior_high + 1.2,
+        "low": prior_high - 2.0,
+        "close": prior_high - 1.2,
+        "volume": 35000.0,
+    }
+    spot_bear = prior_high - 1.2
+
+    mock_pe = ResolvedOptionPlan(
+        contract_symbol="NFO:RVNL26DEC195PE",
+        strike=195.0,
+        option_type="PE",
+        entry_premium=11.04,
+        sl_premium=9.38,
+        t1_premium=12.69,
+        t2_premium=14.35,
+        t3_premium=17.50,
+        lot_size=1925,
+        underlying_spot=spot_bear,
+        underlying_sl=round(prior_high + 2.0, 2),
+        underlying_target=round(spot_bear - 6.0, 2),
+        expiry="2026-12-29",
+    )
+
+    with patch("engine.detectors.turtle_soup.resolve_option_contract", return_value=mock_pe):
+        bear_alert = detect_turtle_soup_sweep(
+            "NSE:RVNL", df=df_bear, ltp=spot_bear, session_date=date(2026, 11, 27)
+        )
+
+    assert bear_alert is not None
+    assert bear_alert.lot_size == 1925
+    assert bear_alert.expiry_date == "2026-12-29"
+    assert bear_alert.actionable_plan["lot_size"] == 1925
+    assert bear_alert.actionable_plan["option_plan"]["contract_symbol"] == "NFO:RVNL26DEC195PE"
+    rendered_bear = render_auto_alert(bear_alert, in_market=True)
+    assert "Action: BUY RVNL 195 PE" in rendered_bear
+    assert "(Lot: 1925)" in rendered_bear
+    assert "SHORT (SELL)" not in rendered_bear
+    assert "Risk: ₹1.66" in rendered_bear
+
+    # 3. Full detector -> AutoAlert -> render_auto_alert for BULLISH Spring (CE)
+    df_bull = _generate_synthetic_base(n_bars=22, base_price=190.0)
+    prior_low = float(df_bull["low"].iloc[:-2].min())
+    df_bull.iloc[-1] = {
+        "open": prior_low + 1.0,
+        "high": prior_low + 2.0,
+        "low": prior_low - 1.1,
+        "close": prior_low + 1.2,
+        "volume": 35000.0,
+    }
+    spot_bull = prior_low + 1.2
+
+    mock_ce = ResolvedOptionPlan(
+        contract_symbol="NFO:RVNL26DEC190CE",
+        strike=190.0,
+        option_type="CE",
+        entry_premium=10.50,
+        sl_premium=8.50,
+        t1_premium=14.50,
+        t2_premium=18.50,
+        t3_premium=22.50,
+        lot_size=1925,
+        underlying_spot=spot_bull,
+        underlying_sl=round(prior_low - 2.0, 2),
+        underlying_target=round(spot_bull + 6.0, 2),
+        expiry="2026-12-29",
+    )
+
+    with patch("engine.detectors.turtle_soup.resolve_option_contract", return_value=mock_ce):
+        bull_alert = detect_turtle_soup_sweep(
+            "NSE:RVNL", df=df_bull, ltp=spot_bull, session_date=date(2026, 11, 27)
+        )
+
+    assert bull_alert is not None
+    assert bull_alert.lot_size == 1925
+    rendered_bull = render_auto_alert(bull_alert, in_market=True)
+    assert "TURTLE SOUP LONG (BULLISH SPRING)" in rendered_bull
+    assert "Action: BUY RVNL 190 CE" in rendered_bull
+    assert "(Lot: 1925)" in rendered_bull
+    assert "SL (Option):</b> <code>₹8.50</code> (Risk: ₹2.00 | ₹3,850/lot)" in rendered_bull
+    assert "T1 (+2R):</b> <code>₹14.50</code>" in rendered_bull
+    assert "T2 (+4R):</b> <code>₹18.50</code>" in rendered_bull

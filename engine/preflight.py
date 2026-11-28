@@ -370,7 +370,9 @@ def run_preflight(verbose: bool = True, force_db_check: bool = False) -> Preflig
 
             if fyers_spec is not None:
                 try:
+                    import market.fyers_socket_patch  # noqa: F401 - ensure pkg_resources shim on Py3.13+
                     from fyers_apiv3 import fyersModel  # noqa: F401
+                    from fyers_apiv3.FyersWebsocket import data_ws, order_ws, tbt_ws  # noqa: F401
 
                     fyers_importable = True
 

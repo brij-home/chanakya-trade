@@ -429,9 +429,12 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                 # Subscribe to missing symbols for next time in background to avoid blocking quote query
                 if missing:
-                    threading.Thread(
-                        target=ws_manager.subscribe, args=(missing,), daemon=True
-                    ).start()
+                    filter_fn = getattr(ws_manager, "filter_unsubscribed", None)
+                    to_sub = filter_fn(missing) if callable(filter_fn) else missing
+                    if to_sub:
+                        threading.Thread(
+                            target=ws_manager.subscribe, args=(to_sub,), daemon=True
+                        ).start()
 
                 if len(result) >= len(instruments):
                     return result
@@ -861,10 +864,67 @@ def _calculate_cost_of_carry_factor(
 def _futures_quotes(
     instruments: list[str], *, correlation_id: str, ws_only: bool = False
 ) -> dict[str, Quote]:
-    """Resolve derivative futures contract quotes via institutional cost-of-carry pricing when broker feed is offline or in paper mode."""
+    """Resolve futures contract quotes from live broker futures_chain first, falling back to tagged synthetic cost-of-carry."""
     res: dict[str, Quote] = {}
+
+    if not ws_only:
+        try:
+            brk = get_data_broker()
+            brk_key = get_data_broker_key() or "fyers"
+            if brk and not getattr(brk, "_is_mock", False) and hasattr(brk, "get_futures_chain"):
+                by_und: dict[str, list[str]] = {}
+                for inst in instruments:
+                    clean = inst.split(":")[-1].strip().upper()
+                    m = _FUT_PATTERN.match(clean)
+                    if m:
+                        by_und.setdefault(m.group(1).upper(), []).append(inst)
+                for und, inst_list in by_und.items():
+                    fc = brk.get_futures_chain(und)
+                    contracts = (
+                        fc.get("contracts", [])
+                        if isinstance(fc, dict) and fc.get("status") == "ok"
+                        else []
+                    )
+                    if not contracts:
+                        continue
+                    for inst in inst_list:
+                        clean = inst.split(":")[-1].strip().upper()
+                        matched = next(
+                            (
+                                c
+                                for c in contracts
+                                if str(c.get("symbol", "")).upper().endswith(clean)
+                                or str(c.get("symbol", "")).split(":")[-1].upper() == clean
+                            ),
+                            contracts[0] if clean.endswith("FUT") else None,
+                        )
+                        if matched and float(matched.get("ltp") or 0.0) > 0:
+                            q = Quote(
+                                symbol=clean,
+                                last_price=float(matched["ltp"]),
+                                volume=int(matched.get("volume") or 0),
+                                change_pct=float(matched.get("change_pct") or 0.0),
+                                bid=matched.get("bid"),
+                                ask=matched.get("ask"),
+                            )
+                            enriched = _enrich_quote(
+                                q,
+                                instrument=inst,
+                                provider=brk_key,
+                                source="REST",
+                                correlation_id=correlation_id,
+                            )
+                            res[inst] = enriched
+                            res[clean] = enriched
+        except Exception as e_fc:
+            logger.debug(f"[market.quotes] Live futures_chain lookup skipped: {e_fc}")
+
+    remaining = [i for i in instruments if i not in res]
+    if not remaining:
+        return res
+
     carry_factor = _calculate_cost_of_carry_factor()
-    for inst in instruments:
+    for inst in remaining:
         clean = inst.split(":")[-1].strip().upper()
         m = _FUT_PATTERN.match(clean)
         if not m:

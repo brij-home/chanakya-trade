@@ -147,7 +147,17 @@ def detect_index_put_setup(
                     underlying,
                 )
                 if clean_sym == "NIFTY"
-                else (clean_sym, f"NSE:{clean_sym}", underlying)
+                else (
+                    (
+                        clean_sym,
+                        f"BSE:{clean_sym}",
+                        f"BSE:{clean_sym}-INDEX",
+                        f"NSE:{clean_sym}",
+                        underlying,
+                    )
+                    if clean_sym in ("SENSEX", "BANKEX")
+                    else (clean_sym, f"NSE:{clean_sym}", underlying)
+                )
             )
         )
         for k in possible_keys:
@@ -303,6 +313,24 @@ def detect_index_put_setup(
         )
         return []
 
+    _pe_lead: dict[str, Any] = {}
+    if clean_sym in ("NIFTY", "BANKNIFTY"):
+        try:
+            from engine.feature_bus import evaluate_index_constituent_confluence
+
+            _pe_lead = evaluate_index_constituent_confluence(
+                clean_sym, "BEARISH", quotes_map=quotes_map
+            )
+            if not is_test_runner and _pe_lead.get("opposed"):
+                logger.info(
+                    f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Heavyweight constituents "
+                    f"strongly bullish ({_pe_lead.get('weighted_impulse_pct', 0.0):+.2f}%, "
+                    f"{_pe_lead.get('bullish_vwap_weight_pct', 0.0):.0f}% > VWAP)."
+                )
+                return []
+        except Exception as _e_pe_lead:
+            logger.debug(f"[IndexPutSetup] Constituent lead check skipped: {_e_pe_lead}")
+
     # ── Effective-Dated Option Entry Cutoff Gate (market.rule_schedule) ───
     # Stop new intraday entries 10 minutes before canonical intraday square-off cutoff
     # (15:05 IST before 2026-12-07 or on expiring-index 0DTE; 15:20 IST from 2026-12-07 on non-expiry).
@@ -345,7 +373,7 @@ def detect_index_put_setup(
         try:
             from market.calendar import is_market_open
 
-            if is_market_open(exchange="NSE"):
+            if is_market_open(exchange=_exch_sched):
                 last_bar_dt = active_ohlcv.index[-1]
                 if hasattr(last_bar_dt, "to_pydatetime"):
                     last_bar_dt = last_bar_dt.to_pydatetime()
@@ -664,6 +692,7 @@ def detect_index_put_setup(
         (cand_pe_pchange >= 10.0 and cand_pe_vol >= min_vol)
         or (cand_pe_pchange >= 10.0 and cand_pe_vol_oi >= 0.35 and cand_pe_vol >= min_vol)
         or (cand_pe_pchange >= 10.0 and cand_pe_vol >= int(min_vol * 1.5))
+        or (bool(_pe_lead.get("aligned")) and cand_pe_vol >= int(min_vol * 0.8))
         or _spot_below_open_escape
         or _is_trend_breakdown_day
     )
@@ -720,10 +749,12 @@ def detect_index_put_setup(
     # Veto when: PCR > 1.45 AND writers are NOT unwinding (put floor cushion building/holding)
     # OR when active intraday Put OI buildup overwhelms Call writing (+25%) while 5m bounce is active
     _pcr_writers_unwinding = pe_oi_change_sum < 0
+    _pe_basket_override = bool(_pe_lead.get("strongly_aligned"))
     if (
         pe_oi_change_sum >= 100_000
         and pe_oi_change_sum >= max(1, ce_oi_change_sum) * 1.25
         and not has_distribution_star
+        and not _pe_basket_override
         and roc_metric.roc_1 >= 0.0
     ):
         logger.info(
@@ -733,7 +764,12 @@ def detect_index_put_setup(
         return []
     # NOT when writers are unwinding (breakdown acceleration)
     _pcr_writers_unwinding = pe_oi_change_sum < 0
-    if chain_pcr is not None and chain_pcr > 1.45 and not _pcr_writers_unwinding:
+    if (
+        chain_pcr is not None
+        and chain_pcr > 1.45
+        and not _pcr_writers_unwinding
+        and not _pe_basket_override
+    ):
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Active Put Writing Cushion "
             f"(PCR: {chain_pcr:.2f} > 1.45, OI change {pe_oi_change_sum:+,}). Floor-building writers resist breakdown."
@@ -3403,6 +3439,36 @@ def detect_index_put_setup(
         )
         return []
 
+    if not is_test_runner and opt_ltp > 0 and t1_premium > opt_ltp and 0 < sl_premium < opt_ltp:
+        try:
+            from engine.option_target_calibration import evaluate_option_friction_viability
+
+            _pe_bid = float(
+                getattr(best_pe, "best_bid", 0.0) or getattr(best_pe, "bid", 0.0) or 0.0
+            )
+            _pe_ask = float(
+                getattr(best_pe, "best_ask", 0.0) or getattr(best_pe, "ask", 0.0) or 0.0
+            )
+            _pe_fric = evaluate_option_friction_viability(
+                entry_price=opt_ltp,
+                target_1=t1_premium,
+                stop_loss=sl_premium,
+                quantity=lot_sz,
+                bid=_pe_bid,
+                ask=_pe_ask,
+                segment="OPTIONS",
+                max_spread_pct=5.5,
+                max_friction_drag_pct=28.0,
+                min_net_rr=1.05,
+            )
+            if not _pe_fric["viable"]:
+                logger.info(
+                    f"[{clean_sym}] Index put setup rejected pre-creation on friction/spread: {_pe_fric['reason']}"
+                )
+                return []
+        except Exception as _e_fric:
+            logger.debug(f"[{clean_sym}] Index put friction check skipped: {_e_fric}")
+
     execution_friction_badge = (
         f"⚠️ WIDE SPREAD ({bid_ask_spread_pct:.1f}%) — STRICT LIMIT ONLY"
         if (bid_ask_spread_pct > 2.5)
@@ -4003,16 +4069,17 @@ def detect_index_put_setup(
             "oi_change": oi_change,
             "volume": volume,
             "vol_oi_ratio": vol_oi_ratio,
-            "rvol": max(
-                1.0,
+            "rvol": (
                 float(
                     signal_tags.get("trend_pullback", {}).get("rvol")
                     or signal_tags.get("supply_zone_sweep", {}).get("rvol")
                     or signal_tags.get("double_top_breakdown", {}).get("rvol")
-                    or round(volume / max(1.0, oi * 0.1), 1)
-                    if oi > 0
-                    else 1.2
-                ),
+                )
+                if any(
+                    signal_tags.get(k, {}).get("rvol")
+                    for k in ("trend_pullback", "supply_zone_sweep", "double_top_breakdown")
+                )
+                else None
             ),
             "spot": spot,
             "vwap": effective_vwap,

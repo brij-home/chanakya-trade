@@ -177,3 +177,47 @@ def test_zero_bare_pass_across_entire_codebase():
         f"Found {len(violations)} bare pass violations across codebase (Invariant 21):\n"
         + "\n".join(violations[:20])
     )
+
+
+def test_zero_external_private_lock_access():
+    """Enforce encapsulation: callers outside a class must never acquire obj._lock directly."""
+    root = Path(__file__).resolve().parent.parent
+    check_dirs = [
+        "engine",
+        "market",
+        "analysis",
+        "agent",
+        "brokers",
+        "web",
+        "app",
+        "bot",
+        "ui",
+        "tools",
+        "scripts",
+    ]
+    violations = []
+
+    for d in check_dirs:
+        dir_path = root / d
+        if not dir_path.exists():
+            continue
+        for py_path in dir_path.rglob("*.py"):
+            try:
+                tree = ast.parse(
+                    py_path.read_text(encoding="utf-8", errors="ignore"), filename=str(py_path)
+                )
+            except Exception:
+                continue
+
+            rel_path = str(py_path.relative_to(root))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr == "_lock":
+                    if isinstance(node.value, ast.Name) and node.value.id in ("self", "cls"):
+                        continue
+                    violations.append(
+                        f"{rel_path}:{node.lineno} -> External private '_lock' access on '{ast.unparse(node.value)}'; expose a public thread-safe method instead."
+                    )
+
+    assert not violations, (
+        f"Found {len(violations)} external private _lock accesses:\n" + "\n".join(violations[:20])
+    )

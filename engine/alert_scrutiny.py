@@ -5622,6 +5622,33 @@ class AlertScrutinyAuditor:
 
         risk_pts = abs(ltp - sl) if sl > 0 else 1.0
         reward_pts = abs(t1 - ltp) if t1 > 0 else 2.5
+
+        # Coordinate Consistency: When an executable option plan is attached, compute
+        # Sniper R:R and Expected Value (EV) in option premium space so EV matches
+        # the executable option ticket (never Spot R:R paired with Option R:R).
+        act_p = getattr(alert, "actionable_plan", None) or (
+            alert.get("actionable_plan") if isinstance(alert, dict) else None
+        )
+        opt_p = act_p.get("option_plan") if isinstance(act_p, dict) else None
+        opt_e = float(
+            getattr(alert, "option_premium", 0.0)
+            or (opt_p.get("entry_premium", 0.0) if isinstance(opt_p, dict) else 0.0)
+            or 0.0
+        )
+        opt_s = float(
+            getattr(alert, "option_stop_loss", 0.0)
+            or (opt_p.get("sl_premium", 0.0) if isinstance(opt_p, dict) else 0.0)
+            or 0.0
+        )
+        opt_t = float(
+            getattr(alert, "option_target_level", 0.0)
+            or (opt_p.get("t1_premium", 0.0) if isinstance(opt_p, dict) else 0.0)
+            or 0.0
+        )
+        if opt_e > 0 and opt_s > 0 and opt_t > opt_e > opt_s:
+            risk_pts = abs(opt_e - opt_s)
+            reward_pts = abs(opt_t - opt_e)
+
         rr_val = round(reward_pts / risk_pts, 2) if risk_pts > 0 else 2.5
 
         # 1. 🦅 EAGLE
@@ -6422,7 +6449,7 @@ class AlertScrutinyAuditor:
                 ],
                 "stream": False,
                 "enable_tools": False,
-                "max_tokens": 900,
+                "max_tokens": 1400,
                 "response_mime_type": "application/json",
             }
             pname = ""
@@ -7029,10 +7056,18 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         if alert_type == "COMMODITY_MOMENTUM":
             chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
             vwap = float(getattr(alert, "vwap", 0.0) or metrics.get("vwap", ltp) or ltp)
+            spot_ref = float(
+                getattr(alert, "underlying_spot", 0.0) or metrics.get("spot", 0.0) or ltp
+            )
             if direction in ("BEARISH", "SHORT", "SELL"):
+                vwap_phrase = (
+                    f"holding below VWAP ₹{vwap:,.1f}"
+                    if (vwap > 0 and spot_ref <= vwap * 1.001)
+                    else f"mean-reverting toward VWAP ₹{vwap:,.1f}"
+                )
                 logic = (
-                    f"Quant-validated MCX {sym} breakdown: session decline of {chg_pct:.1f}% below VWAP ₹{vwap:,.1f} "
-                    f"with calibrated {rr:.1f}R downside asymmetry; COMEX basis suggests genuine selling pressure."
+                    f"Quant-validated MCX {sym} breakdown: session move of {chg_pct:+.1f}% {vwap_phrase} "
+                    f"with calibrated {rr:.1f}R downside asymmetry; COMEX basis suggests selling pressure."
                 )
                 trap = (
                     f"Watch for COMEX midnight gap fill or INR basis correction reversing the MCX breakdown; "
@@ -7040,8 +7075,13 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 )
                 guidance = f"Short MCX {sym} near ₹{ltp:,.1f}; SL above ₹{sl:,.1f}; book 50% at ₹{t1:,.1f} and trail on 5m candle."
             else:
+                vwap_phrase = (
+                    f"holding above VWAP ₹{vwap:,.1f}"
+                    if (vwap > 0 and spot_ref >= vwap * 0.9985)
+                    else f"rebounding below VWAP ₹{vwap:,.1f}"
+                )
                 logic = (
-                    f"Quant-validated MCX {sym} momentum: session gain of {chg_pct:+.1f}% reclaiming VWAP ₹{vwap:,.1f} "
+                    f"Quant-validated MCX {sym} momentum: session move of {chg_pct:+.1f}% {vwap_phrase} "
                     f"with calibrated {rr:.1f}R upside asymmetry; DXY softness supports domestic gold/crude bid."
                 )
                 trap = (

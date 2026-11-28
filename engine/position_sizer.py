@@ -1756,3 +1756,56 @@ def calculate_episodic_kelly_position_size(
         heuristic_guidance=heuristic,
         base_result=base,
     )
+
+
+def calculate_meta_cost_gated_kelly_size(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    meta_features: dict[str, Any],
+    *,
+    target_price: Optional[float] = None,
+    capital: float = 100_000.0,
+    max_risk_pct: float = 1.5,
+    is_fno: bool = True,
+    model: Any = None,
+) -> dict[str, Any]:
+    """Size F&O / Equity trade using Purged Meta-Model Half-Kelly + zero-lot cost gate.
+
+    Strict Contract #9 & #17:
+      - Uncalibrated model OR negative/zero net expectancy returns `lots = 0`, `shares = 0`.
+      - Never enforces a 1-lot floor when Kelly or risk budget evaluates to 0 lots.
+    """
+    from engine.meta_labeler import score_meta_label_and_kelly
+
+    base = calculate_position_size_for_alert(
+        alert_type="META_GATED",
+        symbol=symbol,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        target_price=target_price,
+        max_risk_pct=max_risk_pct,
+        is_fno=is_fno,
+    )
+    risk_dist = abs(float(entry_price) - float(stop_loss))
+    sl_r = round(risk_dist / max(1e-6, risk_dist), 2) if risk_dist > 0 else 1.0
+    budget_lots = int(base.lots if is_fno else max(0, base.shares))
+    pred = score_meta_label_and_kelly(
+        meta_features,
+        model=model,
+        budget_lots=budget_lots,
+        sl_r_distance=sl_r,
+    )
+    final_lots = int(pred.recommended_lots) if is_fno else 0
+    final_shares = final_lots * max(1, int(base.lot_size)) if is_fno else int(pred.recommended_lots)
+    return {
+        "symbol": base.symbol,
+        "direction": direction,
+        "lots": final_lots,
+        "shares": final_shares,
+        "lot_size": base.lot_size,
+        "cost_gate_passed": pred.cost_gate_passed,
+        "meta_prediction": pred.to_dict(),
+    }

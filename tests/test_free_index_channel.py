@@ -80,12 +80,12 @@ def test_free_index_alert_sebi_compliance_and_disclaimers():
     assert "NIFTY 25000 CE" in rendered
     assert "• <b>Entry:</b>" in rendered
     assert "₹150.0 - ₹155.0" in rendered
-    assert "• <b>SL:</b>" in rendered
+    assert ("• <b>SL:</b>" in rendered) or ("Safe SL (Tactical):" in rendered)
     assert "₹115.0" in rendered
     assert "• <b>T1:</b>" in rendered
     assert "₹195.0" in rendered
     assert "<b>T2:</b>" in rendered
-    assert "₹230.0" in rendered
+    assert "₹240.0" in rendered
     assert "• <b>R:R:</b> <b>1:2.3</b>" in rendered
     assert "Lot: <b>75</b>" in rendered
     assert "🛑 No-Chase: > ₹157.5" in rendered
@@ -745,3 +745,43 @@ def test_free_index_router_coordinate_sanctity_and_spot_scaling(monkeypatch):
         },
     )
     assert free_index_router.is_candidate(tight_spot_trade) is True
+
+
+def test_free_channel_invalidated_shows_loss_and_time_stop_negative_shows_early_cut():
+    """Verify Free Channel INVALIDATED shows downward P&L and negative TIME_STOP_EXIT reports EARLY CUT."""
+    sl_dict = {
+        "symbol": "NIFTY",
+        "exchange": "NFO",
+        "alert_type": "INDEX_PUT_SETUP",
+        "stage": "INVALIDATED",
+        "milestone_type": "INVALIDATED",
+        "direction": "BEARISH",
+        "contract_symbol": "NIFTY26DEC24500PE",
+        "strike": 24500.0,
+        "option_type": "PE",
+        "ltp": 110.0,
+        "trigger_level": 130.0,
+        "entry_price": 130.0,
+        "pnl_pts": -20.0,
+        "pnl_pct": -15.4,
+        "initial_sl": 110.0,
+        "target_1": 170.0,
+        "invalidation_reason": "Stop loss hit",
+    }
+    rendered_sl = render_free_index_milestone(sl_dict, in_market=True)
+    assert "SL HIT / VIEW INVALIDATED" in rendered_sl
+    assert "📉" in rendered_sl
+    assert "₹-20.00 (-15.4%" in rendered_sl
+
+    cut_dict = dict(
+        sl_dict,
+        milestone_type="TIME_STOP_EXIT",
+        stage="TIME_STOP_EXIT",
+        ltp=123.5,
+        pnl_pts=-6.5,
+        pnl_pct=-5.0,
+    )
+    rendered_cut = render_free_index_milestone(cut_dict, in_market=True)
+    assert "TIME-STOP EXIT (EARLY CUT)" in rendered_cut
+    assert "📉" in rendered_cut
+    assert "Scratch at CMP" not in rendered_cut

@@ -192,3 +192,142 @@ def test_rehabilitation_of_falsely_invalidated_post_t1_alert(tmp_path, monkeypat
     assert rehabbed.target_status == "RUNNER_CLOSED"
     assert "RUNNER_EXIT" in rehabbed.achieved_milestones
     assert "RUNNER CLOSED (PROFIT SECURED)" in rehabbed.headline
+
+
+def test_protection_exit_after_t0_5_never_claims_t1_achieved_or_profit_secured(monkeypatch):
+    """De-risked T0.5/BE protection stop (-3.0%) must NOT fabricate T1 PROFIT BANKED or WIN."""
+    engine = AutoAlertEngine()
+    monkeypatch.setattr(engine, "_save", lambda *a, **kw: None)
+
+    alert = AutoAlert(
+        alert_id="TEST-SENSEX-BE-PROT",
+        alert_type="TREND_DAY_PULLBACK",
+        stage="BREAKEVEN_LOCKED",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="SENSEX 83700 PE",
+        summary="SENSEX pullback",
+        ltp=708.05,
+        trigger_level=729.95,
+        target_level=882.0,
+        stop_loss=729.95,
+        option_type="PE",
+        contract_symbol="BSE:SENSEX26D0383700PE",
+        strike=83700.0,
+        lot_size=20,
+        option_premium=729.95,
+        initial_stop_loss=653.95,
+        target_status="T0_5_ACHIEVED",
+        achieved_milestones=["T0_5_ACHIEVED", "BREAKEVEN_LOCKED"],
+        update_count=2,
+        environment="LIVE",
+        is_live=True,
+    )
+
+    reason = (
+        "Breakeven Protection Triggered: De-risked trade fell below entry buffer "
+        "(Option LTP ₹708.1 < Entry ₹730.0, Drawdown -3.0%). "
+        "Protection floor enforced before initial SL breach."
+    )
+    engine._handle_alert_exit(alert, reason=reason, current_ltp=708.05)
+
+    assert alert.is_invalidated is False
+    assert alert.stage == "RUNNER_EXIT"
+    assert alert.target_status == "BREAKEVEN_CLOSED"
+    assert "RUNNER CLOSED (PROFIT SECURED)" not in alert.headline
+    assert "BREAKEVEN PROTECTION EXIT" in alert.headline
+
+    rendered = render_auto_alert(alert)
+    assert "PROTECTION STOP HIT" in rendered
+    assert "T1 PROFIT BANKED" not in rendered
+    assert "Target 1 was achieved" not in rendered
+    assert "Exit P&L:" in rendered
+    assert "/pt" in rendered
+
+
+def test_runner_exit_after_actual_t1_labels_runner_leg_pnl():
+    """When T1 WAS achieved and residual runner closes negative, clarify Runner Leg P&L."""
+    alert = AutoAlert(
+        alert_id="TEST-SENSEX-T1-RUNNER",
+        alert_type="TREND_DAY_PULLBACK",
+        stage="RUNNER_EXIT",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="🏁 [LIVE] RUNNER CLOSED: SENSEX 83700 PE",
+        summary="Trailing stop hit after T1",
+        ltp=708.05,
+        trigger_level=729.95,
+        target_level=882.0,
+        stop_loss=729.95,
+        option_type="PE",
+        contract_symbol="BSE:SENSEX26D0383700PE",
+        strike=83700.0,
+        lot_size=20,
+        option_premium=729.95,
+        initial_stop_loss=653.95,
+        target_status="RUNNER_CLOSED",
+        achieved_milestones=["T1_ACHIEVED", "RUNNER_EXIT"],
+        update_count=2,
+        environment="LIVE",
+        is_live=True,
+    )
+
+    rendered = render_auto_alert(alert)
+    assert "RUNNER CLOSED (T1 PROFIT BANKED · RUNNER STOP HIT)" in rendered
+    assert "Target 1 was achieved. Initial SL was never breached." in rendered
+    assert "Runner Leg P&L:" in rendered
+    assert "/pt" in rendered
+
+
+def test_de_risk_0_5r_breakeven_protection_exit_not_view_invalidated(monkeypatch):
+    """Alert 9 RCA: INFY at stage DE_RISK_0_5R hitting Breakeven Protection Triggered must render PROTECTION STOP HIT, never VIEW INVALIDATED."""
+    engine = AutoAlertEngine()
+    monkeypatch.setattr(engine, "_save", lambda *a, **kw: None)
+
+    alert = AutoAlert(
+        alert_id="TEST-INFY-BE-DE-RISK",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="DE_RISK_0_5R",
+        symbol="INFY",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="INFY 1154 PE",
+        summary="INFY Put surge",
+        ltp=38.0,
+        trigger_level=38.95,
+        target_level=48.30,
+        stop_loss=36.0,
+        option_type="PE",
+        contract_symbol="NSE:INFY26DEC1154PE",
+        strike=1154.0,
+        lot_size=400,
+        option_premium=38.95,
+        initial_stop_loss=34.28,
+        achieved_milestones=[],
+        update_count=1,
+        environment="LIVE",
+        is_live=True,
+    )
+
+    reason = (
+        "Breakeven Protection Triggered: De-risked trade fell below entry buffer "
+        "(Option LTP ₹38.0 < Entry ₹39.0, Drawdown -2.4%). "
+        "Protection floor enforced before initial SL breach."
+    )
+    engine._handle_alert_exit(alert, reason=reason, current_ltp=38.0)
+
+    assert alert.is_invalidated is False
+    assert alert.stage == "RUNNER_EXIT"
+    assert alert.target_status == "BREAKEVEN_CLOSED"
+    assert "BREAKEVEN PROTECTION EXIT" in alert.headline
+
+    rendered = render_auto_alert(alert)
+    assert "VIEW INVALIDATED" not in rendered
+    assert "NO LONGER VALID" not in rendered
+    assert "PROTECTION STOP HIT" in rendered
+    assert "T1 PROFIT BANKED" not in rendered

@@ -861,3 +861,102 @@ def test_websocket_normal_closure_code_1000_classified_as_p3():
             f"Expected P3 for normal closure, got {kwargs['priority']}"
         )
         assert kwargs["severity"] == "INFO"
+
+
+# ── 24. Stream Registry Ring Buffer & Deribit Maintenance & Test Telemetry ──
+
+
+def test_stream_registry_ring_rotation_does_not_inflate_dropped_events():
+    """Sliding-window ring rotation without a queue consumer must not report fake dropped_events."""
+    from market.data_events import MarketDataEvent
+    from market.streaming import MarketDataStreamRegistry
+
+    reg = MarketDataStreamRegistry(max_events=5)
+    for i in range(25):
+        reg.publish(
+            MarketDataEvent(
+                canonical_instrument_id="NSE:NIFTY26DECFUT",
+                provider="flattrade",
+                provider_symbol="NIFTY26DECFUT",
+                source="STREAM",
+                data_state="LIVE",
+                last_price=25000.0 + i,
+            )
+        )
+    assert reg.status("flattrade").dropped_events == 0
+
+    def _bad_cb(_ev):
+        raise RuntimeError("slow sink error")
+
+    reg.subscribe(_bad_cb)
+    reg.publish(
+        MarketDataEvent(
+            canonical_instrument_id="NSE:NIFTY26DECFUT",
+            provider="flattrade",
+            provider_symbol="NIFTY26DECFUT",
+            source="STREAM",
+            data_state="LIVE",
+            last_price=25100.0,
+        )
+    )
+    assert reg.status("flattrade").dropped_events == 1
+
+
+def test_deribit_maintenance_503_cooldown_prevents_hammering(monkeypatch):
+    """Deribit 503 system_maintenance must populate short cooldown cache and avoid repeated HTTP hits."""
+    from unittest.mock import MagicMock
+    from market import crypto_options
+
+    crypto_options._OPTIONS_CACHE.clear()
+    crypto_options._OPTIONS_ERROR_CACHE.clear()
+
+    resp = MagicMock()
+    resp.status_code = 503
+    resp.text = '{"jsonrpc":"2.0","error":{"message":"system_maintenance","code":11051}}'
+    client = MagicMock()
+    client.get.return_value = resp
+    monkeypatch.setattr(crypto_options, "get_shared_client", lambda: client)
+
+    r1 = crypto_options.get_crypto_options_summary("BTC")
+    r2 = crypto_options.get_crypto_options_summary("BTC")
+    assert r1["status"] == "UNAVAILABLE"
+    assert r2["status"] == "UNAVAILABLE"
+    assert client.get.call_count == 1
+
+
+def test_telemetry_isolates_test_runs_from_production_home_dir(monkeypatch):
+    """Even if TRADING_PLATFORM_DATA is unset during tests, live ~/.trading_platform/telemetry must stay untouched."""
+    from pathlib import Path
+    from engine import telemetry
+
+    monkeypatch.delenv("TRADING_PLATFORM_DATA", raising=False)
+    monkeypatch.delenv("TRADING_PLATFORM_HOME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_isolation")
+    assert telemetry._is_test_telemetry_isolation() is True
+
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(Path.cwd() / ".pytest_trading_platform"))
+    assert telemetry._is_test_telemetry_isolation() is False
+
+
+def test_memory_guard_stale_ok_window_and_compaction_priority(monkeypatch):
+    """HealthHub stale_ok memory check avoids blocking recomputation within 90s,
+    and routine tick-warehouse lock contention is classified P3."""
+    import time as _time
+    from engine import memory_guard, telemetry
+
+    sample = memory_guard.MemoryStatus(8192.0, 4096.0, 50.0, 250.0, "NORMAL", "ok")
+    monkeypatch.setattr(memory_guard, "_mem_status_cache", (_time.monotonic() - 45.0, sample))
+    monkeypatch.setattr(
+        memory_guard,
+        "_get_system_ram_mb",
+        lambda: (_ for _ in ()).throw(AssertionError("should return stale_ok cache")),
+    )
+    assert memory_guard.get_memory_status(stale_ok=True) is sample
+
+    prio = telemetry.derive_priority(
+        "SYSTEM_LOG",
+        "engine.tick_warehouse",
+        "WARNING",
+        "[engine.tick_warehouse] Compaction skipped for NSE:NIFTY26D0125700PE: lock busy",
+    )
+    assert prio == "P3"

@@ -5,6 +5,7 @@ import { useToastStore } from '../../hooks/useToast'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
 import MultiSelectDropdown from '../Common/MultiSelectDropdown'
 import { createVisibilityInterval } from '../../utils/visibilityPoll'
+import QuantRadarPanel from './QuantRadarPanel'
 
 /**
  * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
@@ -1253,6 +1254,18 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
             }`}
           >
             🧹 Storage & Maintenance Tools
+          </button>
+          <button
+            type="button"
+            data-testid="tab-quant-radar"
+            onClick={() => setActiveTab('quant_radar')}
+            className={`px-3 py-2 text-xs font-mono font-bold border-b-2 transition-all cursor-pointer ${
+              activeTab === 'quant_radar'
+                ? 'border-gold text-gold bg-elevated/60'
+                : 'border-transparent text-muted hover:text-text'
+            }`}
+          >
+            🎯 Quant & Qualification Radar
           </button>
 
         </div>
@@ -3768,6 +3781,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           </div>
         </div>
       )}
+
+      {activeTab === 'quant_radar' && <QuantRadarPanel />}
     </div>
   )
 }

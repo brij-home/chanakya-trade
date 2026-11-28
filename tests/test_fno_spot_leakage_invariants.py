@@ -303,3 +303,128 @@ def test_scale_separation_invariant_rejects_spot_as_opt_cmp():
     assert "Opt CMP: ₹1,295" not in msg
     assert "Opt CMP: 1295" not in msg
     assert "₹28.50" in msg
+
+
+def test_intraday_breakdown_option_headline_playbook_reason_and_ev_alignment():
+    """
+    Regression test for SHRIRAMFIN 940 PE breakdown defects:
+    1. Headline must not leave spot '@ ₹926.0' beside option contract.
+    2. Playbook on BUY PE must say 'Book 50% at T1', never 'Cover 50% at T1'.
+    3. Reason must not leave orphaned 'Spot Invalidation' or duplicate 'Option Plan:'.
+    4. compile_predatory_pipeline_dossier must compute EV from option coordinates.
+    5. Telegram Apex Gate must block sub-minimum option R:R (e.g. 1:1.1) even if spot R:R is high.
+    """
+    from engine.alert_scrutiny import AlertScrutinyAuditor
+
+    alert = AutoAlert(
+        alert_id="aa-intraday-breakdown-spark-shriramfin-20261127",
+        alert_type="INTRADAY_BREAKDOWN_SPARK",
+        stage="PRIMED",
+        symbol="NSE:SHRIRAMFIN",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="🎯 [NFO:SHRIRAMFIN26DEC940PE] 🎯 [LIMIT RETEST: FIB_OTE_PREMIUM] ⚡ INTRADAY BREAKDOWN: SHRIRAMFIN Dump -3.7% (RVOL 3.3x) @ ₹926.0",
+        summary=(
+            "T-0 Explosive Downside Mover: SHRIRAMFIN falling -3.7% with 3.3x Time-of-Day Relative Volume. "
+            "Trapped below VWAP ₹926.8. | Option Plan: Buy 940 PE near ₹40.90 (SL ₹31.90, T1 ₹50.72). "
+            "Spot Invalidation SL: ₹957.9."
+        ),
+        ltp=926.0,
+        trigger_level=926.0,
+        target_level=830.0,
+        stop_loss=957.9,
+        strike=940.0,
+        option_type="PE",
+        contract_symbol="NFO:SHRIRAMFIN26DEC940PE",
+        expiry_date="2026-12-29",
+        option_premium=40.90,
+        option_stop_loss=31.90,
+        option_target_level=50.72,
+        underlying_spot=926.0,
+        structural_spot_sl=957.9,
+        lot_size=825,
+        confidence=91,
+        actionable_plan={
+            "action": "SELL_SHORT_OR_BUY_PUT",
+            "option_action": "BUY PE",
+            "instrument_type": "OPTION",
+            "profit_rule": "Cover 50% at T1, trail stop to breakeven for T2 & Runner.",
+            "option_plan": {
+                "contract_symbol": "NFO:SHRIRAMFIN26DEC940PE",
+                "strike": 940.0,
+                "option_type": "PE",
+                "entry_premium": 40.90,
+                "sl_premium": 31.90,
+                "t1_premium": 50.72,
+                "t2_premium": 58.08,
+                "t3_premium": 73.62,
+                "lot_size": 825,
+                "expiry_date": "2026-12-29",
+            },
+        },
+    )
+
+    msg = render_auto_alert(alert, in_market=True)
+    # 1. Headline must not show "@ ₹926.0" as if PE option is ₹926
+    hl_line = [line for line in msg.splitlines() if "SHRIRAMFIN 940 PE" in line][0]
+    assert "@ ₹926.0" not in hl_line
+    # 2. Playbook must use long-option terminology
+    assert "Cover 50% at T1" not in msg
+    assert "Book 50% at T1" in msg
+    # 3. Reason must not terminate in truncated "Spot Invalidation" or repeat Option Plan
+    reason_lines = [line for line in msg.splitlines() if "Reason:" in line]
+    assert reason_lines
+    assert not reason_lines[0].strip().endswith("Spot Invalidation</i>")
+    assert "Option Plan: Buy 940 PE" not in reason_lines[0]
+
+    # 4. Scrutiny EV must reflect option R:R (1.09R), not spot R:R (3.0R -> +2.59R)
+    auditor = AlertScrutinyAuditor()
+    dossier = auditor.compile_predatory_pipeline_dossier(alert, {"no_chase": True})
+    assert dossier["sniper"]["rr_ratio"] < 1.2
+    assert dossier["expected_value_r"] < 0.6
+
+    # 5. Apex Gate must reject option R:R 1:1.1 (< 1.4) even though Spot R:R is 3.0
+    engine = AutoAlertEngine()
+    passed, reason = engine._eval_telegram_apex_gate(alert, in_market=True)
+    assert passed is False
+    assert "Option R:R" in reason
+
+
+def test_option_resolver_stock_option_under_150_allows_viable_rr(monkeypatch):
+    """Stock options under ₹150 must not have T1 choked at 1.24x vs -22% SL (1:1.1 R:R)."""
+    from types import SimpleNamespace
+    from engine.option_resolver import resolve_option_contract
+
+    fake_contract = SimpleNamespace(
+        symbol="NFO:SHRIRAMFIN26DEC940PE",
+        strike=940.0,
+        option_type="PE",
+        last_price=40.90,
+        expiry="2026-12-29",
+        delta=-0.45,
+        iv=28.0,
+        bid=40.80,
+        ask=41.00,
+    )
+    monkeypatch.setattr(
+        "market.options.get_options_snapshot",
+        lambda sym: ([fake_contract], 926.0, ["2026-12-29"], {}),
+    )
+    monkeypatch.setattr("engine.position_sizer.get_lot_size", lambda sym: 825)
+
+    res = resolve_option_contract(
+        symbol="SHRIRAMFIN",
+        spot=926.0,
+        direction="BEARISH",
+        underlying_sl=957.9,
+        underlying_target=855.0,
+        prefer_options=True,
+    )
+    assert res is not None
+    opt_risk = res.entry_premium - res.sl_premium
+    opt_reward = res.t1_premium - res.entry_premium
+    assert opt_risk > 0
+    assert (opt_reward / opt_risk) >= 1.5, (
+        f"Expected viable R:R >= 1.5, got {opt_reward / opt_risk:.2f}"
+    )

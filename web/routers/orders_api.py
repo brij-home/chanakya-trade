@@ -400,11 +400,18 @@ async def api_reconciliation(broker: Optional[str] = None):
         broker_funds_raw = await asyncio.to_thread(live_broker.get_funds)
 
         snapshot_at = datetime.now(timezone.utc).isoformat()
-        broker_account_id = (
-            getattr(live_broker, "account_id", None)
-            or getattr(live_broker, "client_id", None)
-            or "UNKNOWN"
+        broker_account_id = getattr(live_broker, "account_id", None) or getattr(
+            live_broker, "client_id", None
         )
+        if not broker_account_id and hasattr(live_broker, "get_profile"):
+            try:
+                prof = await asyncio.to_thread(live_broker.get_profile)
+                broker_account_id = getattr(prof, "user_id", None) or getattr(
+                    prof, "client_id", None
+                )
+            except Exception:
+                broker_account_id = None
+        broker_account_id = str(broker_account_id or "UNKNOWN").strip() or "UNKNOWN"
 
         def _pos_to_dict(p) -> dict:
             if isinstance(p, dict):

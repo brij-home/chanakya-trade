@@ -990,6 +990,157 @@ async def get_fyers_ledger_endpoint(
     return {"status": "ok", "data": res}
 
 
+@router.get("/api/fyers/screeners/config", tags=["Fyers Advanced"])
+async def get_fyers_screeners_config_endpoint():
+    """Retrieve FYERS Screeners API configuration (universes, screener_ids, fields)."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "get_screener_config"):
+        data = await asyncio.to_thread(brk.get_screener_config)
+        return {"status": "ok" if data.get("s") == "ok" else "error", "data": data}
+    return {"status": "error", "error": "Data broker does not support Fyers screener config"}
+
+
+@router.get("/api/fyers/screeners/standard", tags=["Fyers Advanced"])
+async def get_fyers_standard_screener_endpoint(
+    screener_id: str,
+    universe: str = "",
+    fields: str = "",
+    order_by: str = "",
+    order: str = "",
+    timeframe: str = "",
+    expiry: Optional[int] = None,
+    option_type: str = "",
+):
+    """Run a FYERS Oct-2026 Standard Screener query (/api/v3/screeners/standard)."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "get_screener_standard"):
+        data = await asyncio.to_thread(
+            brk.get_screener_standard,
+            screener_id=screener_id,
+            universe=universe,
+            fields=fields,
+            order_by=order_by,
+            order=order,
+            timeframe=timeframe,
+            expiry=expiry,
+            option_type=option_type,
+        )
+        return {"status": "ok" if data.get("s") == "ok" else "error", "data": data}
+    return {"status": "error", "error": "Data broker does not support Fyers standard screeners"}
+
+
+@router.get("/api/fyers/expired-contracts", tags=["Fyers Advanced", "F&O Research"])
+async def get_fyers_expired_contracts_endpoint(symbol: str, expiry_date: str):
+    """Step-2 Expired F&O contract discovery (history_underlying_symbols) for backtesting."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "get_expired_fno_contracts"):
+        data = await asyncio.to_thread(brk.get_expired_fno_contracts, symbol, expiry_date)
+        return {
+            "status": "ok" if data.get("s") == "ok" else "error",
+            "research_only": True,
+            "data": data,
+        }
+    return {
+        "status": "error",
+        "error": "Data broker does not support expired F&O contract discovery",
+    }
+
+
+@router.get("/api/fyers/killswitch", tags=["Fyers Advanced", "Safety"])
+async def get_fyers_killswitch_status_endpoint():
+    """Read-only check of FYERS broker account Kill Switch status, open positions, and pending orders."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_killswitch_status"):
+        return await asyncio.to_thread(brk.get_killswitch_status)
+    return {
+        "status": "UNAVAILABLE",
+        "message": "Execution broker does not support killswitch status",
+    }
+
+
+@router.get("/api/fyers/order-history", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_order_history_endpoint(
+    symbol: str = "",
+    from_date: str = "",
+    to_date: str = "",
+    page_no: int = 1,
+    page_size: int = 100,
+    segment_type: int = 0,
+    exchange_type: int = 0,
+    status: int = 0,
+):
+    """Retrieve paginated historical order records from Fyers server."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_order_history"):
+        res = await asyncio.to_thread(
+            brk.get_order_history,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+            page_no=page_no,
+            page_size=page_size,
+            segment_type=segment_type,
+            exchange_type=exchange_type,
+            status=status,
+        )
+        return {"status": "ok" if res.get("s") == "ok" else "error", "data": res}
+    return {"status": "error", "error": "Execution broker does not support order history"}
+
+
+@router.get("/api/fyers/trade-history", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_trade_history_report_endpoint(
+    symbol: str = "",
+    from_date: str = "",
+    to_date: str = "",
+    page_no: int = 1,
+    page_size: int = 100,
+    segment_type: int = 0,
+    exchange_type: int = 0,
+):
+    """Retrieve paginated historical trade records from Fyers server."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_historical_trade_history"):
+        res = await asyncio.to_thread(
+            brk.get_historical_trade_history,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+            page_no=page_no,
+            page_size=page_size,
+            segment_type=segment_type,
+            exchange_type=exchange_type,
+        )
+        return {"status": "ok" if res.get("s") == "ok" else "error", "data": res}
+    return {
+        "status": "error",
+        "error": "Execution broker does not support historical trade history",
+    }
+
+
+@router.post("/api/fyers/span-margin", tags=["Fyers Advanced", "Margin"])
+async def calculate_fyers_span_margin_endpoint(req: dict):
+    """Calculate combined SPAN + exposure margin and hedge benefit via FYERS span_margin API (max 20 F&O legs)."""
+    from brokers.session import get_execution_broker, get_data_broker
+
+    orders = req.get("orders", req.get("data", [])) if isinstance(req, dict) else []
+    brk = get_execution_broker() or get_data_broker()
+    if brk and hasattr(brk, "calculate_span_margin"):
+        return await asyncio.to_thread(brk.calculate_span_margin, orders)
+    return {"status": "error", "error": "Active broker does not support SPAN margin calculation"}
+
+
 @router.post("/api/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
 @router.post("/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
 async def fyers_postback_webhook_endpoint(request: Request):
@@ -1051,6 +1202,12 @@ async def fyers_postback_webhook_endpoint(request: Request):
                 "raw": payload,
             },
         )
+        try:
+            from engine.order_lifecycle import apply_fyers_stream_order_update
+
+            await asyncio.to_thread(apply_fyers_stream_order_update, payload)
+        except Exception as e_oms:
+            logger.debug(f"Fyers postback OMS reconciliation note: {e_oms}")
     except Exception as e:
         logger.warning(f"Error broadcasting Fyers postback webhook: {e}")
 

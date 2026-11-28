@@ -64,15 +64,27 @@ def _calculate_5m_atr(df: Any, period: int = 14) -> float:
 
 
 def _calculate_vwap(df: pd.DataFrame) -> pd.Series:
-    """Calculates session VWAP from intraday bars."""
-    col_h = "high" if "high" in df.columns else "High"
-    col_l = "low" if "low" in df.columns else "Low"
-    col_c = "close" if "close" in df.columns else "Close"
-    col_v = "volume" if "volume" in df.columns else "Volume"
-    typical_price = (df[col_h] + df[col_l] + df[col_c]) / 3.0
-    cum_vol = df[col_v].cumsum()
-    cum_vp = (typical_price * df[col_v]).cumsum()
-    return cum_vp / cum_vol.replace(0, np.nan)
+    """Calculates single-session VWAP from intraday bars (resets on latest trading date)."""
+    df_sess = df
+    if hasattr(df.index, "date"):
+        try:
+            dates = df.index.date
+            if len(dates) > 0:
+                latest_date = dates[-1]
+                sub = df[dates == latest_date]
+                if len(sub) >= 1:
+                    df_sess = sub
+        except Exception:
+            df_sess = df
+    col_h = "high" if "high" in df_sess.columns else "High"
+    col_l = "low" if "low" in df_sess.columns else "Low"
+    col_c = "close" if "close" in df_sess.columns else "Close"
+    col_v = "volume" if "volume" in df_sess.columns else "Volume"
+    typical_price = (df_sess[col_h] + df_sess[col_l] + df_sess[col_c]) / 3.0
+    cum_vol = df_sess[col_v].cumsum()
+    cum_vp = (typical_price * df_sess[col_v]).cumsum()
+    sess_vwap = cum_vp / cum_vol.replace(0, np.nan)
+    return sess_vwap.reindex(df.index)
 
 
 def detect_trend_day_pullback(
@@ -140,12 +152,14 @@ def detect_trend_day_pullback(
     prev_ema20 = float(ema_20.iloc[-3])
     val_vwap = float(vwap_series.iloc[-1]) if not np.isnan(vwap_series.iloc[-1]) else cur_c
 
-    vol_sma20 = float(volumes.rolling(min(20, len(df_5m)), min_periods=1).mean().iloc[-1])
-    if vol_sma20 <= 0:
-        vol_sma20 = max(1.0, cur_v)
+    vol_sma20_raw = float(volumes.rolling(min(20, len(df_5m)), min_periods=1).mean().iloc[-1])
+    has_bar_vol = cur_v > 0 and vol_sma20_raw > 0
+    vol_sma20 = vol_sma20_raw if vol_sma20_raw > 0 else max(1.0, cur_v)
 
-    # Calculate pullback bar dry-up ratio vs 20-period 5m SMA
-    pullback_vol_ratio = round(cur_v / max(1.0, vol_sma20), 2)
+    # Calculate pullback bar dry-up ratio vs 20-period 5m SMA (None when bar/index volume is 0)
+    pullback_vol_ratio: Optional[float] = (
+        round(cur_v / max(1.0, vol_sma20), 2) if has_bar_vol else None
+    )
 
     # Derive real session trend RVOL from the trend impulse bars preceding the pullback:
     impulse_vols = volumes.iloc[:-1] if len(volumes) > 1 else volumes
@@ -284,7 +298,8 @@ def detect_trend_day_pullback(
         )
 
         # Pullback volume dry-up: volume on the dip bar was below or near normal (< 1.25x SMA)
-        is_dryup = cur_v <= (1.25 * vol_sma20)
+        # On spot index bars without volume feeds (has_bar_vol=False), do not block trigger or fabricate 0.00X ratio.
+        is_dryup = (not has_bar_vol) or (cur_v <= (1.25 * vol_sma20))
 
         if tested_support and held_support and has_rejection and is_dryup:
             is_bull_pullback = True
@@ -333,8 +348,8 @@ def detect_trend_day_pullback(
             or (upper_wick_ratio >= 0.18 and cur_c < cur_o and cur_c < cur_h)
         )
 
-        # Retracement volume dry-up
-        is_dryup = cur_v <= (1.25 * vol_sma20)
+        # Retracement volume dry-up (or spot index without bar volume)
+        is_dryup = (not has_bar_vol) or (cur_v <= (1.25 * vol_sma20))
 
         if tested_resistance and held_resistance and has_rejection and is_dryup:
             is_bear_pullback = True
@@ -343,6 +358,24 @@ def detect_trend_day_pullback(
         return None
 
     direction = "BULLISH" if is_bull_pullback else "BEARISH"
+
+    # ── Today-Session Directional Sanity Guard ─────────────────────────
+    # Prevents multi-day EMA carry-over from firing BULLISH pullbacks on stocks
+    # that are down sharply today (e.g. BAJFINANCE -1.2%, NESTLEIND -1.9%), or vice versa.
+    if prev_close and prev_close > 0:
+        today_chg_pct = (ltp - float(prev_close)) / float(prev_close) * 100.0
+        if is_bull_pullback and today_chg_pct <= -0.50 and ltp < val_vwap:
+            logger.debug(
+                f"[TrendContinuation] Suppressed counter-session BULLISH pullback on {clean_sym}: "
+                f"down {today_chg_pct:.2f}% from prev_close and below session VWAP."
+            )
+            return None
+        if is_bear_pullback and today_chg_pct >= 0.50 and ltp > val_vwap:
+            logger.debug(
+                f"[TrendContinuation] Suppressed counter-session BEARISH pullback on {clean_sym}: "
+                f"up +{today_chg_pct:.2f}% from prev_close and above session VWAP."
+            )
+            return None
 
     # ── Benchmark Index Regime Gate (Institutional Market Alignment) ─────────
     # Prevents counter-trend traps: do not buy pullbacks when the benchmark index
@@ -552,9 +585,9 @@ def detect_trend_day_pullback(
     abs_min_floor = get_dynamic_noise_floor(clean_sym, ltp=ltp, atr_5m=atr_5m, multiplier=1.20)
 
     if is_bull_pullback:
-        # Structural Invalidation: Pullback swing low or 20-EMA support floor
+        # Structural Invalidation: Pullback swing low or 20-EMA support floor + 0.15% wick buffer
         pivot_low = min(cur_l, prev_l, val_ema20)
-        raw_sl = round(pivot_low * 0.9995, 2)
+        raw_sl = round(pivot_low * 0.9985, 2)
         raw_risk = ltp - raw_sl
         risk_pts = max(abs_min_floor, raw_risk)
         sl_price = round(ltp - risk_pts, 2)
@@ -564,9 +597,9 @@ def detect_trend_day_pullback(
         t3_price = round(ltp + 6.0 * risk_pts, 2)
         no_chase_lvl = round(ltp + 0.35 * risk_pts, 2)
     else:
-        # Symmetrical Bearish Invalidation: Retracement swing high or 20-EMA resistance ceiling
+        # Symmetrical Bearish Invalidation: Retracement swing high or 20-EMA resistance ceiling + 0.15% wick buffer
         pivot_high = max(cur_h, prev_h, val_ema20)
-        raw_sl = round(pivot_high * 1.0005, 2)
+        raw_sl = round(pivot_high * 1.0015, 2)
         raw_risk = raw_sl - ltp
         risk_pts = max(abs_min_floor, raw_risk)
         sl_price = round(ltp + risk_pts, 2)
@@ -750,11 +783,11 @@ def detect_trend_day_pullback(
                 )
                 return None
 
-            # Midday Chop Window (11:30 - 13:15 IST): Require stronger RVOL + trend/flow confluence
+            # Midday Chop Window (10:30 - 13:15 IST): Require stronger RVOL + trend/flow confluence
             if (
                 not is_test_env
-                and dtime(11, 30) <= now_time <= dtime(13, 15)
-                and not is_narrow_cpr
+                and dtime(10, 30) <= now_time <= dtime(13, 15)
+                and not (is_narrow_cpr and has_flow and rvol_val >= 1.35)
                 and (rvol_val < 1.35 or (not has_flow and alpha_quality_score < 85.0))
             ):
                 logger.info(
@@ -795,6 +828,61 @@ def detect_trend_day_pullback(
     opt_strike = resolved_opt.strike if has_opt else None
     opt_type = resolved_opt.option_type if has_opt else ("CE" if is_bull_pullback else "PE")
     lot_sz = resolved_opt.lot_size if has_opt else 1
+
+    if has_opt and opt_ltp and opt_sl and opt_t1 and opt_strike:
+        try:
+            from engine.option_target_calibration import (
+                compute_option_adr_headroom_targets,
+                evaluate_option_friction_viability,
+            )
+
+            _pb_dte = None
+            if getattr(resolved_opt, "expiry", None):
+                try:
+                    _pb_exp = datetime.strptime(str(resolved_opt.expiry)[:10], "%Y-%m-%d").date()
+                    _pb_dte = max(0, (_pb_exp - now_dt.date()).days)
+                except Exception:
+                    _pb_dte = None
+            _pb_cal = compute_option_adr_headroom_targets(
+                spot=ltp,
+                opt_ltp=float(opt_ltp),
+                opt_sl=float(opt_sl),
+                raw_t1=float(opt_t1),
+                option_type=opt_type,
+                strike=float(opt_strike),
+                dte_days=_pb_dte,
+                spot_atr=round(atr_5m * 8.66, 2) if atr_5m > 0 else None,
+                day_high=cur_h,
+                day_low=cur_l,
+                now_dt=now_dt,
+                segment=("FNO_INDEX" if is_index else "FNO_STOCK"),
+                min_rr=1.25,
+            )
+            if _pb_cal.was_adr_capped:
+                opt_t1 = _pb_cal.calibrated_t1
+                opt_t2 = min(float(opt_t2 or _pb_cal.calibrated_t2), _pb_cal.calibrated_t2)
+                opt_runner = min(float(opt_runner or _pb_cal.calibrated_t3), _pb_cal.calibrated_t3)
+            if not is_test_env and not _pb_cal.viable_rr:
+                logger.info(
+                    f"[TrendContinuation] Rejected {clean_sym} {opt_type}: ADR-calibrated R:R {_pb_cal.calibrated_rr:.2f} < 1.25"
+                )
+                return None
+
+            _pb_fric = evaluate_option_friction_viability(
+                entry_price=float(opt_ltp),
+                target_1=float(opt_t1),
+                stop_loss=float(opt_sl),
+                quantity=int(lot_sz or 1),
+                max_friction_drag_pct=28.0,
+                min_net_rr=1.05,
+            )
+            if not is_test_env and not _pb_fric["viable"]:
+                logger.info(
+                    f"[TrendContinuation] Rejected {clean_sym} {opt_contract_sym}: {_pb_fric['reason']}"
+                )
+                return None
+        except Exception as _e_pb_cal:
+            logger.debug(f"[TrendContinuation] Option ADR/friction check skipped: {_e_pb_cal}")
     resolved_exp = resolved_opt.expiry if has_opt else None
     opt_no_chase = round(opt_ltp * 1.04, 2) if has_opt else None
 
@@ -876,6 +964,34 @@ def detect_trend_day_pullback(
             act_plan["hedged_spread"] = resolved_opt.spread_details
             act_plan["strategy_type"] = resolved_opt.strategy_type
             act_plan["execution_style_mandate"] = resolved_opt.execution_style_mandate
+            if resolved_opt.execution_style_mandate == "HEDGED_SPREAD_MANDATORY":
+                pref_vehicle = "SPREAD_ONLY"
+
+        if opt_strike and opt_ltp and opt_ltp > 0:
+            try:
+                from engine.options_hedging import build_defined_risk_hedge_plan
+
+                hp_built = build_defined_risk_hedge_plan(
+                    symbol=clean_sym,
+                    direction=direction,
+                    spot=ltp,
+                    strike=opt_strike,
+                    opt_type=opt_type,
+                    opt_ltp=opt_ltp,
+                    chain=None,
+                    lot_size=lot_sz,
+                    now_dt=now_dt,
+                    expiry_date=resolved_exp,
+                    target_level=t1_price,
+                )
+                if hp_built:
+                    act_plan["hedge_plan"] = hp_built
+                    if pref_vehicle == "SPREAD_ONLY":
+                        hp_built["preferred_vehicle"] = "SPREAD_ONLY"
+            except Exception as _e_hp:
+                logger.debug(
+                    f"[TrendContinuation] Hedge plan build skipped for {clean_sym}: {_e_hp}"
+                )
 
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     clean_base = canonical_alert_symbol(clean_sym)
@@ -897,7 +1013,8 @@ def detect_trend_day_pullback(
     for lt in loc_tags:
         if lt not in pb_signals:
             pb_signals.append(lt)
-    pb_signals.append(f"VOL_DRYUP_{pullback_vol_ratio:.2f}X")
+    if pullback_vol_ratio is not None and pullback_vol_ratio > 0 and pullback_vol_ratio <= 1.25:
+        pb_signals.append(f"VOL_DRYUP_{pullback_vol_ratio:.2f}X")
     if is_bull_pullback:
         pb_signals.append("BULL_WICK_REJECTION")
     else:
@@ -1014,7 +1131,7 @@ def detect_trend_day_pullback(
             "rvol": round(rvol_val, 2),
             "trend_impulse_rvol": trend_rvol,
             "pullback_vol_ratio": pullback_vol_ratio,
-            "is_volume_dryup": is_dryup,
+            "is_volume_dryup": bool(has_bar_vol and is_dryup),
             "is_pullback": True,
             "setup_archetype": "PULLBACK_RETEST",
             "atr_5m": round(atr_5m, 2),

@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from engine.order_lifecycle import (
     _get_orders_db,
+    _init_orders_db,
     _record_order_event,
     ingest_broker_executions,
 )
@@ -34,6 +35,7 @@ _worker_stop_event = threading.Event()
 
 def has_active_unknown_freeze(account_id: Optional[str] = None) -> bool:
     """Return True if any UNKNOWN_FREEZE order exists for the given account (or globally)."""
+    _init_orders_db()
     with _get_orders_db() as conn:
         if account_id and account_id.strip():
             row = conn.execute(
@@ -56,6 +58,7 @@ def run_recovery_cycle() -> dict[str, Any]:
       - status == 'UNKNOWN_FREEZE'
       - ledger_status in ('PENDING_FACTS', 'INGESTION_FAILED')
     """
+    _init_orders_db()
     from brokers.session import get_execution_broker, get_execution_broker_key
 
     broker = get_execution_broker()

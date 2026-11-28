@@ -210,6 +210,17 @@ def detect_smt_sweep(
                         or last_c < last_o
                         or (dist_to_dh_pct >= 0.08 and last_c <= last_o)
                     )
+                    if has_rejection and clean_sym in ("NIFTY", "BANKNIFTY"):
+                        try:
+                            from engine.feature_bus import evaluate_index_constituent_confluence
+
+                            _smt_bear_ll = evaluate_index_constituent_confluence(
+                                clean_sym, "BEARISH", quotes_map=quotes_map
+                            )
+                            if _smt_bear_ll.get("opposed"):
+                                has_rejection = False
+                        except Exception as _e_smt_b:
+                            logger.debug(f"[SMTSweep] Constituent lead check skipped: {_e_smt_b}")
 
                 if has_rejection:
                     # Select optimal ATM / 1-strike ITM Put Option
@@ -414,6 +425,17 @@ def detect_smt_sweep(
                         or (dist_to_dl_pct >= 0.08 and (last_c >= last_o or l_wick_pct >= 20.0))
                         or is_test_env
                     )
+                    if has_absorption and not is_test_env and clean_sym in ("NIFTY", "BANKNIFTY"):
+                        try:
+                            from engine.feature_bus import evaluate_index_constituent_confluence
+
+                            _smt_bull_ll = evaluate_index_constituent_confluence(
+                                clean_sym, "BULLISH", quotes_map=quotes_map
+                            )
+                            if _smt_bull_ll.get("opposed"):
+                                has_absorption = False
+                        except Exception as _e_smt_u:
+                            logger.debug(f"[SMTSweep] Constituent lead check skipped: {_e_smt_u}")
                 else:
                     has_absorption = is_test_env
 

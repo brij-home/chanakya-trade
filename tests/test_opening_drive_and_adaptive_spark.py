@@ -69,21 +69,28 @@ def test_intraday_spark_adaptive_rvol_on_trend_markup(monkeypatch):
     q_mock.lower_circuit = 0.0
     q_mock.circuit_limit = 0.0
 
-    # In a quiet trend day, RVOL is 1.25x (below 1.50x standard floor, but above 1.15x adaptive floor)
-    with patch("engine.detectors.intraday_spark.get_cached_avg_volume_20", return_value=400000):
-        with patch("engine.auto_alert_engine.compute_time_of_day_rvol", return_value=1.25):
-            with patch(
-                "engine.detectors.intraday_spark.compute_time_of_day_rvol", return_value=1.25
-            ):
-                with patch("market.sentiment.get_market_breadth", return_value=None):
-                    alerts = detect_intraday_mover_sparks(
-                        universe=["TRENT"],
-                        quotes_map={"NSE:TRENT": q_mock},
-                    )
+    q_nifty = MagicMock()
+    q_nifty.last_price = 24000.0
+    q_nifty.vwap = 24000.0
+    q_nifty.change_pct = 0.15
 
-                    assert len(alerts) == 1
-                    assert alerts[0].direction == "BULLISH"
-                    assert alerts[0].symbol == "TRENT"
+    # In a quiet trend day, RVOL is 1.25x (below 1.50x standard floor, but above 1.15x adaptive floor)
+    with (
+        patch("engine.detectors.intraday_spark.get_cached_avg_volume_20", return_value=400000),
+        patch("engine.auto_alert_engine.compute_time_of_day_rvol", return_value=1.25),
+        patch("engine.detectors.intraday_spark.compute_time_of_day_rvol", return_value=1.25),
+        patch("market.sentiment.get_market_breadth", return_value=None),
+        patch("analysis.sector_rotation.get_stock_tailwind", return_value=None),
+        patch("market.history.get_ohlcv", return_value=None),
+    ):
+        alerts = detect_intraday_mover_sparks(
+            universe=["TRENT"],
+            quotes_map={"NSE:TRENT": q_mock, "NSE:NIFTY 50": q_nifty},
+        )
+
+        assert len(alerts) == 1
+        assert alerts[0].direction == "BULLISH"
+        assert alerts[0].symbol == "TRENT"
 
 
 def test_index_call_setup_bypasses_breadth_on_strong_vwap_trend():

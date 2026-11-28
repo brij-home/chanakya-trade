@@ -56,6 +56,13 @@ import sys
 import threading
 from pathlib import Path
 
+try:
+    import market.fyers_socket_patch  # noqa: F401 - ensure FyersDataSocket KeyError & pkg_resources patches load at boot
+except Exception as e_sock_patch:
+    logging.getLogger("web.api").debug(
+        f"[web.api] fyers_socket_patch import skipped: {e_sock_patch}"
+    )
+
 # ── Force IPv4 — SEBI requires registered static IP for API calls ──
 _orig_getaddrinfo = socket.getaddrinfo
 
@@ -352,6 +359,32 @@ async def lifespan(app: FastAPI):
                 thread_name_prefix="chanakya-bg",
             )
         )
+        if sys.platform == "win32":
+            _prev_loop_exc_handler = loop.get_exception_handler()
+
+            def _win_proactor_exception_handler(
+                target_loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+            ) -> None:
+                exc = context.get("exception")
+                msg_ctx = str(context.get("message") or "")
+                handle_str = str(context.get("handle") or "")
+                if (
+                    isinstance(exc, (ConnectionResetError, ConnectionAbortedError))
+                    or getattr(exc, "winerror", None) in (10053, 10054)
+                ) and (
+                    "_ProactorBasePipeTransport._call_connection_lost" in msg_ctx
+                    or "_ProactorBasePipeTransport._call_connection_lost" in handle_str
+                ):
+                    logger.debug(
+                        f"[web.api] Suppressed Windows Proactor client-disconnect socket reset: {exc}"
+                    )
+                    return
+                if _prev_loop_exc_handler is not None:
+                    _prev_loop_exc_handler(target_loop, context)
+                else:
+                    target_loop.default_exception_handler(context)
+
+            loop.set_exception_handler(_win_proactor_exception_handler)
     except Exception as e_exec:
         logger.debug(f"[web.api] Custom executor setup note: {e_exec}")
     if os.environ.get("DEPLOY_MODE", "") not in ("", "desktop", "local", "test"):
@@ -370,11 +403,22 @@ async def lifespan(app: FastAPI):
 
     ticker_stream.start(poll_interval_seconds=3.0)
 
-    # Start the 24x7 real-time crypto stream engine
+    # Start the 24x7 real-time crypto stream engine only when BALANCED policy or explicit opt-in is active
     try:
+        from config.discovery_policy import get_discovery_policy
         from market.crypto_stream import crypto_stream
 
-        crypto_stream.start()
+        _policy = get_discovery_policy()
+        if (
+            os.environ.get("ENABLE_CRYPTO_STREAM", "").strip() == "1"
+            or _policy.profile == "BALANCED"
+        ):
+            crypto_stream.start()
+        else:
+            logger.info(
+                "FILTERED_BY_FOCUS crypto stream skipped under discovery_profile=%s",
+                _policy.profile,
+            )
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -836,6 +880,19 @@ app.include_router(orders_router)
 app.include_router(crypto_router)
 app.include_router(mcp_router)
 
+
+@app.get("/api/analytics/expectancy")
+async def api_signal_expectancy(include_test: bool = False):
+    """Read-only post-cost walk-forward signal expectancy report by detector/session/RVOL."""
+    from engine.signal_expectancy import compute_signal_expectancy_report
+
+    report = await asyncio.to_thread(
+        compute_signal_expectancy_report,
+        include_test=include_test,
+    )
+    return {"status": "ok", "data": report}
+
+
 # Re-exports for backward compatibility
 from web.routers.orders_api import (
     OrderPreviewRequest as OrderPreviewRequest,
@@ -1239,8 +1296,7 @@ async def api_fyers_budget():
         all_subs = ws_mgr.get_all_desired_subscriptions()
 
         vwap_cache = get_vwap_session_cache()
-        with vwap_cache._lock:
-            cached_vwap_count = len(vwap_cache._memory_cache)
+        cached_vwap_count = vwap_cache.get_cached_count()
 
         ws_diag = ws_mgr.get_diagnostics()
 
@@ -1638,6 +1694,7 @@ async def get_system_health_hub(
         broker_statuses,
         code_prov,
         storage_bd,
+        mem_status_obj,
     ) = await asyncio.gather(
         loop.run_in_executor(
             _HEALTH_HUB_EXECUTOR,
@@ -1675,6 +1732,12 @@ async def get_system_health_hub(
             "storage_breakdown",
             functools.partial(get_storage_breakdown, stale_ok=True),
         ),
+        loop.run_in_executor(
+            _HEALTH_HUB_EXECUTOR,
+            _timed_run,
+            "memory_status",
+            functools.partial(get_memory_status, stale_ok=True),
+        ),
     )
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
@@ -1683,7 +1746,6 @@ async def get_system_health_hub(
     code_prov_dict = code_prov.to_dict()
     since_ts = code_prov.boot_timestamp if since_boot else None
 
-    mem_status_obj = _timed_run("memory_status", get_memory_status)
     incident_counts, active_counts, incidents = await asyncio.gather(
         loop.run_in_executor(
             _HEALTH_HUB_EXECUTOR,
@@ -1722,6 +1784,7 @@ async def get_system_health_hub(
     from brokers.session import (
         get_registered_brokers,
         get_broker_role,
+        get_data_broker,
         get_data_broker_key,
         get_execution_broker_key,
     )
@@ -1822,12 +1885,21 @@ async def get_system_health_hub(
         ),
     }
 
+    fyers_cap_diag: dict[str, Any] = {}
+    try:
+        fyers_brk = all_brks.get("fyers") or get_data_broker()
+        if fyers_brk and hasattr(fyers_brk, "get_fyers_capability_status"):
+            fyers_cap_diag = fyers_brk.get_fyers_capability_status()
+    except Exception as e_fcap:
+        logger.debug(f"[HealthHub] fyers capability diag skipped: {e_fcap}")
+
     payload = {
         "overall_status": overall_status,
         "incident_counts": incident_counts,
         "active_incident_counts": active_counts,
         "circuit_breaker": cb_diag,
         "rate_gate": rate_gate_diag,
+        "fyers_capabilities": fyers_cap_diag,
         "tbt": tbt_diag,
         "broker_failover": broker_failover,
         "market_dynamics": market_dynamics_diag,
@@ -1998,8 +2070,7 @@ async def get_recent_metrics(
     from engine.observability import get_registry
 
     obs = get_registry()
-    with obs._lock:
-        events = list(obs._metrics)
+    events = obs.get_metrics_snapshot()
     if journey_id:
         events = [e for e in events if e.journey_id == journey_id]
     if failed_only:

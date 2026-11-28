@@ -1514,7 +1514,7 @@ class FlattradeAPI(BrokerAPI):
                         on_error=_on_error,
                         on_close=_on_close,
                     )
-                    self._ws.run_forever(ping_interval=30, ping_timeout=15)
+                    self._ws.run_forever(ping_interval=30, ping_timeout=25)
                 except Exception as e_ws:
                     logger.debug(f"[Flattrade] WebSocket loop notice: {e_ws}")
                 finally:

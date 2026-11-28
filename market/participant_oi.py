@@ -81,7 +81,8 @@ class ParticipantOISummary:
     market_bias: str  # "STRONGLY_BULLISH" | "BULLISH" | "NEUTRAL" | "BEARISH" | "STRONGLY_BEARISH" | "SHORT_SQUEEZE_COILING"
     divergence_notes: list[str] = field(default_factory=list)
     records: dict[str, dict[str, int]] = field(default_factory=dict)
-    provenance: str = "LIVE_NSE"  # "LIVE_NSE" | "CACHED_EOD" | "DEGRADED_BASELINE"
+    provenance: str = "LIVE_NSE"  # "LIVE_NSE" | "CACHED_EOD" | "UNAVAILABLE"
+    status: str = "AVAILABLE"  # "AVAILABLE" | "UNAVAILABLE"
     updated_at: str = ""
 
     def __post_init__(self) -> None:
@@ -92,24 +93,27 @@ class ParticipantOISummary:
         return asdict(self)
 
 
-# Institutional Baseline Fallback (Historical Normative Anchor for Indian Markets)
-_BASELINE_FALLBACK = ParticipantOISummary(
-    as_of_date="2026-09-11",
-    fii_index_long_ratio=0.38,
-    fii_net_index_futures=-42500,
-    fii_net_stock_futures=185000,
-    pro_net_index_futures=22100,
-    client_net_index_futures=21400,
-    dii_net_index_futures=-1000,
-    fii_index_pcr=0.88,
-    pro_index_pcr=1.12,
-    client_index_pcr=0.92,
-    market_bias="NEUTRAL",
-    divergence_notes=[
-        "FII mildly short index futures (-42.5k contracts); Pro desks carrying slight long delta."
-    ],
-    provenance="DEGRADED_BASELINE",
-)
+def unavailable_participant_oi_summary(
+    reason: str = "NSE participant OI archive unavailable",
+) -> ParticipantOISummary:
+    """Fail-closed empty ParticipantOISummary without fabricated positioning figures."""
+    return ParticipantOISummary(
+        as_of_date="",
+        fii_index_long_ratio=0.0,
+        fii_net_index_futures=0,
+        fii_net_stock_futures=0,
+        pro_net_index_futures=0,
+        client_net_index_futures=0,
+        dii_net_index_futures=0,
+        fii_index_pcr=0.0,
+        pro_index_pcr=0.0,
+        client_index_pcr=0.0,
+        market_bias="NEUTRAL",
+        divergence_notes=[reason],
+        records={},
+        provenance="UNAVAILABLE",
+        status="UNAVAILABLE",
+    )
 
 
 def parse_participant_csv(csv_text: str, as_of_date: str = "") -> Optional[ParticipantOISummary]:
@@ -293,7 +297,7 @@ def fetch_and_cache_participant_oi() -> ParticipantOISummary:
             except Exception as read_err:
                 logger.warning("Failed reading participant OI cache: %s", read_err)
 
-    return _BASELINE_FALLBACK
+    return unavailable_participant_oi_summary()
 
 
 def get_latest_participant_oi(force_refresh: bool = False) -> ParticipantOISummary:

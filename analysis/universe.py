@@ -83,19 +83,77 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "MUTHOOTFIN",
             "SHRIRAMFIN",
             "JIOFIN",
+            "INDIANB",
+            "BANKINDIA",
+            "MAHABANK",
+            "IOB",
+            "CENTRALBK",
+            "UCOBANK",
+            "PSB",
+            "RBLBANK",
+            "YESBANK",
+            "UJJIVANSFB",
+            "ABCAPITAL",
+            "BAJAJHLDNG",
+            "LICHSGFIN",
+            "LTF",
+            "MANAPPURAM",
+            "PNBHOUSING",
+            "SBICARD",
+            "PFC",
+            "RECLTD",
+            "IREDA",
+            "HUDCO",
+        ],
+    },
+    "capital_markets": {
+        "name": "Capital Markets & Wealth",
+        "icon": "📈",
+        "index_symbol": "^CNXFIN",
+        "description": "Exchanges, Depositories, AMCs, RTAs, and Wealth/Broking Infrastructure.",
+        "symbols": [
             "BSE",
-            "MCX",
-            "ANGELONE",
             "CDSL",
+            "MCX",
+            "KFINTECH",
+            "ANANDRATHI",
+            "ANGELONE",
+            "360ONE",
+            "MOTILALOFS",
             "CAMS",
             "HDFCAMC",
+            "IEX",
+            "UTIAMC",
+            "NAM-INDIA",
+            "NUVAMA",
+            "ABSLAMC",
+            "PRUDENT",
+        ],
+    },
+    "insurance": {
+        "name": "Insurance & Protection",
+        "icon": "🛡️",
+        "index_symbol": "^CNXFIN",
+        "description": "Life Insurance, General Insurance, and Health Insurance Carriers.",
+        "symbols": [
+            "HDFCLIFE",
+            "SBILIFE",
+            "ICICIGI",
+            "ICICIPRULI",
+            "LICI",
+            "MFSL",
+            "NIACL",
+            "GICRE",
+            "STARHEALTH",
+            "GODIGIT",
+            "NIVABUPA",
         ],
     },
     "it": {
         "name": "IT, Software & Technology",
         "icon": "💻",
         "index_symbol": "^CNXIT",
-        "description": "Tier-1 IT Giants, High-Growth ER&D Midcaps, EMS, and New-Age Tech Platforms.",
+        "description": "Tier-1 IT Giants, High-Growth ER&D Midcaps, and EMS Platforms.",
         "symbols": [
             "TCS",
             "INFY",
@@ -113,7 +171,6 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "NAUKRI",
             "MAPMYINDIA",
             "DIXON",
-            "POLICYBZR",
             "AFFLE",
             "BSOFT",
             "HAPPSTMNDS",
@@ -130,6 +187,22 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "ZENSARTECH",
             "KAYNES",
             "SYRMA",
+            "PGEL",
+            "SAGILITY",
+        ],
+    },
+    "fintech_internet": {
+        "name": "Fintech & Consumer Tech",
+        "icon": "💳",
+        "index_symbol": "^CNXIT",
+        "description": "Insurtech, Digital Payments, Foodtech & Consumer Internet Platforms.",
+        "symbols": [
+            "POLICYBZR",
+            "PAYTM",
+            "ETERNAL",
+            "SWIGGY",
+            "NYKAA",
+            "CARTRADE",
         ],
     },
     "auto": {
@@ -201,13 +274,15 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "IGL",
             "ADANIGREEN",
             "ADANIENT",
+            "ADANIENSOL",
             "ADANIPOWER",
             "TATAPOWER",
+            "HINDPETRO",
+            "PETRONET",
+            "OIL",
+            "GUJENERGY",
             "SUZLON",
             "INOXWIND",
-            "IREDA",
-            "PFC",
-            "RECLTD",
             "NHPC",
             "SJVN",
             "TORNTPOWER",
@@ -330,9 +405,6 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "SAPPHIRE",
             "WESTLIFE",
             "AVANTIFEED",
-            "SWIGGY",
-            "ETERNAL",
-            "ETERNAL",
         ],
     },
     "realty": {
@@ -757,7 +829,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
                 "FLUOROCHEM",
                 "AETHER",
                 "FINEORG",
-                "GUJGASLTD",
+                "GUJENERGY",
                 "ABB",
                 "SIEMENS",
                 "CGPOWER",
@@ -1658,9 +1730,432 @@ _GICS_SECTOR_TO_SECTOR: dict[str, tuple[str, str]] = {
 }
 
 
+_INDEX_SECTOR_ALIASES = frozenset(
+    {
+        "NIFTY",
+        "NIFTY 50",
+        "NIFTY50",
+        "CNX NIFTY",
+        "NSEI",
+        "^NSEI",
+        "BANKNIFTY",
+        "NIFTY BANK",
+        "NSEBANK",
+        "^NSEBANK",
+        "FINNIFTY",
+        "NIFTY FIN SERVICE",
+        "NIFTY FINANCIAL SERVICES",
+        "MIDCPNIFTY",
+        "NIFTY MID SELECT",
+        "SENSEX",
+        "SENSEX 50",
+        "BANKEX",
+        "NIFTYNXT50",
+        "NIFTYFPI",
+        "CRSLDX",
+        "^CRSLDX",
+        "INDIAVIX",
+    }
+)
+
+_COMMODITY_EXTRA_ALIASES = frozenset(
+    {
+        "SILMIC",
+        "SILVERMIC",
+        "NATGASMINI",
+        "CRUDEOILM",
+        "GOLDM",
+        "GOLDPETAL",
+        "LEAD",
+        "COTTON",
+    }
+)
+
+_SYMBOL_SECTOR_ALIASES: dict[str, tuple[str, str]] = {
+    "LTM": ("it", "IT, Software & Technology"),
+    "ICICILIFE": ("insurance", "Insurance & Protection"),
+    "FORCEMOT": ("auto", "Automobiles & Mobility"),
+    "TIINDIA": ("auto", "Automobiles & Mobility"),
+    "VMM": ("fmcg", "FMCG, Retail & Consumption"),
+    "UNITDSPR": ("fmcg", "FMCG, Retail & Consumption"),
+    "PATANJALI": ("fmcg", "FMCG, Retail & Consumption"),
+    "KALYANKJIL": ("fmcg", "FMCG, Retail & Consumption"),
+    "GODFRYPHLP": ("fmcg", "FMCG, Retail & Consumption"),
+    "BLUESTARCO": ("fmcg", "FMCG, Retail & Consumption"),
+    "CROMPTON": ("fmcg", "FMCG, Retail & Consumption"),
+    "INDHOTEL": ("fmcg", "FMCG, Retail & Consumption"),
+    "GMRAIRPORT": ("infra", "Infrastructure & Capital Goods"),
+    "NBCC": ("infra", "Infrastructure & Capital Goods"),
+    "SHREECEM": ("infra", "Infrastructure & Capital Goods"),
+    "IDEA": ("telecom", "Telecom, Ports & Logistics"),
+    "INDUSTOWER": ("telecom", "Telecom, Ports & Logistics"),
+    "PIDILITIND": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "APLLTD": ("pharma", "Pharma & Healthcare"),
+    "BENGALASM": ("banking", "Banking & Financial Services"),
+    "COMFINTE": ("capital_markets", "Capital Markets & Wealth"),
+    "PRISMX": ("capital_markets", "Capital Markets & Wealth"),
+    "YOGI": ("banking", "Banking & Financial Services"),
+    "ZSARACOM": ("banking", "Banking & Financial Services"),
+    "DISAQ": ("infra", "Infrastructure & Capital Goods"),
+    "ELITECON": ("infra", "Infrastructure & Capital Goods"),
+    "ESSENTIA": ("fmcg", "FMCG, Retail & Consumption"),
+    "CRAVATEX": ("fmcg", "FMCG, Retail & Consumption"),
+    "MCCHRLS-B": ("fmcg", "FMCG, Retail & Consumption"),
+    "SHERVANI": ("infra", "Infrastructure & Capital Goods"),
+    "TOYAMSL": ("fmcg", "FMCG, Retail & Consumption"),
+    "SAB": ("infra", "Infrastructure & Capital Goods"),
+    "SIEL": ("fmcg", "FMCG, Retail & Consumption"),
+    "VTMLTD": ("fmcg", "FMCG, Retail & Consumption"),
+    "ALEMBICLTD": ("pharma", "Pharma & Healthcare"),
+    "BIRLAMONEY": ("capital_markets", "Capital Markets & Wealth"),
+    "CARERATING": ("capital_markets", "Capital Markets & Wealth"),
+    "ICRA": ("capital_markets", "Capital Markets & Wealth"),
+    "PNBGILTS": ("capital_markets", "Capital Markets & Wealth"),
+    "MTNL": ("telecom", "Telecom, Ports & Logistics"),
+    "NDTV": ("telecom", "Telecom, Ports & Logistics"),
+    "DBCORP": ("telecom", "Telecom, Ports & Logistics"),
+    "HATHWAY": ("telecom", "Telecom, Ports & Logistics"),
+    "JAGRAN": ("telecom", "Telecom, Ports & Logistics"),
+    "EASEMYTRIP": ("telecom", "Telecom, Ports & Logistics"),
+    "YATRA": ("telecom", "Telecom, Ports & Logistics"),
+    "DELTACORP": ("fmcg", "FMCG, Retail & Consumption"),
+    "WONDERLA": ("fmcg", "FMCG, Retail & Consumption"),
+    "RAYMOND": ("fmcg", "FMCG, Retail & Consumption"),
+    "SHOPERSTOP": ("fmcg", "FMCG, Retail & Consumption"),
+    "TTKPRESTIG": ("fmcg", "FMCG, Retail & Consumption"),
+    "SYMPHONY": ("fmcg", "FMCG, Retail & Consumption"),
+    "EMUDHRA": ("it", "IT, Software & Technology"),
+    "SUBEXLTD": ("it", "IT, Software & Technology"),
+    "EXPLEOSOL": ("it", "IT, Software & Technology"),
+    "NOCIL": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "VINATIORGA": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "GALAXYSURF": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "CAMLINFINE": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "KIOCL": ("metals", "Metals & Mining"),
+    "MUKANDLTD": ("metals", "Metals & Mining"),
+}
+
+
+def _infer_sector_from_name(name: str) -> tuple[str, str] | None:
+    """Deterministic 0ms offline sector inference from registered equity company name."""
+    n = f" {name.upper()} "
+    if not n.strip():
+        return None
+    if any(
+        k in n
+        for k in (
+            " EXCHANGE",
+            " DEPOSITORY",
+            " BROKING",
+            " BROKERS",
+            " ASSET MANAGEMENT",
+            " WEALTH ",
+            " SECURITIES",
+            " CAPITAL MARKET",
+            " FISCAL ",
+            " PORTFOLIO",
+            " RATINGS",
+        )
+    ):
+        return ("capital_markets", "Capital Markets & Wealth")
+    if any(k in n for k in (" INSURANCE", " ASSURANCE", " LIFE INSUR")):
+        return ("insurance", "Insurance & Protection")
+    if any(k in n for k in (" FINTECH", " PAYMENTS", " INSURTECH", " E-SERVICES")):
+        return ("fintech_internet", "Fintech & Consumer Tech")
+    if any(
+        k in n
+        for k in (
+            " BANK",
+            " FINANCE",
+            " FINANCIAL",
+            " FINVEST",
+            " FINSERV",
+            " FINTRADE",
+            " HOUSING FIN",
+            " LEASING",
+            " CREDIT",
+            " INVESTMENT",
+            " HOLDINGS",
+            " MERCANTILE",
+            " CAPITAL",
+            " VENTURES",
+            " MERCHANTS",
+            " COMMERCIAL",
+        )
+    ):
+        return ("banking", "Banking & Financial Services")
+    if any(
+        k in n
+        for k in (
+            " PHARMA",
+            " HEALTH",
+            " HOSPITAL",
+            " DIAGNOSTIC",
+            " LABS",
+            " LABORATOR",
+            " MEDIC",
+            " DRUGS",
+            " BIOSCIENCE",
+            " BIOTECH",
+            " BIO TECH",
+            " LIFESCIENCES",
+            " PARENTERALS",
+            " OPHTHALMIC",
+        )
+    ):
+        return ("pharma", "Pharma & Healthcare")
+    if any(
+        k in n
+        for k in (
+            " SOFTWARE",
+            " INFOTECH",
+            " TECHNOLOG",
+            " SYSTEMS",
+            " DIGITAL",
+            " SEMICONDUCTOR",
+            " TECH ",
+            " DATA ",
+            " KNOWLEDGEWARE",
+            " INFOMEDIA",
+        )
+    ):
+        return ("it", "IT, Software & Technology")
+    if any(
+        k in n
+        for k in (
+            " CHEM",
+            " FERTILIZ",
+            " AGROCHEM",
+            " PETROCHEM",
+            " ORGANICS",
+            " RASAYAN",
+            " FLUORIDE",
+            " PLASTIC",
+            " SURFACTANTS",
+            " DYES",
+            " PIGMENT",
+            " RESIN",
+            " ADHESIVE",
+            " POLYMER",
+            " KARPOORAM",
+            " SRAAC",
+            " INDOKEM",
+        )
+    ):
+        return ("chemicals", "Specialty Chemicals & Agriculture")
+    if any(
+        k in n
+        for k in (
+            " STEEL",
+            " METAL",
+            " METCAST",
+            " ALUMIN",
+            " COPPER",
+            " ZINC",
+            " IRON",
+            " ALLOY",
+            " MINING",
+            " MINES",
+            " COAL",
+            " WIRE ",
+            " WELDING",
+            " CASTING",
+            " FORGING",
+            " NILE ",
+        )
+    ):
+        return ("metals", "Metals & Mining")
+    if any(
+        k in n
+        for k in (
+            " AUTO",
+            " MOTOR",
+            " VEHICLES",
+            " MOBILITY",
+            " TYRE",
+            " TIRE",
+            " TRACTOR",
+            " AXLE",
+            " GEAR",
+            " WHEELS",
+            " BEARINGS",
+            " SEATS",
+            " CYCLES",
+            " PISTONS",
+            " VALVES",
+        )
+    ):
+        return ("auto", "Automobiles & Mobility")
+    if any(
+        k in n
+        for k in (
+            " POWER",
+            " ENERGY",
+            " SOLAR",
+            " WIND",
+            " PETROL",
+            " GAS ",
+            " OIL ",
+            " HYDRO",
+            " THERMAL",
+            " RESOURCES",
+            " GREEN ",
+            " EXPLORATION",
+        )
+    ):
+        return ("energy", "Energy, Power & Green Transition")
+    if any(
+        k in n
+        for k in (
+            " REALTY",
+            " REAL ESTATE",
+            " SMARTSPACES",
+            " PROPTECH",
+            " SUPERSTRUCTURES",
+            " LAND ASSETS",
+            " DEVELOPER",
+            " BUILDCON",
+            " BUILDWELL",
+            " HOUSING",
+            " TOWNSHIP",
+            " PRIME PROJECT",
+            " DEVCON",
+        )
+    ):
+        return ("realty", "Real Estate & Housing")
+    if any(
+        k in n
+        for k in (
+            " TELECOM",
+            " TELEFILMS",
+            " CABLE",
+            " LOGISTICS",
+            " ALLCARGO",
+            " TERMINALS",
+            " SHIPPING",
+            " SHIP ",
+            " PORT ",
+            " CARGO",
+            " EXPRESS",
+            " AVIATION",
+            " AIR SERVICE",
+            " CONTAINER",
+            " TRANSMISSION",
+            " FREIGHT",
+            " EXIM",
+            " MEDIA",
+            " BROADCAST",
+            " ENTERTAINMENT",
+            " STUDIOS",
+        )
+    ):
+        return ("telecom", "Telecom, Ports & Logistics")
+    if any(
+        k in n
+        for k in (
+            " INFRA",
+            " CEMENT",
+            " CONSTRUCT",
+            " ENGINEER",
+            " CABLES",
+            " ELECTRICAL",
+            " PIPES",
+            " CERAMIC",
+            " GLASS",
+            " BIJLEE",
+            " UTILITIES",
+            " PROJECTS",
+            " MANUFACTURING",
+            " RECYCLING",
+            " MAGNET",
+            " INDUSTRIAL",
+            " GRAVURES",
+            " SPRINGS",
+            " INSTRUMENT",
+            " OVERSEAS",
+            " ENTERPRISES",
+            " INDUSTRIES",
+            " UDYOG",
+            " CONCEPT",
+            " ALLIANCE",
+            " CORPORATION",
+            " COMPANY",
+            " INDIA LIMITED",
+        )
+    ):
+        return ("infra", "Infrastructure & Capital Goods")
+    if any(
+        k in n
+        for k in (
+            " TEXTILE",
+            " TEXWORLD",
+            " SPINTEX",
+            " SYNTEX",
+            " COTTON",
+            " HOSIERY",
+            " APPAREL",
+            " SPINNING",
+            " SUGAR",
+            " TEA ",
+            " COFFEE",
+            " FOODS",
+            " FOOD ",
+            " BEVERAGE",
+            " BREWER",
+            " RETAIL",
+            " CONSUMER",
+            " HOTEL",
+            " RESORT",
+            " PAPER",
+            " AGRO ",
+            " AGROLIFE",
+            " NATURAL PRODUCTS",
+            " SWADISHT",
+            " DECOR",
+            " BEADS",
+            " EXPORTS",
+            " JEWEL",
+            " GOLD ",
+            " CHOCOLATE",
+            " DAIRY",
+            " MILK",
+            " PLANTATION",
+            " MILL",
+            " DISTILLER",
+            " FASHION",
+            " FABRICS",
+            " SPORT",
+            " SOLVEX",
+            " FEED",
+            " WOOD ",
+            " RAFFIA",
+            " WATERBASE",
+            " SEAFOOD",
+            " INTERNATIONAL",
+            " SEEDS",
+            " VALVES",
+            " PISTONS",
+            " RINGS",
+            " CAST",
+        )
+    ):
+        return ("fmcg", "FMCG, Retail & Consumption")
+    return None
+
+
 def _load_bundled_index_sectors() -> None:
-    """Ingests official constituent industry classifications from bundled Nifty datasets."""
-    for fn in ("nifty_total_market.json", "nifty500.json"):
+    """Ingests official constituent industry classifications from bundled Nifty & BSE datasets."""
+    for idx_sym in _INDEX_SECTOR_ALIASES:
+        _STOCK_TO_SECTOR.setdefault(idx_sym, ("index", "Market Indices"))
+        _STOCK_SECTOR_SOURCE.setdefault(idx_sym, "INDEX_TAXONOMY")
+    for com_sym in _COMMODITY_EXTRA_ALIASES:
+        _STOCK_TO_SECTOR.setdefault(com_sym, ("commodity", "MCX Commodities"))
+        _STOCK_SECTOR_SOURCE.setdefault(com_sym, "COMMODITY_TAXONOMY")
+    for alias_sym, alias_sec in _SYMBOL_SECTOR_ALIASES.items():
+        _STOCK_TO_SECTOR.setdefault(alias_sym, alias_sec)
+        _STOCK_SECTOR_SOURCE.setdefault(alias_sym, "INSTITUTIONAL_TAXONOMY")
+
+    for fn in ("nifty_total_market.json", "nifty500.json", "bse500.json"):
         p = _UNIVERSES_DATA_DIR / fn
         if not p.exists():
             p = Path("data/universes") / fn
@@ -1677,20 +2172,41 @@ def _load_bundled_index_sectors() -> None:
                         if mapped:
                             if sym not in _STOCK_TO_SECTOR:
                                 _STOCK_TO_SECTOR[sym] = mapped
-                                _STOCK_SECTOR_SOURCE[sym] = "NIFTY_TOTAL_MARKET"
+                                _STOCK_SECTOR_SOURCE[sym] = fn.replace(".json", "").upper()
                             try:
                                 from market.instruments import canonical_symbol
 
                                 canon = canonical_symbol(sym)
                                 if canon and canon not in _STOCK_TO_SECTOR:
                                     _STOCK_TO_SECTOR[canon] = mapped
-                                    _STOCK_SECTOR_SOURCE[canon] = "NIFTY_TOTAL_MARKET"
+                                    _STOCK_SECTOR_SOURCE[canon] = fn.replace(".json", "").upper()
                             except Exception as e_suppressed:
                                 logger.debug(
                                     f"[universe] Canonical symbol sector mapping non-fatal: {e_suppressed}"
                                 )
             except Exception as e:
-                logger.warning(f"[universe] Failed loading bundled index sectors: {e}")
+                logger.warning(f"[universe] Failed loading bundled index sectors from {fn}: {e}")
+
+    # Offline enrichment pass over full nse_all_eq.json using deterministic company-name classification
+    p_all = _UNIVERSES_DATA_DIR / "nse_all_eq.json"
+    if not p_all.exists():
+        p_all = Path("data/universes/nse_all_eq.json")
+    if p_all.exists():
+        try:
+            all_rows = json.loads(p_all.read_text(encoding="utf-8"))
+            for d in all_rows:
+                if not isinstance(d, dict):
+                    continue
+                sym = str(d.get("symbol") or "").strip().upper()
+                if not sym or sym in _STOCK_TO_SECTOR:
+                    continue
+                name = str(d.get("name") or "")
+                inferred = _infer_sector_from_name(name)
+                if inferred:
+                    _STOCK_TO_SECTOR[sym] = inferred
+                    _STOCK_SECTOR_SOURCE[sym] = "NSE_ALL_EQ_NAME"
+        except Exception as e_all:
+            logger.debug(f"[universe] Offline nse_all_eq enrichment skipped: {e_all}")
 
 
 _load_bundled_index_sectors()
@@ -1700,14 +2216,19 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
     """
     Returns (sector_id, sector_name) for a given symbol.
     Uses:
-      1. Institutional in-memory fast inverse index (NIFTY Total Market 755+ constituents).
+      1. Institutional in-memory fast inverse index (NIFTY Total Market, BSE 500, F&O, Indices).
       2. Dynamic GICS/Industry metadata discovery for newly listed / BSE equities.
       3. Defaults to ("broad_market", "Broad Market") if completely unclassified.
     """
     from market.instruments import canonical_symbol
 
+    raw_u = str(symbol or "").strip().upper()
     clean = canonical_symbol(symbol)
     clean_u = clean.upper()
+    if raw_u in _INDEX_SECTOR_ALIASES or clean_u in _INDEX_SECTOR_ALIASES:
+        return ("index", "Market Indices")
+    if clean_u in _COMMODITY_EXTRA_ALIASES:
+        return ("commodity", "MCX Commodities")
     if (
         clean_u.startswith("CRYPTO:")
         or clean_u.endswith("USDT")
@@ -1719,6 +2240,8 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
 
     if clean in _STOCK_TO_SECTOR:
         return _STOCK_TO_SECTOR[clean]
+    if clean_u in _STOCK_TO_SECTOR:
+        return _STOCK_TO_SECTOR[clean_u]
 
     # Dynamic fallback: check local eod_store SQLite company_fundamentals (0ms local query)
     try:
@@ -1735,7 +2258,23 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
             mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
             if not mapped:
                 # Sub-industry heuristics
-                if "bank" in gics_ind or "finance" in gics_ind or "insurance" in gics_ind:
+                if any(
+                    k in gics_ind
+                    for k in (
+                        "exchange",
+                        "depository",
+                        "brok",
+                        "capital market",
+                        "asset management",
+                        "wealth",
+                    )
+                ):
+                    mapped = ("capital_markets", "Capital Markets & Wealth")
+                elif "insurance" in gics_ind or "assurance" in gics_ind:
+                    mapped = ("insurance", "Insurance & Protection")
+                elif any(k in gics_ind for k in ("fintech", "insurtech", "payment")):
+                    mapped = ("fintech_internet", "Fintech & Consumer Tech")
+                elif "bank" in gics_ind or "finance" in gics_ind:
                     mapped = ("banking", "Banking & Financial Services")
                 elif "software" in gics_ind or "tech" in gics_ind:
                     mapped = ("it", "IT, Software & Technology")
@@ -1784,6 +2323,22 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
                     or "real estate" in gics_sec.lower()
                 ):
                     mapped = ("realty", "Real Estate & Housing")
+                elif any(
+                    k in gics_ind
+                    for k in (
+                        "exchange",
+                        "depository",
+                        "brok",
+                        "capital market",
+                        "asset management",
+                        "wealth",
+                    )
+                ):
+                    mapped = ("capital_markets", "Capital Markets & Wealth")
+                elif "insurance" in gics_ind:
+                    mapped = ("insurance", "Insurance & Protection")
+                elif any(k in gics_ind for k in ("fintech", "insurtech", "payment")):
+                    mapped = ("fintech_internet", "Fintech & Consumer Tech")
                 elif "bank" in gics_ind or "finance" in gics_ind:
                     mapped = ("banking", "Banking & Financial Services")
                 elif "tech" in gics_ind or "software" in gics_ind:
@@ -2072,10 +2627,22 @@ def resolve_sector_taxonomy(query: str) -> tuple[str, dict[str, Any]]:
         "financials": "banking",
         "psu bank": "banking",
         "psubank": "banking",
+        "capital markets": "capital_markets",
+        "capital market": "capital_markets",
+        "exchanges": "capital_markets",
+        "wealth": "capital_markets",
+        "broking": "capital_markets",
+        "insurance": "insurance",
+        "life insurance": "insurance",
+        "general insurance": "insurance",
         "it": "it",
         "tech": "it",
         "technology": "it",
         "software": "it",
+        "fintech": "fintech_internet",
+        "fintech internet": "fintech_internet",
+        "insurtech": "fintech_internet",
+        "consumer tech": "fintech_internet",
         "auto": "auto",
         "automobile": "auto",
         "automobiles": "auto",
@@ -2230,12 +2797,15 @@ def resolve_dynamic_universe(
             improving_ids = []
             sector_id_map = {
                 "BANK": "banking",
+                "CAPITAL_MARKETS": "capital_markets",
+                "FIN_SERV": "insurance",
                 "IT": "it",
+                "FINTECH": "fintech_internet",
                 "AUTO": "auto",
                 "PHARMA": "pharma",
                 "FMCG": "fmcg",
                 "METAL": "metals",
-                "REALTY": "infra",
+                "REALTY": "realty",
                 "ENERGY": "energy",
                 "INFRA": "infra",
                 "PSU_BANK": "banking",

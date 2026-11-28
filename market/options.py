@@ -48,6 +48,66 @@ _SNAPSHOT_TTL = 45.0  # 45.0-second snapshot cache aligned with OCM refresh cade
 _STRIKE_BASELINE_OI: dict[str, int] = {}
 _BASELINE_DATE: Optional[str] = None
 _BASELINE_LOCK = threading.RLock()
+_CHAIN_ARCHIVE_TS: dict[str, float] = {}
+_CHAIN_ARCHIVE_LOCK = threading.Lock()
+
+
+def _archive_live_chain_snapshot(
+    clean_sym: str,
+    chain: list[OptionsContract],
+    *,
+    provider: str = "broker",
+    spot: Optional[float] = None,
+    min_interval_sec: float = 60.0,
+) -> None:
+    """Throttled archival of live broker option-chain snapshots into TickWarehouse."""
+    if (
+        not chain
+        or os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+    ):
+        return
+    now_ts = time.time()
+    with _CHAIN_ARCHIVE_LOCK:
+        if (now_ts - _CHAIN_ARCHIVE_TS.get(clean_sym, 0.0)) < min_interval_sec:
+            return
+        _CHAIN_ARCHIVE_TS[clean_sym] = now_ts
+    try:
+        from engine.tick_warehouse import get_tick_warehouse
+
+        spot_val = spot
+        if spot_val is None or spot_val <= 0:
+            for c in chain[:3]:
+                cand = getattr(c, "spot", None) or getattr(c, "underlying_price", None)
+                if cand and float(cand) > 0:
+                    spot_val = float(cand)
+                    break
+        if spot_val is None or spot_val <= 0:
+            try:
+                from market.quotes import get_quote
+
+                q = get_quote(clean_sym)
+                lp = float(
+                    getattr(q, "ltp", 0.0)
+                    or (q.get("ltp", 0.0) if isinstance(q, dict) else 0.0)
+                    or 0.0
+                )
+                if lp > 0:
+                    spot_val = lp
+            except Exception as e_spot_fb:
+                logger.debug(
+                    f"[market.options] Chain spot fallback quote skipped for {clean_sym}: {e_spot_fb}"
+                )
+
+        get_tick_warehouse().record_option_chain_snapshot(
+            underlying=clean_sym,
+            contracts=chain,
+            spot=spot_val,
+            provider=provider,
+            timestamp_ms=int(now_ts * 1000),
+        )
+    except Exception as e_arch:
+        logger.debug(f"[market.options] Chain snapshot archive note for {clean_sym}: {e_arch}")
 
 
 def _store_in_chain_cache(cache_key: str, chain: list[OptionsContract]) -> None:
@@ -121,6 +181,8 @@ def clear_options_caches() -> int:
     with _BASELINE_LOCK:
         cleared += len(_STRIKE_BASELINE_OI)
         _STRIKE_BASELINE_OI.clear()
+    with _CHAIN_ARCHIVE_LOCK:
+        _CHAIN_ARCHIVE_TS.clear()
     return cleared
 
 
@@ -455,7 +517,7 @@ def get_options_chain(
             t0 = time.time()
 
     if not is_leader:
-        evt.wait(timeout=6.0)
+        evt.wait(timeout=20.0)
         with _CHAIN_CACHE_LOCK:
             if cache_key in _CHAIN_CACHE:
                 return _CHAIN_CACHE[cache_key][1]
@@ -484,6 +546,7 @@ def get_options_chain(
                     _store_in_chain_cache(cache_key, chain)
                     if not is_commodity and not is_index:
                         _store_in_chain_cache(f"{clean_sym}:nearest", chain)
+                    _archive_live_chain_snapshot(clean_sym, chain, provider="broker")
                     chain_result = chain
                     return chain
             except Exception as e:
@@ -1983,7 +2046,15 @@ def get_iv_surface_snapshot(underlying: str, spot: float = 0.0) -> Any:
                 next_skew_info.get("atm_call_iv") or next_skew_info.get("atm_put_iv") or None
             )
 
-    return build_iv_surface_snapshot(
+    from engine.iv_surface import (
+        build_iv_surface_snapshot,
+        compute_symbol_realized_vol_20d,
+        load_historical_30d_ivs,
+        record_iv_observation,
+    )
+
+    hist_30d = load_historical_30d_ivs(clean_u)
+    snap = build_iv_surface_snapshot(
         symbol=clean_u,
         near_atm_iv=near_atm_iv if near_atm_iv > 0 else None,
         near_dte=near_dte,
@@ -1995,4 +2066,11 @@ def get_iv_surface_snapshot(underlying: str, spot: float = 0.0) -> Any:
         iv_25d_call=(
             near_skew_info.get("otm_call_iv") if near_skew_info.get("otm_call_iv", 0) > 0 else None
         ),
+        historical_30d_ivs=hist_30d,
+        near_expiry=near_exp,
+        next_expiry=next_exp,
+        realized_vol_20d=compute_symbol_realized_vol_20d(clean_u),
     )
+    if snap.status == "AVAILABLE":
+        record_iv_observation(snap)
+    return snap

@@ -137,27 +137,171 @@ class CalibrationRunner:
             return True, f"Calibration started in background at {now_str}."
 
     def _collect_options_replay_diagnostics(self) -> dict[str, Any]:
-        """Run research-only purged walk-forward replay on cached warehouse bars if available."""
+        """Run research-only purged walk-forward tournament, meta-model fit, IV backfill & compaction."""
         try:
+            from engine.detector_tournament import (
+                run_multi_profile_tournament,
+                save_tournament_report,
+            )
             from engine.historical_warehouse import historical_warehouse
-            from engine.options_replay import purged_walk_forward_score
-            from market.symbol_master import resolve_active_future
+            from engine.iv_surface import build_iv_surface_from_warehouse
+            from engine.meta_labeler import save_meta_model, train_purged_meta_model
+            from engine.tick_warehouse import get_tick_warehouse
 
-            fut = resolve_active_future("NIFTY") or "NIFTY"
-            df_5m = historical_warehouse.load_bars(fut, interval="5m")
-            if df_5m is None or df_5m.empty or len(df_5m) < 60:
+            target_universe = [
+                "NIFTY",
+                "BANKNIFTY",
+                "SENSEX",
+                "MIDCPNIFTY",
+                "RELIANCE",
+                "HDFCBANK",
+                "ICICIBANK",
+                "INFY",
+                "TCS",
+                "SBIN",
+                "AXISBANK",
+                "LT",
+                "BHARTIARTL",
+                "BAJFINANCE",
+                "CRUDEOIL",
+                "NATURALGAS",
+                "GOLD",
+                "SILVER",
+            ]
+            bars_by_sym: dict[str, Any] = {}
+            daily_bars_by_sym: dict[str, Any] = {}
+            for sym in target_universe:
+                df_5m = historical_warehouse.load_bars(sym, interval="5m")
+                if df_5m is not None and not df_5m.empty and len(df_5m) >= 60:
+                    bars_by_sym[sym] = df_5m
+                    try:
+                        daily_bars_by_sym[sym] = (
+                            df_5m.resample("D")
+                            .agg(
+                                {
+                                    "open": "first",
+                                    "high": "max",
+                                    "low": "min",
+                                    "close": "last",
+                                    "volume": "sum",
+                                }
+                            )
+                            .dropna()
+                        )
+                    except Exception as e_bar:
+                        logger.debug(f"[CalibrationRunner] Bar resample skipped for {sym}: {e_bar}")
+
+            if not bars_by_sym:
                 return {"status": "UNCALIBRATED", "reason": "INSUFFICIENT_WAREHOUSE_BARS"}
 
-            close = df_5m["close"].astype(float)
-            ema_fast = close.ewm(span=9, adjust=False).mean()
-            ema_slow = close.ewm(span=21, adjust=False).mean()
-            cross_up = (ema_fast > ema_slow) & (ema_fast.shift(1) <= ema_slow.shift(1))
-            entries = [int(i) for i in range(len(cross_up)) if bool(cross_up.iloc[i])]
-            if not entries:
-                return {"status": "UNCALIBRATED", "heldout_trades": 0}
-            res = purged_walk_forward_score(df_5m, entries, segment="FUTURES")
-            res["provenance"] = "RESEARCH_ONLY_WAREHOUSE_REPLAY"
-            return res
+            report = run_multi_profile_tournament(bars_by_sym, collect_meta_samples=True)
+            meta_samples = report.pop("meta_samples", [])
+            save_tournament_report(report)
+
+            meta_model = train_purged_meta_model(meta_samples)
+            save_meta_model(meta_model)
+
+            # Backfill constant-tenor IV surface records across archived TickWarehouse chain partitions
+            iv_updated = 0
+            compacted_segments = 0
+            wh = get_tick_warehouse()
+            stats = wh.get_storage_stats()
+            parts = stats.get("date_partitions", [])
+            for part_name in parts:
+                d_str = part_name.replace("date=", "")
+                oc_root = wh._get_partition_path(d_str) / "option_chains"
+                if oc_root.exists():
+                    for sym_dir in oc_root.iterdir():
+                        if sym_dir.is_dir():
+                            snap = build_iv_surface_from_warehouse(
+                                sym_dir.name,
+                                ohlcv_daily=daily_bars_by_sym.get(sym_dir.name),
+                                date_str=d_str,
+                                persist=True,
+                            )
+                            if snap.status == "AVAILABLE":
+                                iv_updated += 1
+
+            # Backfill historical constant-tenor BS IV observations from Fyers active monthly options
+            # if iv_daily_surface depth is < 25 sessions (strictly preserves live chain records).
+            fyers_iv_backfilled = 0
+            try:
+                import os as _os
+                from brokers.session import get_data_broker
+                from engine.iv_history_backfill import backfill_priority_iv_universe
+                from engine.iv_surface import load_historical_30d_ivs
+                from market.calendar import is_market_open
+
+                allow_intraday_bf = (
+                    _os.environ.get("CHANAKYA_ALLOW_INTRADAY_BACKFILL", "").strip() == "1"
+                )
+                if (not (is_market_open("NFO") or is_market_open("NSE"))) or allow_intraday_bf:
+                    brk = get_data_broker()
+                    if brk is not None and getattr(brk, "has_token", lambda: False)():
+                        if any(
+                            len(load_historical_30d_ivs(s)) < 25
+                            for s in ("NIFTY", "BANKNIFTY", "SENSEX")
+                        ):
+                            bf_res = backfill_priority_iv_universe(
+                                [
+                                    "NIFTY",
+                                    "BANKNIFTY",
+                                    "SENSEX",
+                                    "RELIANCE",
+                                    "HDFCBANK",
+                                    "ICICIBANK",
+                                ],
+                                broker=brk,
+                                lookback_days=90,
+                                target_min_sessions=25,
+                            )
+                            fyers_iv_backfilled = int(bf_res.get("total_persisted") or 0)
+                else:
+                    logger.info(
+                        "[CalibrationRunner] Skipping historical BS IV backfill during peak NSE/NFO session."
+                    )
+            except Exception as exc_bf:
+                logger.debug(f"[CalibrationRunner] Historical BS IV backfill skipped: {exc_bf}")
+
+            # Compact segments bounded in background so CalibrationRunner never blocks >20s
+            try:
+                from engine.pipeline.universe_scheduler import background_task_runner
+
+                def _compact_async() -> None:
+                    for pn in parts:
+                        wh.compact_all_symbols(date_str=pn.replace("date=", ""))
+
+                background_task_runner.submit("wh-compact-partitions", _compact_async)
+            except Exception as e_cmp_sub:
+                logger.debug(
+                    f"[CalibrationRunner] Background compaction submit skipped: {e_cmp_sub}"
+                )
+
+            summary = {
+                det: {
+                    "status": info.get("status"),
+                    "governance": info.get("governance"),
+                    "trades": info.get("trades"),
+                    "net_expectancy_r": info.get("net_expectancy_r"),
+                }
+                for det, info in (report.get("detectors") or {}).items()
+            }
+            return {
+                "status": "COMPLETED",
+                "provenance": "RESEARCH_ONLY_PURGED_WALK_FORWARD",
+                "symbols_count": len(bars_by_sym),
+                "detectors": summary,
+                "meta_model": {
+                    "status": meta_model.status,
+                    "sample_count": meta_model.sample_count,
+                    "win_count": meta_model.win_count,
+                    "loss_count": meta_model.loss_count,
+                    "oos_brier_score": meta_model.oos_brier_score,
+                },
+                "iv_snapshots_persisted": iv_updated + fyers_iv_backfilled,
+                "fyers_iv_backfilled": fyers_iv_backfilled,
+                "tick_segments_compacted": compacted_segments,
+            }
         except Exception as exc_rep:
             logger.debug(f"[CalibrationRunner] Options replay diagnostics skipped: {exc_rep}")
             return {"status": "UNCALIBRATED", "reason": str(exc_rep)}

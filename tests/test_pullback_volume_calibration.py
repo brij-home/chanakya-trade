@@ -199,6 +199,7 @@ class TestAutoAlertEngineAfternoonGate:
 
     def test_afternoon_pullback_gate_logic(self, monkeypatch):
         monkeypatch.setenv("ENFORCE_AFTERNOON_STOCK_GATE", "1")
+        monkeypatch.setenv("TELEGRAM_ALLOW_TREND_DAY_PULLBACK", "1")
         from engine.auto_alert_engine import AutoAlertEngine
 
         engine = AutoAlertEngine()

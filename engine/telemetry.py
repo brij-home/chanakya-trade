@@ -111,73 +111,81 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
 
     # Multi-key LLM failover, Guardian screening vetoes, risk suppressions, delisted/expired symbols,
     # in-flight trade coaching/warnings, self-healing rewrites, and routine scout rotation are informational audits (P3)
-    if event_type == EVENT_LLM_FAILOVER or any(
-        k in rsn
-        for k in (
-            "VETO",
-            "MILESTONE",
-            "INTEGRITY GATE",
-            "CODE -300",
-            "-300",
-            "CODE: -300",
-            "INVALID_SYMBOLS",
-            "INVALID SYMBOL",
-            "INVALID SYMBOL PROVIDED",
-            "PLEASE PROVIDE A VALID SYMBOL",
-            "DELISTED",
-            "EXPIRED",
-            "SUPPRESS",
-            "POLARIZATION",
-            "REWRITING",
-            "IN-FLIGHT WARNING",
-            "NO PRICE DATA FOUND",
-            "POSSIBLY DELISTED",
-            "FAILOVER TO FALLBACK",
-            "THROTTLED OR HIGH DEMAND",
-            "UNRESPONSIVE SECTOR SCOUT",
-            "ZERO PACKETS RECEIVED",
-            "DEAD TBT SCOUT",
-            "REVOLVING IDLE",
-            "EVICTING UNRESPONSIVE",
-            "CONNECTION TO REMOTE HOST WAS LOST",
-            "REMOTE HOST WAS LOST",
-            "GOODBYE",
-            "JSONDECODEERROR",
-            "OPTIONS-CHAIN-V3",
-            "PROTOCOLERROR",
-            "REMOTE DISCONNECTED",
-            "PROVIDER CALL EXCEEDED",
-            "DEADLINE (ALERT-SCRUTINY)",
-            "LLM CALL EXCEEDED",
-            "FAST-LLM UNAVAILABLE",
-            "SCAN CYCLE TIMEOUT",
-            "SKIPPING HEDGE SPREAD",
-            "EXACT CONTRACT HAS NO VALID ACTIVE LISTED MASTER LOT",
-            "STRIKE CLOCK DISPATCH FAILED",
-            "COULD NOT FIND LIQUID OTM HEDGE",
-            "CAPACITY EXHAUSTED",
-            "DISCARDED PHANTOM DIRTY TICK",
-            "PHANTOM DIRTY TICK",
-            "SILENCE WATCHDOG",
-            "PACKET FREEZE DETECTED",
-            "PROACTIVELY DROPPED INVALID SYMBOL",
-            "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
-            "CONNECTION CLOSED NORMALLY",
-            "CODE 1000",
-            "CODE 1001",
-            "CLOUDFLARE WEBSOCKET PROXY RESTARTING",
-            "^TNX",
-            "PING/PONG TIMED OUT",
-            "WINERROR 10053",
-            "WINERROR 10054",
-            "FORCIBLY CLOSED BY THE REMOTE HOST",
-            "RESET BY PEER",
-            "RATE GATE DENIED PERMIT",
-            "RATE GATE DENIED",
-            "DENIED PERMIT",
-            "EVALUATION TIMEOUT",
-            "FILE LOCKED BEYOND RETRY BUDGET",
+    if (
+        event_type == EVENT_LLM_FAILOVER
+        or any(
+            k in rsn
+            for k in (
+                "VETO",
+                "MILESTONE",
+                "INTEGRITY GATE",
+                "CODE -300",
+                "-300",
+                "CODE: -300",
+                "INVALID_SYMBOLS",
+                "INVALID SYMBOL",
+                "INVALID SYMBOL PROVIDED",
+                "PLEASE PROVIDE A VALID SYMBOL",
+                "DELISTED",
+                "EXPIRED",
+                "SUPPRESS",
+                "POLARIZATION",
+                "REWRITING",
+                "IN-FLIGHT WARNING",
+                "NO PRICE DATA FOUND",
+                "POSSIBLY DELISTED",
+                "FAILOVER TO FALLBACK",
+                "THROTTLED OR HIGH DEMAND",
+                "UNRESPONSIVE SECTOR SCOUT",
+                "ZERO PACKETS RECEIVED",
+                "DEAD TBT SCOUT",
+                "REVOLVING IDLE",
+                "EVICTING UNRESPONSIVE",
+                "CONNECTION TO REMOTE HOST WAS LOST",
+                "REMOTE HOST WAS LOST",
+                "GOODBYE",
+                "JSONDECODEERROR",
+                "OPTIONS-CHAIN-V3",
+                "PROTOCOLERROR",
+                "REMOTE DISCONNECTED",
+                "PROVIDER CALL EXCEEDED",
+                "DEADLINE (ALERT-SCRUTINY)",
+                "LLM CALL EXCEEDED",
+                "FAST-LLM UNAVAILABLE",
+                "SCAN CYCLE TIMEOUT",
+                "SKIPPING HEDGE SPREAD",
+                "EXACT CONTRACT HAS NO VALID ACTIVE LISTED MASTER LOT",
+                "STRIKE CLOCK DISPATCH FAILED",
+                "COULD NOT FIND LIQUID OTM HEDGE",
+                "CAPACITY EXHAUSTED",
+                "DISCARDED PHANTOM DIRTY TICK",
+                "PHANTOM DIRTY TICK",
+                "SILENCE WATCHDOG",
+                "PACKET FREEZE DETECTED",
+                "PROACTIVELY DROPPED INVALID SYMBOL",
+                "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
+                "CONNECTION CLOSED NORMALLY",
+                "CODE 1000",
+                "CODE 1001",
+                "CLOUDFLARE WEBSOCKET PROXY RESTARTING",
+                "^TNX",
+                "PING/PONG TIMED OUT",
+                "WINERROR 10053",
+                "WINERROR 10054",
+                "FORCIBLY CLOSED BY THE REMOTE HOST",
+                "RESET BY PEER",
+                "RATE GATE DENIED PERMIT",
+                "RATE GATE DENIED",
+                "DENIED PERMIT",
+                "EVALUATION TIMEOUT",
+                "FILE LOCKED BEYOND RETRY BUDGET",
+                "_PROACTORBASEPIPETRANSPORT._CALL_CONNECTION_LOST",
+                "SYSTEM_MAINTENANCE",
+                "DERIBIT OPTIONS API RETURNED 503",
+                "COMPACTION SKIPPED",
+            )
         )
+        or ("[AUTOALERTENGINE]" in rsn and "TIMEOUT (" in rsn and "PROCEEDING WITH" in rsn)
     ):
         return "P3"
 
@@ -218,6 +226,25 @@ _events_buffer: deque[TelemetryEvent] = deque(maxlen=_MAX_IN_MEMORY_EVENTS)
 _lock = threading.Lock()
 
 
+def _is_test_telemetry_isolation() -> bool:
+    """True when running under tests with unredirected home dir so tests never pollute live OpsDeck logs."""
+    import os
+
+    is_test = bool(
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("CHANAKYA_TESTING") == "1"
+        or os.environ.get("DEPLOY_MODE") == "test"
+    )
+    if not is_test:
+        return False
+    try:
+        from config.paths import app_data_dir
+
+        return app_data_dir().resolve() == (Path.home() / ".trading_platform").resolve()
+    except Exception:
+        return True
+
+
 def _get_telemetry_file() -> Path:
     telemetry_dir = app_data_path("telemetry")
     telemetry_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +257,8 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
     Guarantees zero operational amnesia across process restarts while keeping startup fast and bounded.
     """
     try:
+        if _is_test_telemetry_isolation():
+            return
         target_file = _get_telemetry_file()
         if not target_file.exists():
             return
@@ -245,7 +274,7 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                     comp = data.get("component", "SYSTEM")
                     sev = data.get("severity", "INFO")
                     rsn = data.get("reason", "")
-                    # Suppress spurious Starlette SSE client disconnect or Windows socket teardown artifacts from historical memory
+                    # Suppress spurious Starlette SSE client disconnect, Windows teardown, or test-harness socket artifacts
                     if any(
                         s in rsn
                         for s in (
@@ -253,6 +282,8 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                             "Accept failed on a socket",
                             "IocpProactor.accept",
                             "Task exception was never retrieved",
+                            "Outbound network connection blocked during test",
+                            "_ProactorBasePipeTransport._call_connection_lost",
                         )
                     ):
                         continue
@@ -363,19 +394,21 @@ def record_event(
         priority=resolved_priority,
     )
 
+    test_isolated = _is_test_telemetry_isolation()
     with _lock:
         _events_buffer.append(event)
-        try:
-            target_file = _get_telemetry_file()
-            _rotate_logs_if_needed(target_file)
-            with target_file.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(event.to_dict()) + "\n")
-        except Exception as e_suppressed:
-            # Observability logging should never crash the caller
-            logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
+        if not test_isolated:
+            try:
+                target_file = _get_telemetry_file()
+                _rotate_logs_if_needed(target_file)
+                with target_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(event.to_dict()) + "\n")
+            except Exception as e_suppressed:
+                # Observability logging should never crash the caller
+                logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
 
     # Real-time SSE dispatch for critical/high priority incidents
-    if resolved_priority in ("P0", "P1"):
+    if resolved_priority in ("P0", "P1") and not test_isolated:
         try:
             from web.sse import event_bus
 
@@ -748,6 +781,14 @@ class TelemetryLogHandler(logging.Handler):
 
             msg = str(record.getMessage())
             rec_name = str(record.name or "")
+            exc_msg = ""
+            if record.exc_info and len(record.exc_info) >= 2 and record.exc_info[1] is not None:
+                exc_obj = record.exc_info[1]
+                exc_msg = f"{type(exc_obj).__name__}: {exc_obj}"
+            elif getattr(record, "exc_text", None):
+                exc_msg = str(record.exc_text)
+            combined_msg = f"{msg}\n{exc_msg}".strip() if exc_msg else msg
+            combined_upper = combined_msg.upper()
 
             # Deduplicate frequent identical log messages within 60 seconds
             import hashlib
@@ -762,13 +803,26 @@ class TelemetryLogHandler(logging.Handler):
                 cutoff = now_ts - 300.0
                 self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if v > cutoff}
 
-            # Ignore routine process shutdown socket teardowns
+            # Ignore routine process shutdown, test-harness socket blocks, or Windows Proactor client-disconnect socket teardowns
             if any(
                 s in msg
                 for s in (
                     "Accept failed on a socket",
                     "IocpProactor.accept",
                     "RuntimeError: No response returned.",
+                    "Outbound network connection blocked during test",
+                )
+            ) or (
+                "_ProactorBasePipeTransport._call_connection_lost" in msg
+                and any(
+                    k in combined_upper
+                    for k in (
+                        "WINERROR 10054",
+                        "WINERROR 10053",
+                        "CONNECTIONRESETERROR",
+                        "CONNECTIONABORTEDERROR",
+                        "FORCIBLY CLOSED BY THE REMOTE HOST",
+                    )
                 )
             ):
                 return
@@ -788,10 +842,12 @@ class TelemetryLogHandler(logging.Handler):
                 )
             )
             is_rate_limit = (
-                "429" in msg or "RATE LIMIT" in msg.upper() or "TOO MANY REQUESTS" in msg.upper()
+                "429" in combined_msg
+                or "RATE LIMIT" in combined_upper
+                or "TOO MANY REQUESTS" in combined_upper
             )
 
-            prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, msg)
+            prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, combined_msg)
 
             if is_external_noise:
                 # Scraper ticker misses or normal code 1000 closures are P3 operational diagnostics
@@ -799,7 +855,7 @@ class TelemetryLogHandler(logging.Handler):
                 # Remote teardowns, peer disconnects, and off-market host socket closures are routine P3 diagnostics
                 if (
                     any(
-                        k in msg.upper()
+                        k in combined_upper
                         for k in (
                             "CODE -300",
                             "-300",
@@ -836,7 +892,7 @@ class TelemetryLogHandler(logging.Handler):
             else:
                 if (
                     any(
-                        k in msg.upper()
+                        k in combined_upper
                         for k in (
                             "VETO",
                             "MILESTONE",
@@ -875,6 +931,9 @@ class TelemetryLogHandler(logging.Handler):
                             "WINERROR 10053",
                             "FORCIBLY CLOSED BY THE REMOTE HOST",
                             "RESET BY PEER",
+                            "SYSTEM_MAINTENANCE",
+                            "DERIBIT OPTIONS API RETURNED 503",
+                            "COMPACTION SKIPPED",
                         )
                     )
                     or prio == "P3"

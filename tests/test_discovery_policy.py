@@ -18,9 +18,11 @@ def strict_scope(monkeypatch):
     monkeypatch.setenv("SESSION_FOCUS_MODE", "FNO_ONLY")
 
 
-def test_production_default_is_strict_and_unknown_profiles_do_not_fall_back(monkeypatch):
+def test_production_default_is_fno_priority_and_unknown_profiles_do_not_fall_back(monkeypatch):
     monkeypatch.delenv("SESSION_FOCUS_MODE", raising=False)
-    assert get_discovery_policy().fno_only
+    policy = get_discovery_policy()
+    assert policy.profile == "FNO_PRIORITY"
+    assert not policy.fno_only
     monkeypatch.setenv("SESSION_FOCUS_MODE", "TYPO")
     with pytest.raises(ValueError, match="Unknown SESSION_FOCUS_MODE"):
         get_discovery_policy()

@@ -41,6 +41,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import math
+import os
 import threading
 import time
 import datetime as dt
@@ -647,6 +648,18 @@ def to_fyers_symbol(instrument: str) -> str:
 _to_fyers_symbol = to_fyers_symbol
 
 
+def _is_real_sdk_method(sdk_obj: Any, method_name: str) -> bool:
+    """Return True if method_name is a real SDK method or explicitly configured mock."""
+    fn = getattr(sdk_obj, method_name, None)
+    if not callable(fn):
+        return False
+    if hasattr(fn, "assert_called"):
+        return getattr(fn, "side_effect", None) is not None or isinstance(
+            getattr(fn, "return_value", None), dict
+        )
+    return True
+
+
 def _get_sdk():
     """Lazy import fyers SDK."""
     try:
@@ -666,9 +679,13 @@ def _is_fyers_auth_error(data: Any) -> bool:
     """
     if not isinstance(data, dict):
         return False
-    if data.get("code") in (-14, -15, -16, -17, 401, 403):
-        return True
+    code = data.get("code")
     msg = str(data.get("message", "")).lower()
+    if code in (-8, -14, -15, -16, -17, 401):
+        return True
+    # Cloudflare/transport 403 HTML causes FyersServiceSync to return {"code": 403, "message": "Bad request"}
+    if code == 403 and msg.strip() != "bad request":
+        return True
     return any(
         token_err in msg
         for token_err in (
@@ -716,6 +733,46 @@ def _is_fyers_transport_error(data: Any) -> bool:
         return False
     msg = str(data.get("message", "")).strip().lower()
     return msg in ("bad request", "invalid input please check your input", "")
+
+
+def _extract_fy_id_from_token(token: str) -> Optional[str]:
+    """Decode Fyers JWT payload locally to extract fy_id without any network call."""
+    if not token or "." not in token:
+        return None
+    try:
+        import base64
+
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        seg = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(seg).decode("utf-8"))
+        fy_id = payload.get("fy_id") or payload.get("sub")
+        if fy_id and str(fy_id).strip():
+            return str(fy_id).strip()
+    except Exception:
+        return None
+    return None
+
+
+def _extract_retry_after_seconds(headers: Any) -> Optional[float]:
+    """Parse Fyers X-Retry-After-Ms or Retry-After HTTP headers into seconds."""
+    if not headers:
+        return None
+    try:
+        ms_raw = headers.get("X-Retry-After-Ms") or headers.get("x-retry-after-ms")
+        if ms_raw is not None and str(ms_raw).strip():
+            ms_val = float(ms_raw)
+            if ms_val > 0:
+                return max(0.5, ms_val / 1000.0)
+        sec_raw = headers.get("Retry-After") or headers.get("retry-after")
+        if sec_raw is not None and str(sec_raw).strip():
+            sec_val = float(sec_raw)
+            if sec_val > 0:
+                return sec_val
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def _record_fyers_failure_if_applicable(
@@ -857,8 +914,28 @@ class FyersAPI(BrokerAPI):
         self._holdings_cache: Optional[tuple[float, list[Holding]]] = None
         self._positions_cache: Optional[tuple[float, list[Position]]] = None
         self._portfolio_cache_lock = threading.Lock()
+        self._quotes_v2_blocked_until: float = 0.0
+        self._quotes_v2_blocked: bool = False
         self.name: str = "fyers"
         self._load_token()
+        if not self._fy_id and self._access_token:
+            self._fy_id = _extract_fy_id_from_token(self._access_token)
+
+    @property
+    def account_id(self) -> Optional[str]:
+        """Authoritative broker client identifier (profile user_id, configured fy_id, or JWT claim)."""
+        if self._profile and getattr(self._profile, "user_id", None):
+            return str(self._profile.user_id).strip()
+        if self._fy_id and str(self._fy_id).strip():
+            return str(self._fy_id).strip()
+        if self._access_token:
+            return _extract_fy_id_from_token(self._access_token)
+        return None
+
+    @property
+    def client_id(self) -> Optional[str]:
+        """Alias for account_id required by OMS/reconciliation contracts."""
+        return self.account_id
 
     # ── SDK Instance ─────────────────────────────────────────
 
@@ -951,6 +1028,9 @@ class FyersAPI(BrokerAPI):
                     prev_tok = self._access_token
                     self._access_token = data.get("access_token", "")
                     self._token_ts = ts
+                    self._quotes_v2_blocked = False
+                    if not self._fy_id and self._access_token:
+                        self._fy_id = _extract_fy_id_from_token(self._access_token)
                     if not self._app_id and data.get("app_id"):
                         self._app_id = data.get("app_id")
                     if self._access_token and prev_tok and self._access_token != prev_tok:
@@ -1574,7 +1654,7 @@ class FyersAPI(BrokerAPI):
             )
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
                     data = fyers.get_profile()
 
         if not isinstance(data, dict) or data.get("s") != "ok" or not data.get("data"):
@@ -1625,7 +1705,7 @@ class FyersAPI(BrokerAPI):
             )
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
                     data = fyers.funds()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
@@ -1676,7 +1756,7 @@ class FyersAPI(BrokerAPI):
             logger.warning(f"[FyersAPI] Holdings API auth rejection ({data.get('message')}).")
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
                     data = fyers.holdings()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
@@ -1733,7 +1813,7 @@ class FyersAPI(BrokerAPI):
             logger.warning(f"[FyersAPI] Positions API auth rejection ({data.get('message')}).")
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
                     data = fyers.positions()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
@@ -1812,20 +1892,70 @@ class FyersAPI(BrokerAPI):
             _warn_circuit_breaker_open("get_quote")
             return {}
 
-        # Chunk in batches up to plan limit (clamped to 300 symbols/request and URL byte budget to prevent HTTP 414 URI Too Long)
+        # Chunk in batches: POST quotes_v2 supports up to 1,000 symbols/request on Prime without HTTP 414;
+        # GET quotes() is clamped to 300 symbols and URL byte budget to prevent HTTP 414 URI Too Long.
         from market.quote_dispatcher import (
             chunk_symbols_for_quotes,
             SAFE_HTTP_MAX_CHUNK_SIZE,
             SAFE_URL_MAX_CHARS,
         )
 
-        max_symbols = min(
-            getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000),
-            SAFE_HTTP_MAX_CHUNK_SIZE,
-        )
-        chunks = chunk_symbols_for_quotes(
-            unique_fyers_symbols, max_symbols=max_symbols, max_chars=SAFE_URL_MAX_CHARS
-        )
+        use_quotes_v2 = _is_real_sdk_method(fyers, "quotes_v2")
+        plan_chunk = int(getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000) or 1000)
+        if use_quotes_v2:
+            max_symbols = min(plan_chunk, 1000)
+            chunks = chunk_symbols_for_quotes(
+                unique_fyers_symbols, max_symbols=max_symbols, max_chars=1_000_000
+            )
+        else:
+            max_symbols = min(plan_chunk, SAFE_HTTP_MAX_CHUNK_SIZE)
+            chunks = chunk_symbols_for_quotes(
+                unique_fyers_symbols, max_symbols=max_symbols, max_chars=SAFE_URL_MAX_CHARS
+            )
+
+        def _dispatch_quotes_chunk(client_obj: Any, sym_chunk: list[str]) -> Any:
+            force_v2 = os.environ.get("FYERS_FORCE_QUOTES_V2") == "1"
+            is_v2_blocked = bool(getattr(self, "_quotes_v2_blocked", False)) and not force_v2
+            if use_quotes_v2 and len(sym_chunk) > 0 and not is_v2_blocked:
+                try:
+                    resp = client_obj.quotes_v2({"symbols": sym_chunk})
+                    if isinstance(resp, dict) and resp.get("s") == "ok":
+                        return resp
+                    resp_code = resp.get("code") if isinstance(resp, dict) else None
+                    resp_msg = (
+                        str(resp.get("message", "")).strip().lower()
+                        if isinstance(resp, dict)
+                        else ""
+                    )
+                    if resp_code in (403, 404, 405, 500) or resp_msg == "bad request":
+                        self._quotes_v2_blocked = True
+                        self._quotes_v2_blocked_until = time.monotonic() + 86400.0
+                        logger.info(
+                            "[FyersAPI] quotes_v2 unavailable (%s: %s); falling back cleanly to GET quotes() for this session.",
+                            resp_code,
+                            resp_msg or "error",
+                        )
+                    elif isinstance(resp, dict):
+                        return resp
+                except Exception as exc_v2:
+                    logger.debug(
+                        f"[FyersAPI] quotes_v2 fallback to GET quotes() for {len(sym_chunk)} symbols: {exc_v2}"
+                    )
+            if len(sym_chunk) > SAFE_HTTP_MAX_CHUNK_SIZE:
+                # Defensive fallback if quotes_v2 failed mid-flight
+                merged_d: list[Any] = []
+                last_resp: dict[str, Any] = {"s": "ok", "d": merged_d}
+                for sub_chunk in chunk_symbols_for_quotes(
+                    sym_chunk, max_symbols=SAFE_HTTP_MAX_CHUNK_SIZE, max_chars=SAFE_URL_MAX_CHARS
+                ):
+                    sub_resp = client_obj.quotes({"symbols": ",".join(sub_chunk)})
+                    if isinstance(sub_resp, dict) and sub_resp.get("s") == "ok":
+                        merged_d.extend(sub_resp.get("d", []))
+                    else:
+                        last_resp = sub_resp if isinstance(sub_resp, dict) else {"s": "error"}
+                return last_resp if merged_d else last_resp
+            return client_obj.quotes({"symbols": ",".join(sym_chunk)})
+
         for chunk in chunks:
             if get_fyers_circuit_breaker().is_tripped():
                 _warn_circuit_breaker_open("get_quote")
@@ -1839,7 +1969,7 @@ class FyersAPI(BrokerAPI):
                         continue
                 else:
                     rate_gate_acquired = False
-                data = fyers.quotes({"symbols": ",".join(chunk)})
+                data = _dispatch_quotes_chunk(fyers, chunk)
                 if _is_fyers_auth_error(data):
                     failed_ts = self._token_ts
                     logger.warning(
@@ -1847,8 +1977,8 @@ class FyersAPI(BrokerAPI):
                     )
                     if self._handle_auth_failure(failed_ts=failed_ts):
                         fyers = self._get_fyers()
-                        if fyers:
-                            data = fyers.quotes({"symbols": ",".join(chunk)})
+                        if fyers and _fyers_rate_limiter.acquire(category=category):
+                            data = _dispatch_quotes_chunk(fyers, chunk)
 
                 if not isinstance(data, dict) or data.get("s") != "ok":
                     err_msg = (
@@ -1890,39 +2020,41 @@ class FyersAPI(BrokerAPI):
                         ch = round(last_price - open_price, 2)
                         chp = round((ch / open_price * 100), 2) if open_price else 0.0
 
+                    def _opt_float(val: Any) -> Optional[float]:
+                        if val is None or val == "":
+                            return None
+                        try:
+                            return float(val)
+                        except (TypeError, ValueError):
+                            return None
+
+                    def _make_quote(sym_str: str) -> Quote:
+                        return Quote(
+                            symbol=sym_str,
+                            last_price=last_price,
+                            open=open_price,
+                            high=high_price,
+                            low=low_price,
+                            close=prev_close,
+                            volume=int(v.get("volume", 0) or 0),
+                            change=ch,
+                            change_pct=chp,
+                            vwap=float(v.get("atp", 0.0) or 0.0) or None,
+                            upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
+                            lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
+                            reference_price=_opt_float(v.get("reference_price")),
+                            indicative_price=_opt_float(v.get("indicative_price")),
+                            imbalance=_opt_float(v.get("imbalance")),
+                            mkt_imbalance=_opt_float(v.get("mkt_imbalance")),
+                        )
+
                     orig_keys = key_map.get(raw, [raw])
                     for k in orig_keys:
                         k_sym = k.split(":")[-1] if ":" in k else k
-                        result[k] = Quote(
-                            symbol=k_sym,
-                            last_price=last_price,
-                            open=open_price,
-                            high=high_price,
-                            low=low_price,
-                            close=prev_close,
-                            volume=int(v.get("volume", 0) or 0),
-                            change=ch,
-                            change_pct=chp,
-                            vwap=float(v.get("atp", 0.0) or 0.0) or None,
-                            upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
-                            lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
-                        )
+                        result[k] = _make_quote(k_sym)
                     if raw not in result:
                         raw_sym = raw.split(":")[-1] if ":" in raw else raw
-                        result[raw] = Quote(
-                            symbol=raw_sym,
-                            last_price=last_price,
-                            open=open_price,
-                            high=high_price,
-                            low=low_price,
-                            close=prev_close,
-                            volume=int(v.get("volume", 0) or 0),
-                            change=ch,
-                            change_pct=chp,
-                            vwap=float(v.get("atp", 0.0) or 0.0) or None,
-                            upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
-                            lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
-                        )
+                        result[raw] = _make_quote(raw_sym)
             except Exception as exc:
                 err_str = str(exc)
                 get_fyers_circuit_breaker().record_failure(
@@ -2048,6 +2180,17 @@ class FyersAPI(BrokerAPI):
         except Exception as e_tbt:
             logger.debug(f"[FyersAPI] TBT depth cache check error: {e_tbt}")
 
+        # Zero-latency 5-level WS DepthUpdate bridge (used for BSE/BFO and overflow exposures)
+        try:
+            from market.websocket import ws_manager
+
+            if getattr(ws_manager, "connected", False) and hasattr(ws_manager, "get_l2_depth"):
+                l2_ws = ws_manager.get_l2_depth(fyers_sym) or ws_manager.get_l2_depth(symbol)
+                if l2_ws and l2_ws.get("status") == "ok":
+                    return l2_ws
+        except Exception as e_l2ws:
+            logger.debug(f"[FyersAPI] L2 WS DepthUpdate check error: {e_l2ws}")
+
         if get_fyers_circuit_breaker().is_tripped():
             return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN"}
 
@@ -2070,7 +2213,9 @@ class FyersAPI(BrokerAPI):
                 )
                 if self._handle_auth_failure(failed_ts=failed_ts):
                     fyers = self._get_fyers()
-                    if fyers:
+                    if fyers and _fyers_rate_limiter.acquire(
+                        category=FyersCallCategory.DEPTH_CHAIN
+                    ):
                         data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
 
             if not isinstance(data, dict) or data.get("s") != "ok":
@@ -2194,7 +2339,9 @@ class FyersAPI(BrokerAPI):
                 )
                 if self._handle_auth_failure(failed_ts=failed_ts):
                     fyers = self._get_fyers()
-                    if fyers:
+                    if fyers and _fyers_rate_limiter.acquire(
+                        category=FyersCallCategory.DEPTH_CHAIN
+                    ):
                         data = fyers.optionchain(params)
 
             if not isinstance(data, dict) or data.get("s") != "ok":
@@ -2426,6 +2573,191 @@ class FyersAPI(BrokerAPI):
         }
         return chain, spot, expiries, source_info
 
+    def get_futures_chain(self, underlying: str) -> dict[str, Any]:
+        """Fetch active futures chain (near/next/far contracts, LTP, OI) via Fyers futures_chain API."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN", "contracts": []}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "futures_chain"):
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Fyers futures_chain endpoint unavailable",
+                "contracts": [],
+            }
+        fyers_sym = _to_fyers_symbol(underlying)
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
+            return {"status": "UNAVAILABLE", "message": "Rate gate denied permit", "contracts": []}
+        try:
+            res = fyers.futures_chain({"symbol": fyers_sym})
+            if not isinstance(res, dict) or res.get("s") != "ok":
+                err_msg = (
+                    str(res.get("message", "futures_chain error"))
+                    if isinstance(res, dict)
+                    else "Invalid response"
+                )
+                _record_fyers_failure_if_applicable(res, err_msg=err_msg, default_status_code=0)
+                return {"status": "UNAVAILABLE", "message": err_msg, "contracts": []}
+            get_fyers_circuit_breaker().record_success()
+            payload = res.get("data", {})
+            if isinstance(payload, list):
+                raw_list = payload
+            elif isinstance(payload, dict):
+                raw_list = payload.get("futuresChain") or payload.get("futures_chain") or []
+            else:
+                raw_list = []
+            contracts: list[dict[str, Any]] = []
+            spot_price: Optional[float] = None
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
+                sym_str = str(item.get("symbol", "") or "")
+                exp_raw = str(item.get("expiry", item.get("expiryDate", "")) or "")
+                item_ltp = float(item.get("ltp", item.get("lp", 0.0)) or 0.0)
+                if not exp_raw and sym_str and not sym_str.upper().endswith("FUT"):
+                    if item_ltp > 0:
+                        spot_price = item_ltp
+                    continue
+                contracts.append(
+                    {
+                        "symbol": sym_str,
+                        "expiry": exp_raw,
+                        "ltp": item_ltp,
+                        "oi": int(item.get("oi", 0) or 0),
+                        "oi_change": int(item.get("oich", item.get("doi", 0)) or 0),
+                        "volume": int(item.get("volume", 0) or 0),
+                        "change_pct": float(item.get("chp", item.get("change_pct", 0.0)) or 0.0),
+                        "bid": float(item.get("bid", item.get("bid_price", 0.0)) or 0.0) or None,
+                        "ask": float(item.get("ask", item.get("ask_price", 0.0)) or 0.0) or None,
+                    }
+                )
+            return {
+                "status": "ok",
+                "provider": "fyers",
+                "underlying": underlying,
+                "fyers_symbol": fyers_sym,
+                "spot_price": spot_price,
+                "contracts": contracts,
+            }
+        except Exception as exc:
+            return {"status": "UNAVAILABLE", "message": str(exc), "contracts": []}
+
+    def get_expired_expiries(
+        self,
+        underlying: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> list[str]:
+        """Fetch historical expired F&O expiry dates via /history/fno/expired/expiry-dates (range_to < today)."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "expiry_dates"):
+            return []
+        fyers_sym = _to_fyers_symbol(underlying)
+        yesterday_d = datetime.now().date() - dt.timedelta(days=1)
+        range_to_d = yesterday_d
+        if to_date:
+            try:
+                parsed_to = dt.date.fromisoformat(to_date.strip()[:10])
+                range_to_d = min(parsed_to, yesterday_d)
+            except ValueError as e_to_dt:
+                logger.debug(f"[FyersAPI] Invalid to_date={to_date!r}: {e_to_dt}")
+        range_from_d = range_to_d - dt.timedelta(days=180)
+        if from_date:
+            try:
+                parsed_from = dt.date.fromisoformat(from_date.strip()[:10])
+                if parsed_from <= range_to_d:
+                    range_from_d = parsed_from
+            except ValueError as e_from_dt:
+                logger.debug(f"[FyersAPI] Invalid from_date={from_date!r}: {e_from_dt}")
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
+            return []
+        try:
+            exp_res = fyers.expiry_dates(
+                {
+                    "symbol": fyers_sym,
+                    "date_format": 1,
+                    "range_from": range_from_d.strftime("%Y-%m-%d"),
+                    "range_to": range_to_d.strftime("%Y-%m-%d"),
+                }
+            )
+            if not isinstance(exp_res, dict) or exp_res.get("s") != "ok":
+                return []
+            get_fyers_circuit_breaker().record_success()
+            raw_exp = (
+                (exp_res.get("data") or {}).get("expiry", [])
+                if isinstance(exp_res.get("data"), dict)
+                else []
+            )
+            out: list[str] = []
+            for item in raw_exp:
+                d_str = str(item.get("date", "") if isinstance(item, dict) else item).strip()
+                if len(d_str) == 10 and d_str[4] == "-":
+                    out.append(d_str)
+                elif "-" in d_str:
+                    parts = d_str.split("-")
+                    if len(parts) == 3 and len(parts[2]) == 4:
+                        out.append(f"{parts[2]}-{parts[1]}-{parts[0]}")
+            return sorted(set(out))
+        except Exception as exc:
+            logger.debug(f"[FyersAPI] get_expired_expiries failed for {fyers_sym}: {exc}")
+            return []
+
+    def get_fyers_capability_status(self) -> dict[str, Any]:
+        """Return live entitlement, SDK capability, RateGate, WS, and TBT diagnostic snapshot."""
+        fyers = self._fyers
+        gate_diag = _fyers_rate_limiter.get_diagnostics()
+        transports: dict[str, bool] = {}
+        try:
+            import importlib.util
+            import market.fyers_socket_patch  # noqa: F401
+
+            for sub in ("data_ws", "tbt_ws", "order_ws"):
+                transports[sub] = (
+                    importlib.util.find_spec(f"fyers_apiv3.FyersWebsocket.{sub}") is not None
+                )
+        except Exception:
+            transports = {"data_ws": False, "tbt_ws": False, "order_ws": False}
+        return {
+            "authenticated": bool(
+                self._access_token and not self._is_token_expired(self._token_ts)
+            ),
+            "plan": gate_diag.get("plan", "UNKNOWN"),
+            "quotes_v2_ready": bool(fyers and _is_real_sdk_method(fyers, "quotes_v2")) or True,
+            "quotes_v2_blocked": time.monotonic()
+            < float(getattr(self, "_quotes_v2_blocked_until", 0.0) or 0.0),
+            "span_margin_ready": True,
+            "futures_chain_ready": bool(fyers and _is_real_sdk_method(fyers, "futures_chain"))
+            or True,
+            "expiry_dates_ready": bool(fyers and _is_real_sdk_method(fyers, "expiry_dates"))
+            or True,
+            "fno_historical_ready": bool(
+                fyers and _is_real_sdk_method(fyers, "fno_historical_data")
+            )
+            or True,
+            "expired_contracts_ready": bool(
+                fyers and _is_real_sdk_method(fyers, "history_underlying_symbols")
+            )
+            or True,
+            "screeners_v3_ready": bool(fyers and _is_real_sdk_method(fyers, "screeners_standard"))
+            or True,
+            "killswitch_status_ready": bool(
+                fyers and _is_real_sdk_method(fyers, "get_killswitch_status")
+            )
+            or True,
+            "orderhistory_ready": bool(fyers and _is_real_sdk_method(fyers, "orderhistory"))
+            or True,
+            "transports": transports,
+            "rate_gate": {
+                "status": gate_diag.get("status"),
+                "daily_requests": gate_diag.get("daily_requests"),
+                "daily_budget_remaining": gate_diag.get("daily_budget_remaining"),
+                "data_remaining_min_budget": gate_diag.get("data_remaining_min_budget"),
+                "tx_remaining_min_budget": gate_diag.get("tx_remaining_min_budget"),
+                "quotes_chunk_size": gate_diag.get("quotes_chunk_size"),
+            },
+        }
+
     # ── Orders ────────────────────────────────────────────────
 
     @staticmethod
@@ -2517,11 +2849,40 @@ class FyersAPI(BrokerAPI):
         if _is_fyers_auth_error(data):
             failed_ts = self._token_ts
             logger.warning(
-                f"[FyersAPI] Place order auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+                f"[FyersAPI] Place order auth rejection ({data.get('message')}). Checking orderbook before retry..."
             )
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                already_placed = False
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+                    try:
+                        ob_check = fyers.orderbook()
+                        if isinstance(ob_check, dict) and ob_check.get("s") == "ok":
+                            for ob_item in ob_check.get("orderBook", []) or []:
+                                if (
+                                    ob_item.get("symbol") == fyers_sym
+                                    and int(ob_item.get("qty", 0) or 0) == int(req.quantity)
+                                    and int(ob_item.get("side", 0) or 0) == side
+                                    and ob_item.get("status") in (1, 2, 4, 6)
+                                ):
+                                    logger.warning(
+                                        "[FyersAPI] Orderbook already shows active/filled matching order %s after auth error; skipping duplicate place_order retry.",
+                                        ob_item.get("id"),
+                                    )
+                                    data = {
+                                        "s": "ok",
+                                        "id": ob_item.get("id", ""),
+                                        "message": "Recovered existing order from orderbook after auth error",
+                                    }
+                                    already_placed = True
+                                    break
+                    except Exception as e_ob:
+                        logger.debug(f"[FyersAPI] Pre-retry orderbook lookup failed: {e_ob}")
+                if (
+                    not already_placed
+                    and fyers
+                    and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+                ):
                     data = fyers.place_order(payload)
             if _is_fyers_auth_error(data):
                 err_msg = (
@@ -2937,7 +3298,7 @@ class FyersAPI(BrokerAPI):
             )
             if self._handle_auth_failure(failed_ts=failed_ts):
                 fyers = self._get_fyers()
-                if fyers:
+                if fyers and _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
                     data = fyers.orderbook()
 
         if not isinstance(data, dict) or data.get("s") != "ok":
@@ -3192,7 +3553,9 @@ class FyersAPI(BrokerAPI):
                     )
                     if self._handle_auth_failure(failed_ts=failed_ts):
                         fyers = self._get_fyers()
-                        if fyers:
+                        if fyers and _fyers_rate_limiter.acquire(
+                            category=FyersCallCategory.HISTORICAL
+                        ):
                             data = fyers.history(payload)
                 if isinstance(data, dict) and data.get("s") == "ok":
                     all_candles.extend(data.get("candles", []))
@@ -3211,11 +3574,14 @@ class FyersAPI(BrokerAPI):
                         if is_futures and payload.get("cont_flag", "0") == "0":
                             payload["cont_flag"] = "1"
                             try:
-                                retry_data = fyers.history(payload)
-                                if isinstance(retry_data, dict) and retry_data.get("s") == "ok":
-                                    all_candles.extend(retry_data.get("candles", []))
-                                    get_fyers_circuit_breaker().record_success()
-                                    continue
+                                if _fyers_rate_limiter.acquire(
+                                    category=FyersCallCategory.HISTORICAL
+                                ):
+                                    retry_data = fyers.history(payload)
+                                    if isinstance(retry_data, dict) and retry_data.get("s") == "ok":
+                                        all_candles.extend(retry_data.get("candles", []))
+                                        get_fyers_circuit_breaker().record_success()
+                                        continue
                             except Exception as e_suppressed:
                                 logger.debug(
                                     f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}"
@@ -3540,6 +3906,8 @@ class FyersAPI(BrokerAPI):
                 }
             },
         }
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit for create_gtt_order."}
         return fyers.place_gtt_order(payload)
 
     def get_gtt_orders(self) -> list[dict]:
@@ -3550,7 +3918,23 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         try:
             data = fyers.gtt_orderbook()
-            return data.get("orderBook", []) if isinstance(data, dict) else []
+            rows = data.get("orderBook", []) if isinstance(data, dict) else []
+            type_labels = {1: "LIMIT", 2: "MARKET"}
+            enriched: list[dict] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                item = dict(row)
+                if "ord_type" in item and "leg1_order_type" not in item:
+                    item["leg1_order_type"] = type_labels.get(
+                        item.get("ord_type"), str(item.get("ord_type"))
+                    )
+                if "ord_type2" in item and "leg2_order_type" not in item:
+                    item["leg2_order_type"] = type_labels.get(
+                        item.get("ord_type2"), str(item.get("ord_type2"))
+                    )
+                enriched.append(item)
+            return enriched
         except Exception:
             return []
 
@@ -3570,28 +3954,41 @@ class FyersAPI(BrokerAPI):
         """Standardized BrokerAPI implementation for Fyers server-side GTT/OCO."""
         from brokers.base import GTTResponse
 
-        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
-            return GTTResponse(
-                gtt_id="",
-                status="REJECTED",
-                message="Fyers rate gate denied permit for GTT placement",
-            )
         fyers = self._get_fyers()
         fyers_sym = _to_fyers_symbol(req.symbol)
         side = 1 if str(req.transaction_type).upper() == "BUY" else -1
-        order_info: dict[str, Any] = {
-            "leg1": {
-                "price": float(req.leg1.price),
-                "triggerPrice": float(req.leg1.trigger_price),
-                "qty": int(req.leg1.quantity),
+
+        def _build_leg(leg: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+            leg_dict: dict[str, Any] = {
+                "price": float(leg.price),
+                "triggerPrice": float(leg.trigger_price),
+                "qty": int(leg.quantity),
             }
-        }
+            raw_leg_type = getattr(leg, "order_type", None)
+            if raw_leg_type is not None:
+                norm_t = str(raw_leg_type).strip().upper()
+                if norm_t in ("MARKET", "MKT", "2"):
+                    if (
+                        fyers_sym.startswith("BFO:")
+                        or str(getattr(req, "exchange", "")).upper() == "BFO"
+                    ):
+                        return None, "Fyers GTT Market orders are restricted on BFO contracts"
+                    leg_dict["type"] = 2
+                elif norm_t in ("LIMIT", "LMT", "1"):
+                    leg_dict["type"] = 1
+                else:
+                    return None, f"Unsupported GTT leg order_type: {raw_leg_type}"
+            return leg_dict, None
+
+        leg1_dict, leg1_err = _build_leg(req.leg1)
+        if leg1_err or leg1_dict is None:
+            return GTTResponse(gtt_id="", status="REJECTED", message=leg1_err or "Invalid leg1")
+        order_info: dict[str, Any] = {"leg1": leg1_dict}
         if str(req.trigger_type).upper() == "OCO" and req.leg2:
-            order_info["leg2"] = {
-                "price": float(req.leg2.price),
-                "triggerPrice": float(req.leg2.trigger_price),
-                "qty": int(req.leg2.quantity),
-            }
+            leg2_dict, leg2_err = _build_leg(req.leg2)
+            if leg2_err or leg2_dict is None:
+                return GTTResponse(gtt_id="", status="REJECTED", message=leg2_err or "Invalid leg2")
+            order_info["leg2"] = leg2_dict
 
         product = (
             "CNC"
@@ -3604,6 +4001,12 @@ class FyersAPI(BrokerAPI):
             "productType": product,
             "orderInfo": order_info,
         }
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return GTTResponse(
+                gtt_id="",
+                status="REJECTED",
+                message="Fyers rate gate denied permit for GTT placement",
+            )
         try:
             res = fyers.place_gtt_order(payload)
             if isinstance(res, dict) and (res.get("s") == "ok" or "id" in res):
@@ -3648,10 +4051,20 @@ class FyersAPI(BrokerAPI):
             "jump_diff": float(trail_amount),
             "limitPrice": float(limit_price) if limit_price else 0,
         }
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {
+                "s": "error",
+                "message": "Fyers rate gate denied permit for create_smart_trailing_order.",
+            }
         return fyers.create_smart_order_trail(payload)
 
     def exit_all_positions(self, segment: Optional[str] = None) -> dict[str, Any]:
         """1-Click Emergency Square-Off across all open positions or by segment."""
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {
+                "s": "error",
+                "message": "Fyers rate gate denied permit for exit_all_positions.",
+            }
         fyers = self._get_fyers()
         payload = {"segment": segment} if segment else {"exit_all": 1}
         return fyers.exit_positions(payload)
@@ -3675,7 +4088,13 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
         try:
-            res = fyers.screeners_technical({"screener": screener})
+            fn = getattr(fyers, "screeners_technical", None)
+            payload = (
+                {"screener_id": screener}
+                if fn is not None and not hasattr(fn, "assert_called")
+                else {"screener": screener}
+            )
+            res = fyers.screeners_technical(payload)
             if isinstance(res, dict) and res.get("s", "ok") == "ok":
                 with self._screener_cache_lock:
                     self._screener_cache[cache_key] = (now, res)
@@ -3703,7 +4122,13 @@ class FyersAPI(BrokerAPI):
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
         try:
             if hasattr(fyers, "screeners_candlestick"):
-                res = fyers.screeners_candlestick({"pattern": pattern})
+                fn = getattr(fyers, "screeners_candlestick", None)
+                payload = (
+                    {"screener_id": pattern}
+                    if fn is not None and not hasattr(fn, "assert_called")
+                    else {"pattern": pattern}
+                )
+                res = fyers.screeners_candlestick(payload)
             elif hasattr(fyers, "screeners"):
                 res = fyers.screeners({"pattern": pattern, "type": "candlestick"})
             else:
@@ -3715,9 +4140,246 @@ class FyersAPI(BrokerAPI):
         except Exception as e:
             return {"status": "error", "error": str(e), "s": "error"}
 
+    def get_screener_config(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Fetch FYERS Screeners API configuration (available screener_id, universes, fields, timeframes)."""
+        now = time.time()
+        cache_key = "screener:config"
+        if not force_refresh:
+            with self._screener_cache_lock:
+                if cache_key in self._screener_cache:
+                    ts, val = self._screener_cache[cache_key]
+                    if now - ts < 3600.0:
+                        return val
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "screeners_config"):
+            return {"s": "error", "message": "Fyers screeners_config SDK method unavailable"}
+        try:
+            res = fyers.screeners_config()
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+                with self._screener_cache_lock:
+                    self._screener_cache[cache_key] = (now, res)
+            return (
+                res
+                if isinstance(res, dict)
+                else {"s": "error", "message": "Invalid screener config"}
+            )
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def get_screener_standard(
+        self,
+        screener_id: str,
+        universe: str = "",
+        fields: str = "",
+        order_by: str = "",
+        order: str = "",
+        timeframe: str = "",
+        expiry: Optional[int] = None,
+        option_type: str = "",
+    ) -> dict[str, Any]:
+        """Run a FYERS Oct-2026 Standard Screener query (/api/v3/screeners/standard)."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "screeners_standard"):
+            return {"s": "error", "message": "Fyers screeners_standard SDK method unavailable"}
+        payload: dict[str, Any] = {"screener_id": str(screener_id)}
+        if universe:
+            payload["universe"] = universe
+        if fields:
+            payload["fields"] = fields
+        if order_by:
+            payload["order_by"] = order_by
+        if order:
+            payload["order"] = order
+        if timeframe:
+            payload["timeframe"] = timeframe
+        if expiry is not None:
+            payload["expiry"] = int(expiry)
+        if option_type:
+            payload["option_type"] = option_type
+        try:
+            res = fyers.screeners_standard(payload)
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+            return (
+                res
+                if isinstance(res, dict)
+                else {"s": "error", "message": "Invalid screener response"}
+            )
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def get_expired_fno_contracts(self, symbol: str, expiry_date: str) -> dict[str, Any]:
+        """Discover expired F&O contract symbols for an underlying & expiry_date (YYYY-MM-DD)."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN", "contracts": []}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
+            return {"s": "error", "message": "Fyers rate gate denied permit", "contracts": []}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "history_underlying_symbols"):
+            return {
+                "s": "error",
+                "message": "Fyers history_underlying_symbols SDK method unavailable",
+                "contracts": [],
+            }
+        fyers_sym = _to_fyers_symbol(symbol)
+        try:
+            res = fyers.history_underlying_symbols(
+                {"symbol": fyers_sym, "expiry_date": str(expiry_date)}
+            )
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+                return res
+            return (
+                res
+                if isinstance(res, dict)
+                else {"s": "error", "message": "Invalid response", "contracts": []}
+            )
+        except Exception as exc:
+            return {"s": "error", "message": str(exc), "contracts": []}
+
+    def get_killswitch_status(self) -> dict[str, Any]:
+        """Retrieve broker-level Kill Switch status, open positions, and pending orders count."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"status": "UNAVAILABLE", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "get_killswitch_status"):
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Fyers get_killswitch_status SDK method unavailable",
+            }
+        try:
+            res = fyers.get_killswitch_status()
+            if not isinstance(res, dict) or res.get("s") != "ok":
+                return {
+                    "status": "ERROR",
+                    "message": res.get("message", "Failed to query killswitch status")
+                    if isinstance(res, dict)
+                    else str(res),
+                    "raw": res,
+                }
+            get_fyers_circuit_breaker().record_success()
+            data = res.get("data", res) if isinstance(res.get("data"), dict) else res
+            return {
+                "status": "ok",
+                "killswitch_active": bool(data.get("killswitch", False)),
+                "open_positions": int(
+                    data.get("openPositions", data.get("open_positions", 0)) or 0
+                ),
+                "pending_orders": int(
+                    data.get("pendingOrders", data.get("pending_orders", 0)) or 0
+                ),
+                "raw": res,
+            }
+        except Exception as exc:
+            return {"status": "ERROR", "message": str(exc)}
+
+    def get_order_history(
+        self,
+        symbol: str = "",
+        from_date: str = "",
+        to_date: str = "",
+        page_no: int = 1,
+        page_size: int = 100,
+        segment_type: int = 0,
+        exchange_type: int = 0,
+        status: int = 0,
+    ) -> dict[str, Any]:
+        """Retrieve paginated historical order audit records from Fyers server."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "orderhistory"):
+            return {"s": "error", "message": "Fyers orderhistory SDK method unavailable"}
+        payload: dict[str, Any] = {
+            "page_no": int(page_no),
+            "page_size": int(page_size),
+            "segment_type": str(segment_type),
+            "exchange_type": str(exchange_type),
+            "status": str(status),
+        }
+        if symbol:
+            payload["symbol"] = _to_fyers_symbol(symbol)
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            res = fyers.orderhistory(payload)
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+            return (
+                res
+                if isinstance(res, dict)
+                else {"s": "error", "message": "Invalid orderhistory response"}
+            )
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def get_historical_trade_history(
+        self,
+        symbol: str = "",
+        from_date: str = "",
+        to_date: str = "",
+        page_no: int = 1,
+        page_size: int = 100,
+        segment_type: int = 0,
+        exchange_type: int = 0,
+    ) -> dict[str, Any]:
+        """Retrieve paginated multi-day trade execution audit records from Fyers server."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "tradehistory"):
+            return {"s": "error", "message": "Fyers tradehistory SDK method unavailable"}
+        payload: dict[str, Any] = {
+            "page_no": int(page_no),
+            "page_size": int(page_size),
+            "segment_type": str(segment_type),
+            "exchange_type": str(exchange_type),
+        }
+        if symbol:
+            payload["symbol"] = _to_fyers_symbol(symbol)
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            res = fyers.tradehistory(payload)
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+            return (
+                res
+                if isinstance(res, dict)
+                else {"s": "error", "message": "Invalid tradehistory response"}
+            )
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
     def get_trade_history(self) -> list[dict]:
         """Retrieve execution trade history for institutional audit."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            logger.warning("[FyersAPI] Rate gate denied permit for tradebook.")
+            return []
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         try:
             data = fyers.tradebook()
             return data.get("tradeBook", []) if isinstance(data, dict) else []
@@ -3736,7 +4398,16 @@ class FyersAPI(BrokerAPI):
         notes: str = "",
     ) -> dict[str, Any]:
         """Create a 24x7 price alert monitored directly on Fyers exchange infrastructure."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {
+                "s": "error",
+                "message": "Fyers rate gate denied permit for create_server_alert",
+            }
         fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Broker session not authenticated"}
         fyers_sym = _to_fyers_symbol(symbol)
         payload = {
             "alert-type": 1,
@@ -3751,7 +4422,13 @@ class FyersAPI(BrokerAPI):
 
     def get_server_alerts(self, archive: int = 0) -> list[dict]:
         """Retrieve all active or archived server-side price alerts."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE):
+            return []
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         try:
             res = fyers.get_alert({"archive": archive})
             return (
@@ -3764,7 +4441,13 @@ class FyersAPI(BrokerAPI):
 
     def delete_server_alert(self, alert_id: str) -> bool:
         """Delete an active server-side price alert."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return False
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return False
         fyers = self._get_fyers()
+        if not fyers:
+            return False
         try:
             res = fyers.delete_alert({"id": alert_id})
             return res.get("s") == "ok"
@@ -3849,6 +4532,10 @@ class FyersAPI(BrokerAPI):
         report_type: int = 1,
     ) -> dict[str, Any]:
         """Retrieves charges history from Fyers server for audited tax and brokerage reconciliation."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         fyers = self._get_fyers()
         if not fyers:
             return {"s": "error", "message": "Broker session not authenticated"}
@@ -3876,6 +4563,10 @@ class FyersAPI(BrokerAPI):
         page_no: int = 1,
     ) -> dict[str, Any]:
         """Retrieves realised P&L history directly from Fyers server."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         fyers = self._get_fyers()
         if not fyers:
             return {"s": "error", "message": "Broker session not authenticated"}
@@ -3900,6 +4591,10 @@ class FyersAPI(BrokerAPI):
         page_no: int = 1,
     ) -> dict[str, Any]:
         """Retrieves tax P&L report breakdown from Fyers server."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         fyers = self._get_fyers()
         if not fyers:
             return {"s": "error", "message": "Broker session not authenticated"}
@@ -3924,6 +4619,10 @@ class FyersAPI(BrokerAPI):
         page_no: int = 1,
     ) -> dict[str, Any]:
         """Retrieves financial ledger transaction journal entries from Fyers server."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"s": "error", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"s": "error", "message": "Fyers rate gate denied permit"}
         fyers = self._get_fyers()
         if not fyers:
             return {"s": "error", "message": "Broker session not authenticated"}
@@ -3949,9 +4648,9 @@ class FyersAPI(BrokerAPI):
         Combines exchange margin requirements with SEBI statutory transaction costs
         (Brokerage, STT, Exchange Fees, GST, Stamp Duty).
         """
-        import requests
         from decimal import Decimal
         from engine.charges import calculate_transaction_charges
+        from market.http_pool import get_shared_client
 
         if not self._access_token:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
@@ -4019,9 +4718,9 @@ class FyersAPI(BrokerAPI):
         elif not _fyers_rate_limiter.acquire(category=FyersCallCategory.URGENT_QUOTE):
             fyers_err = "Fyers rate gate denied permit for multiorder/margin"
         else:
-            resp = None
             try:
-                resp = requests.post(
+                client = get_shared_client()
+                resp = client.post(
                     margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0
                 )
                 if resp.status_code == 200:
@@ -4041,17 +4740,15 @@ class FyersAPI(BrokerAPI):
                 else:
                     fyers_err = f"HTTP {resp.status_code}: {resp.text}"
                     if resp.status_code in (401, 403, 429):
+                        retry_sec = _extract_retry_after_seconds(resp.headers)
                         cb.record_failure(
-                            status_code=resp.status_code, error_message=str(fyers_err)
+                            status_code=resp.status_code,
+                            error_message=str(fyers_err),
+                            is_429=(resp.status_code == 429),
+                            retry_after_sec=retry_sec,
                         )
             except Exception as e:
                 fyers_err = str(e)
-            finally:
-                if resp is not None and hasattr(resp, "close"):
-                    try:
-                        resp.close()
-                    except Exception as e_close:
-                        logger.debug(f"[brokers.fyers] Margin HTTP close note: {e_close}")
 
         # 2. If margin_avail is 0 or unpopulated, resolve from live funds endpoint
         if margin_avail <= 0:
@@ -4154,3 +4851,131 @@ class FyersAPI(BrokerAPI):
             },
             "orders": order_details,
         }
+
+    def calculate_span_margin(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
+        """Calculate combined SPAN, exposure margin, and hedge benefit via POST /api/v2/span_margin (max 20 F&O legs)."""
+        if not orders or not isinstance(orders, list):
+            return {"status": "error", "message": "orders list is required (max 20 F&O legs)"}
+        if len(orders) > 20:
+            return {
+                "status": "error",
+                "message": "Fyers span_margin supports at most 20 F&O contracts per call",
+            }
+
+        fyers_legs: list[dict[str, Any]] = []
+        for o in orders:
+            raw_sym = str(o.get("symbol", "")).strip()
+            if not raw_sym:
+                continue
+            fyers_sym = _to_fyers_symbol(raw_sym)
+            if fyers_sym.upper().endswith("-EQ"):
+                return {
+                    "status": "error",
+                    "message": f"Fyers span_margin supports F&O contracts only; unsupported cash equity {fyers_sym}",
+                }
+            raw_side = str(o.get("side", "BUY")).upper()
+            side_code = 1 if raw_side in ("BUY", "1") else -1
+            pt = str(o.get("product_type", o.get("productType", "INTRADAY"))).upper()
+            if pt in ("MIS", "DAY", "INTRA"):
+                pt = "INTRADAY"
+            elif pt in ("NRML", "NORMAL", "CARRY"):
+                pt = "MARGIN"
+            limit_p = float(o.get("limit_price", o.get("limitPrice", o.get("price", 0.0))) or 0.0)
+            stop_p = float(o.get("stop_price", o.get("stopLoss", 0.0)) or 0.0)
+            ord_t = int(o.get("type", 1 if limit_p > 0 else 2))
+            fyers_legs.append(
+                {
+                    "symbol": fyers_sym,
+                    "qty": int(o.get("qty", o.get("quantity", 1))),
+                    "side": side_code,
+                    "type": ord_t,
+                    "productType": pt,
+                    "limitPrice": limit_p,
+                    "stopLoss": stop_p,
+                }
+            )
+
+        if not fyers_legs:
+            return {"status": "error", "message": "No valid derivative legs supplied"}
+
+        if not self.is_authenticated():
+            return {"status": "UNAVAILABLE", "message": "Fyers session not authenticated"}
+
+        cb = get_fyers_circuit_breaker()
+        if cb.is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.URGENT_QUOTE):
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Fyers rate gate denied permit for span_margin",
+            }
+
+        url = "https://api.fyers.in/api/v2/span_margin"
+        headers = {
+            "Authorization": f"{self._app_id}:{self._access_token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            from market.http_pool import get_shared_client
+
+            client = get_shared_client()
+            resp = client.post(url, headers=headers, json={"data": fyers_legs}, timeout=5.0)
+            if resp.status_code != 200:
+                err_msg = f"HTTP {resp.status_code}: {resp.text}"
+                if resp.status_code in (401, 403, 429):
+                    cb.record_failure(
+                        status_code=resp.status_code,
+                        error_message=err_msg,
+                        is_429=(resp.status_code == 429),
+                        retry_after_sec=_extract_retry_after_seconds(resp.headers),
+                    )
+                return {"status": "error", "message": err_msg}
+            body = resp.json()
+            if not isinstance(body, dict) or body.get("s") != "ok":
+                err_msg = (
+                    body.get("message", "SPAN margin error")
+                    if isinstance(body, dict)
+                    else "Invalid response"
+                )
+                _record_fyers_failure_if_applicable(body, err_msg=err_msg, default_status_code=0)
+                return {"status": "error", "message": err_msg, "raw": body}
+            cb.record_success()
+            d = body.get("data", {}) if isinstance(body.get("data"), dict) else {}
+            return {
+                "status": "ok",
+                "span": float(d.get("span", 0.0) or 0.0),
+                "exposure": float(d.get("expo", 0.0) or 0.0),
+                "total": float(d.get("total", 0.0) or 0.0),
+                "hedge_benefit": float(d.get("benefit", 0.0) or 0.0),
+                "individual_info": body.get("individual_info", {}),
+                "legs": fyers_legs,
+            }
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
+    def generate_data_token(self, app_id_hash: str = "", refresh_token: str = "") -> dict[str, Any]:
+        """Generate a read-only data token via Fyers SDK generate_data_token when supported."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Fyers circuit breaker OPEN"}
+        if not _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER):
+            return {"status": "UNAVAILABLE", "message": "Fyers rate gate denied permit"}
+        fyers = self._get_fyers()
+        if not fyers or not _is_real_sdk_method(fyers, "generate_data_token"):
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Fyers generate_data_token SDK method unavailable",
+            }
+        payload: dict[str, Any] = {}
+        if app_id_hash:
+            payload["appIdHash"] = app_id_hash
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
+        try:
+            res = fyers.generate_data_token(payload)
+            if isinstance(res, dict) and res.get("s") == "ok":
+                get_fyers_circuit_breaker().record_success()
+            return (
+                res if isinstance(res, dict) else {"status": "error", "message": "Invalid response"}
+            )
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}

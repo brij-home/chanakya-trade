@@ -24,9 +24,9 @@ MANIFEST: dict = {
     "version": "1.0.0",
     "base_url": "",  # filled in at runtime from request host
     "auth": {
-        "type": "none",
-        # NOTE: skills server is intended for local use (127.0.0.1) only.
-        # Do not expose on 0.0.0.0 without adding bearer token auth first.
+        "type": "sidecar_token_or_session",
+        "header": "X-Sidecar-Token",
+        "note": "Local mode requires X-Sidecar-Token on mutating POST endpoints; self-hosted mode requires an authenticated session cookie.",
     },
     "skills": [
         {
@@ -999,6 +999,43 @@ MANIFEST: dict = {
                 "required": ["symbol", "persona_id"],
             },
             "output_description": "PersonaSignal with verdict, confidence, rationale checklist, and key metrics.",
+        },
+        {
+            "name": "fyers_margin_check",
+            "path": "/api/fyers/margin-check",
+            "method": "POST",
+            "description": "Pre-flight SPAN/exposure margin and Apr-2026 statutory charges calculation via Fyers Multi-Order Margin API.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "orders": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Orders with symbol, qty, side, product_type, limit_price",
+                    },
+                },
+                "required": ["orders"],
+            },
+            "output_description": "Required margin, available margin, shortfall, and statutory charges breakdown.",
+        },
+        {
+            "name": "fyers_tbt_audit",
+            "path": "/api/fyers/tbt-audit",
+            "method": "POST",
+            "description": "Audit 50-level TBT order book liquidity, OBI-50, Fortress/Spoof walls, and sweep slippage for a contract.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "NSE/NFO symbol e.g. NIFTY26DECFUT",
+                    },
+                    "side": {"type": "string", "enum": ["BUY", "SELL"], "default": "BUY"},
+                    "lot_size": {"type": "integer", "default": 65},
+                },
+                "required": ["symbol"],
+            },
+            "output_description": "50-depth liquidity audit, OBI-50, wall intel, and slippage verdict.",
         },
     ],
 }

@@ -1145,7 +1145,7 @@ def _telegram_notify(
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
     wait: bool = False,
-) -> None:
+) -> Optional[bool]:
     """
     Send a Telegram push notification.
     Non-blocking by default — pass wait=True when synchronous message_id anchoring is required.
@@ -1156,7 +1156,7 @@ def _telegram_notify(
     import sys
 
     if os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test":
-        return
+        return None
 
     # Suppress ad-hoc python -c executions unless explicitly authorized
     if (
@@ -1164,12 +1164,12 @@ def _telegram_notify(
         and sys.argv[0] == "-c"
         and os.environ.get("ALLOW_MANUAL_TELEGRAM_DISPATCH", "0").lower() not in ("1", "true")
     ):
-        return
+        return None
 
     try:
         from bot.telegram_bot import send_push
 
-        send_push(
+        return send_push(
             message,
             chat_id=chat_id,
             reply_to_message_id=reply_to_message_id,
@@ -1186,6 +1186,7 @@ def _telegram_notify(
             f"[Alerts] Failed to dispatch Telegram push notification for alert {alert_id or 'unknown'}: {e}",
             exc_info=True,
         )
+        return False
 
 
 def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:

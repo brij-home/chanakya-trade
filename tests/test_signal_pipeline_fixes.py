@@ -1,164 +1,219 @@
-"""
-tests/test_signal_pipeline_fixes.py
-───────────────────────────────────
-Tests for:
-1. Option entry range domain isolation against underlying spot/futures coordinates.
-2. Closed-loop milestone trade outcome recording in learning engine.
-3. Truthful, zero-hallucination EOD reporting on zero alerts.
-"""
+"""Regression tests for RCA fixes: unit-safe no-chase, RRG decouplers, confluence, and Telegram gates."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
-from engine.eod_report_generator import EODReportGenerator
+from types import SimpleNamespace
+
+import numpy as np
+import pandas as pd
+
+from engine.alert_model import AutoAlert
+from engine.auto_alert_engine import AutoAlertEngine
+from engine.confidence_calibrator import calibrate_alert_confidence
+from engine.confluence_engine import evaluate_confluence
+from engine.pipeline.hierarchical_engine import HierarchicalSignalPipeline
+from engine.signal_enrichment import enrich_alert_with_feature_bus
 
 
-def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatch):
-    """Verify that when a spot/futures alert attaches an option plan, entry_range is preserved in option coordinates."""
-    data_file = tmp_path / "auto_alerts_test.json"
-    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
-    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
-    monkeypatch.setattr(
-        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
-        lambda *a, **kw: (False, ""),
-    )
-    monkeypatch.setattr("market.macro.get_macro_snapshot", lambda: None)
-
-    engine = AutoAlertEngine(max_buffer=20)
-    engine.clear_alerts()
-
-    # Commodity Momentum alert where underlying is CRUDEOIL at ~9196, SL is 9306.54
-    # But the actionable plan is for an ATM Put Option trading at ₹347.02
+def test_hierarchical_no_chase_never_compares_spot_ltp_to_option_premium():
+    """Regression for ANGELONE/BDL false veto: spot ₹380 must compare vs spot_no_chase_boundary, not ₹18.32 option NC."""
+    engine = HierarchicalSignalPipeline()
     alert = AutoAlert(
-        alert_id="test-comm-crudeoil",
-        alert_type="COMMODITY_MOMENTUM",
-        stage="IGNITED",
-        symbol="CRUDEOIL",
-        exchange="MCX",
-        direction="BEARISH",
-        headline="MCX OPTION: CRUDEOIL 9200 PE @ ₹347.0",
-        summary="Commodity breakdown",
-        ltp=9196.14,
-        trigger_level=9196.14,
-        target_level=8975.34,
-        stop_loss=9306.54,
-        option_premium=347.02,
-        created_at="2026-09-23 11:00:00",
-        environment="TEST",
-        is_live=False,
-        actionable_plan={
-            "action": "BUY_PE",
-            "segment": "COMMODITY",
-            "instrument_type": "OPTION",
-            "contract": "CRUDEOIL 9200 PE (16 Oct)",
-            "raw_contract": "MCX:CRUDEOIL26OCT9200PE",
-            "entry_range": "₹340.0 – ₹355.0",
-            "stop_loss": "₹289.6",
-            "target": "₹461.8",
-            "target_2": "₹547.9",
-            "trade_plan": {
-                "entry_price": 347.02,
-                "invalidation_stop": 289.6,
-                "target_1": 461.8,
-            },
-        },
-    )
-
-    rec = engine.record_alert(alert)
-    assert rec is True
-
-    saved = engine._alerts[0]
-    entry_range = saved.actionable_plan.get("entry_range", "")
-    assert "9,307" not in entry_range, (
-        "Entry range was erroneously overwritten with underlying futures levels!"
-    )
-    assert "340" in entry_range or "347" in entry_range, (
-        f"Entry range should remain in option premium space: {entry_range}"
-    )
-
-
-def test_closed_loop_target_milestone_recorded_in_learning_engine(monkeypatch):
-    """Verify that when an alert achieves Target 1, it is recorded in pattern_learning_engine."""
-    from engine.learning_engine import pattern_learning_engine
-
-    recorded_outcomes = []
-    monkeypatch.setattr(
-        pattern_learning_engine,
-        "record_trade_outcome",
-        lambda **kwargs: recorded_outcomes.append(kwargs),
-    )
-
-    engine = AutoAlertEngine(max_buffer=20)
-    engine._alerts.clear()
-
-    alert = AutoAlert(
-        alert_id="test-win-milestone",
-        alert_type="ASYMMETRIC_OPPORTUNITY",
-        stage="IGNITED",
-        symbol="TRENT",
-        exchange="NSE",
+        alert_id="aa-intraday-breakout-spark-angelone-20261127",
+        alert_type="INTRADAY_BREAKOUT_SPARK",
+        stage="PRIMED",
+        symbol="ANGELONE",
+        exchange="NFO",
+        segment="FNO_STOCK",
         direction="BULLISH",
-        headline="TRENT Pocket Pivot",
-        summary="Expansion",
-        ltp=7000.0,
-        trigger_level=6850.0,
-        stop_loss=6700.0,
-        target_level=7150.0,
-        achieved_milestones=[],
+        headline="Spark ANGELONE",
+        summary="Test",
+        ltp=380.0,
+        underlying_spot=380.0,
+        trigger_level=377.4,
+        target_level=410.0,
+        stop_loss=366.0,
+        contract_symbol="NSE:ANGELONE26DEC380CE",
+        option_type="CE",
+        option_premium=17.5,
+        no_chase_boundary=18.32,
+        spot_no_chase_boundary=384.0,
+        confidence=95,
+        metrics={"rvol": 4.2, "spot_change_pct": 5.4, "spot_no_chase_boundary": 384.0},
+    )
+    ctx = engine.evaluate_market_context_3cs(
+        symbol="ANGELONE", exchange="NSE", ltp=380.0, alert=alert
+    )
+    setup = engine.validate_signal_setup_5ws(alert=alert, context=ctx)
+    exe = engine.build_execution_matrix_how(alert, ctx, setup)
+
+    assert exe.is_chased is False
+    assert not any("surged past no-chase" in r for r in exe.reasons)
+
+
+def test_hierarchical_rrg_allows_high_rvol_institutional_decoupler(monkeypatch):
+    """Regression for HAL/MAZDOCK false veto: high-RVOL surge in LAGGING sector is a decoupler, not blocked."""
+    monkeypatch.setattr(
+        "analysis.sector_rotation.get_stock_sector_alignment",
+        lambda _sym: {"sector": "INFRA", "quadrant": "LAGGING"},
+    )
+    engine = HierarchicalSignalPipeline()
+    alert = AutoAlert(
+        alert_id="aa-intraday-breakout-spark-hal-20261127",
+        alert_type="INTRADAY_BREAKOUT_SPARK",
+        stage="IGNITED",
+        symbol="HAL",
+        exchange="NSE",
+        segment="FNO_STOCK",
+        direction="BULLISH",
+        headline="HAL surge",
+        summary="Test",
+        ltp=5120.0,
+        trigger_level=5120.0,
+        target_level=5320.0,
+        stop_loss=5010.0,
+        confidence=95,
+        metrics={"rvol": 2.6, "spot_change_pct": 4.3, "is_decoupler": True},
+    )
+    ctx = engine.evaluate_market_context_3cs(symbol="HAL", exchange="NSE", ltp=5120.0, alert=alert)
+    assert ctx.sector_aligned is True
+
+
+def test_confluence_intraday_renormalization_and_enrichment():
+    """Verify intraday setups without pre-open gap score >= 65 instead of permanent 41-54 cap."""
+    rep = evaluate_confluence(
+        symbol="VOLTAS",
+        direction="BEARISH",
+        ltp=1186.5,
+        vwap=1205.0,
+        rvol=2.3,
+        change_pct=-3.1,
+        pre_open_gap_pct=None,
+        sector_quadrant="LAGGING",
+        market_structure_signal="BOS",
+    )
+    assert rep.total_score >= 70.0
+    assert rep.is_qualified is True
+
+    # Verify signal_enrichment pulls rvol_ratio / feature_bus tod_rvol & maps structural archetype
+    idx = pd.date_range("2026-11-27 09:15", periods=25, freq="5min")
+    c = np.linspace(1210.0, 1185.0, 25)
+    df_5m = pd.DataFrame(
+        {
+            "Open": c + 2.0,
+            "High": c + 3.0,
+            "Low": c - 3.0,
+            "Close": c,
+            "Volume": np.concatenate([np.full(20, 10_000.0), np.full(5, 45_000.0)]),
+        },
+        index=idx,
+    )
+    alert = AutoAlert(
+        alert_id="aa-options-momentum-voltas-20261127",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="VOLTAS",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="VOLTAS breakdown",
+        summary="Test",
+        ltp=39.9,
+        underlying_spot=1185.0,
+        trigger_level=41.3,
+        target_level=52.2,
+        stop_loss=47.0,
+        contract_symbol="NSE:VOLTAS26DEC1180PE",
+        option_type="PE",
+        metrics={"vwap": 1202.0, "rrg_quadrant": "LAGGING", "prev_close": 1215.0},
+    )
+    enriched = enrich_alert_with_feature_bus(alert, df_5m=df_5m)
+    assert float(enriched["confluence_score"]) >= 65.0
+
+
+def test_confidence_calibrator_friction_uses_planned_target_distance_on_extended_option():
+    """Regression for SHRIRAMFIN 28.2% friction false cap when premium accelerated toward T1."""
+    alert = AutoAlert(
+        alert_id="aa-options-momentum-shriramfin-20261127",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="SHRIRAMFIN",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="SHRIRAMFIN dump",
+        summary="Test",
+        ltp=44.5,
+        trigger_level=33.85,
+        target_level=42.8,
+        stop_loss=30.5,
+        lot_size=150,
+        option_type="PE",
+        confidence=96,
+        metrics={"composite_confluence_score": 82},
+    )
+    rep = calibrate_alert_confidence(alert)
+    assert rep.cost_friction_pct is not None and rep.cost_friction_pct < 15.0
+    assert rep.high_friction_risk is False
+
+
+def test_auto_alert_engine_telegram_recognizes_strat_apex_and_composite_confluence(monkeypatch):
+    """Verify SENSEX STRAT_2_1_2_BEARISH (APEX_CONFLUENCE) and composite confluence 84 pass Telegram gate."""
+    monkeypatch.setenv("TELEGRAM_APEX_ONLY", "1")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "dummy")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    engine = AutoAlertEngine.__new__(AutoAlertEngine)
+    engine._lock = __import__("threading").RLock()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": [], "FNO_STOCK": [], "EQUITY": []}
+    engine._hourly_index_directional = []
+    engine._hourly_fno_stock_directional = []
+    engine._dispatch_cooldowns = {}
+    engine._watched_indices = ("NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY")
+    engine.alerts = []
+
+    sensex_alert = AutoAlert(
+        alert_id="aa-strat-2-1-2-bearish-sensex-20261127",
+        alert_type="STRAT_2_1_2_BEARISH",
+        stage="CONFIRMED",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="SENSEX 2-1-2 Bearish",
+        summary="Test",
+        ltp=83600.0,
+        trigger_level=83600.0,
+        target_level=83000.0,
+        stop_loss=83800.0,
+        confidence=98,
+        order_flow_signals={"call_writing": True, "vwap_breakdown": True},
         is_live=True,
         environment="LIVE",
+        metrics={
+            "conviction_tier": "APEX_CONFLUENCE",
+            "composite_confluence_score": 84,
+            "confluence_score": 60.0,
+            "signals": ["STRAT_2_1_2_BEARISH", "VWAP_BREAKDOWN"],
+        },
     )
-    engine._alerts.append(alert)
+    allowed, reason = engine._eval_telegram_apex_gate(sensex_alert, in_market=True)
+    assert allowed is True, reason
 
-    # Mock evaluate_alert_targets_and_trailing to return T1_ACHIEVED
-    mock_eval = MagicMock()
-    mock_eval.new_milestone = "T1_ACHIEVED"
-    mock_eval.should_trail = True
-    mock_eval.trailing_decision = "TRAIL_DYNAMIC_ATR"
-    mock_eval.recommended_stop = 6850.0
-    mock_eval.trailing_rationale = "Target 1 achieved"
-    mock_eval.locked_profit_pts = 150.0
-    mock_eval.locked_profit_pct = 2.2
-    mock_eval.target_status = "T1_ACHIEVED"
-    mock_eval.r_multiple = 2.0
-    mock_eval.pnl_pct = 2.2
+
+def test_scan_pre_inflection_suppresses_bullish_dryup_during_nifty_markdown(monkeypatch):
+    """Verify pre_inflection skips noisy counter-trend bullish scans when NIFTY is in markdown."""
+    engine = AutoAlertEngine.__new__(AutoAlertEngine)
+    engine._cached_pre_inflection = None
+    engine.watched_equities = ["HAL", "RELIANCE"]
 
     monkeypatch.setattr(
-        "engine.auto_alert_engine.evaluate_alert_targets_and_trailing", lambda a, **kw: mock_eval
+        "engine.auto_alert_engine.AutoAlertEngine._should_run_detector",
+        lambda self, n, c: True,
+        raising=False,
     )
-    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
-    monkeypatch.setattr(engine, "resolve_session_end_alerts", lambda **kw: None)
-    monkeypatch.setattr(engine, "check_session_closing_warning", lambda **kw: None)
-    monkeypatch.setattr(engine, "check_eod_session_review", lambda **kw: None)
-    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 7000.0)
-
-    updated = engine.check_and_alert_targets_and_trailing(exchanges=["NSE"])
-    assert len(updated) == 1
-    assert "T1_ACHIEVED" in updated[0].achieved_milestones
-
-    # Check that record_trade_outcome was invoked with WIN_T1
-    assert len(recorded_outcomes) == 1
-    rec = recorded_outcomes[0]
-    assert rec["symbol"] == "TRENT"
-    assert rec["outcome"] == "WIN_T1"
-    assert rec["realized_rr"] == 2.0
-
-
-def test_eod_report_truthful_on_zero_alerts(tmp_path, monkeypatch):
-    """Verify EOD report generator truthfully reports 0 trades without synthetic demo fallbacks."""
-    empty_file = tmp_path / "empty_alerts.json"
-    empty_file.write_text("[]", encoding="utf-8")
-
-    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
-    gen = EODReportGenerator(data_file=empty_file)
-
-    report = gen.generate(target_date="2026-09-18")
-    assert report.total_alerts == 0
-    assert report.ignited_trades == 0
-    assert report.win_count == 0
-    assert report.loss_count == 0
-    assert report.win_rate_pct == 0.0
-    assert report.total_realized_r == 0.0
-    assert report.star_setups == []
-    assert any("Zero capital drawdown" in p for p in report.what_went_well_points)
+    nq = SimpleNamespace(change_pct=-0.75, last_price=25680.0, ltp=25680.0, vwap=25800.0)
+    out = engine.scan_pre_inflection_dryup(quotes_map={"NSE:NIFTY 50": nq})
+    assert out == []

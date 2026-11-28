@@ -752,12 +752,14 @@ class MStockWebSocket:
                 bid=tick.bids[0].price if tick.bids else 0.0,
                 ask=tick.asks[0].price if tick.asks else 0.0,
             )
-            with ws_manager._lock:
-                ws_manager._ticks[tick.symbol] = compat_tick
-                ws_manager._ticks[tick.token] = compat_tick
-                ws_sym = _to_ws_symbol(tick.symbol)
-                if ws_sym:
-                    ws_manager._ticks[ws_sym] = compat_tick
+            tick_updates = {
+                tick.symbol: compat_tick,
+                tick.token: compat_tick,
+            }
+            ws_sym = _to_ws_symbol(tick.symbol)
+            if ws_sym:
+                tick_updates[ws_sym] = compat_tick
+            ws_manager.update_ticks(tick_updates)
         except Exception as e_suppressed:
             logger.debug(
                 f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"

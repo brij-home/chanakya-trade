@@ -38,7 +38,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -271,6 +271,10 @@ class Tick:
     ask: float = 0.0
     atp: float = 0.0
     received_at: float = 0.0
+    delta_volume: int = 0
+    bid_qty: int = 0
+    ask_qty: int = 0
+    oi: int = 0
 
     def is_stale(self, max_age_seconds: float = 60.0) -> bool:
         """Return True if tick age exceeds max_age_seconds or timestamp is zero."""
@@ -295,12 +299,15 @@ class WebSocketManager:
     Singleton — one connection per session, shared across all modules.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, lite_mode: bool = False) -> None:
         self._ws = None
         self._connected = False
+        self._lite_mode: bool = bool(lite_mode)
         self._access_token = ""
         self._app_id = ""
         self._ticks: dict[str, Tick] = {}  # symbol → latest tick
+        self._depth_5_cache: dict[str, dict] = {}  # symbol → latest 5-level DepthUpdate snapshot
+        self._depth_subscribed: set[str] = set()
         self._callbacks: list[Callable] = []
         self._subscribed: set[str] = set()
         self._lock = threading.Lock()
@@ -316,10 +323,19 @@ class WebSocketManager:
         self._token_refresh_thread: Optional[threading.Thread] = None
         self._last_packet_at: float = 0.0
         self._watchdog_thread: Optional[threading.Thread] = None
+        self._last_day_volume: dict[str, int] = {}
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def lite_mode(self) -> bool:
+        return self._lite_mode
+
+    def set_lite_mode(self, enabled: bool) -> None:
+        """Toggle DataSocket Lite Mode (LTP-only stream); applies on next socket connect."""
+        self._lite_mode = bool(enabled)
 
     def _ensure_dispatcher_running(self) -> None:
         """Starts background tick fan-out worker to ensure callbacks never stall the socket."""
@@ -412,7 +428,10 @@ class WebSocketManager:
                     ltp=tick.ltp,
                     bid=getattr(tick, "bid", 0.0) or 0.0,
                     ask=getattr(tick, "ask", 0.0) or 0.0,
-                    volume=int(getattr(tick, "volume", 0) or 0),
+                    bid_qty=int(getattr(tick, "bid_qty", 0) or 0),
+                    ask_qty=int(getattr(tick, "ask_qty", 0) or 0),
+                    volume=int(getattr(tick, "delta_volume", 0) or 0),
+                    oi=int(getattr(tick, "oi", 0) or 0),
                     flag="WS_TICK",
                     timestamp_ms=ts_ms,
                 )
@@ -534,6 +553,28 @@ class WebSocketManager:
             self._thread.join(timeout=timeout)
         self._thread = None
 
+    def filter_unsubscribed(self, symbols: list[str]) -> list[str]:
+        """Return only valid symbols not currently tracked in self._subscribed."""
+        if not symbols or not self._ws or not self._connected:
+            return []
+        out: list[str] = []
+        with self._lock:
+            current = set(self._subscribed)
+        for s in symbols:
+            s_up = str(s).strip().upper()
+            if (
+                not s_up
+                or s_up.startswith("CRYPTO:")
+                or s_up.endswith("USDT")
+                or s_up in ("BTC", "ETH", "SOL", "BNB", "DOGE")
+            ):
+                continue
+            ws_sym = _to_ws_symbol(s)
+            if ws_sym and is_valid_ws_symbol(ws_sym) and ws_sym not in current:
+                out.append(ws_sym)
+                current.add(ws_sym)
+        return out
+
     def subscribe(self, symbols: list[str], record_in_manager: bool = True) -> None:
         """Subscribe to symbols for real-time ticks."""
         if not self._ws or not self._connected:
@@ -554,8 +595,17 @@ class WebSocketManager:
         if not filtered:
             return
 
-        # Convert to Fyers format and filter malformed symbols
-        ws_symbols = [s for s in (_to_ws_symbol(x) for x in filtered) if is_valid_ws_symbol(s)]
+        # Convert to Fyers format, filter malformed symbols, and short-circuit already-subscribed symbols
+        # before performing per-symbol exchange-master validation.
+        with self._lock:
+            already_subscribed = set(self._subscribed)
+        ws_symbols = [
+            s
+            for s in dict.fromkeys(_to_ws_symbol(x) for x in filtered)
+            if s and is_valid_ws_symbol(s) and s not in already_subscribed
+        ]
+        if not ws_symbols:
+            return
 
         # Authoritative pre-dispatch verification against official exchange symbol master.
         # Semantics:
@@ -692,6 +742,51 @@ class WebSocketManager:
             except Exception as exc:
                 logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
 
+    def subscribe_depth(self, symbols: list[str], max_depth_symbols: int = 100) -> list[str]:
+        """Subscribe to 5-level DepthUpdate stream (channel 12) for BFO/SENSEX or overflow exposures."""
+        if not symbols:
+            return []
+        with self._lock:
+            already = set(self._depth_subscribed)
+        targets = [
+            s
+            for s in dict.fromkeys(_to_ws_symbol(x) for x in symbols)
+            if s and is_valid_ws_symbol(s) and s not in already
+        ]
+        remaining = max(0, max_depth_symbols - len(already))
+        targets = targets[:remaining]
+        if not targets:
+            return []
+        if not self._ws or not self._connected:
+            with self._lock:
+                self._depth_subscribed.update(targets)
+            return targets
+        sub_lock = getattr(self, "_sub_lock", None) or self._lock
+        with sub_lock:
+            try:
+                self._ws.subscribe(targets, data_type="DepthUpdate", channel=12)
+                with self._lock:
+                    self._depth_subscribed.update(targets)
+                logger.info(
+                    f"[WebSocket] Subscribed {len(targets)} symbols to 5-level DepthUpdate (channel 12)"
+                )
+                return targets
+            except Exception as exc:
+                logger.debug(f"[WebSocket] subscribe_depth failed: {exc}")
+                return []
+
+    def get_l2_depth(self, instrument: str, max_age_seconds: float = 15.0) -> Optional[dict]:
+        """Return fresh 5-level DepthUpdate snapshot if streaming and within max_age_seconds."""
+        ws_sym = _to_ws_symbol(instrument)
+        with self._lock:
+            snap = self._depth_5_cache.get(ws_sym) or self._depth_5_cache.get(instrument)
+        if not snap:
+            return None
+        age = time.time() - float(snap.get("received_at", 0.0) or 0.0)
+        if age < 0 or age > max_age_seconds:
+            return None
+        return dict(snap)
+
     def _sanitize_sdk_subscription_state(self) -> tuple[int, int, set[str]]:
         """
         Repair FyersDataSocket internal list/dict drift before subscribe/unsubscribe calls.
@@ -778,6 +873,13 @@ class WebSocketManager:
         tick = self.get_tick(instrument, max_age_seconds=max_age_seconds)
         return tick.ltp if tick and tick.ltp > 0 else None
 
+    def update_ticks(self, ticks_by_key: dict[str, Tick]) -> None:
+        """Atomically insert or update multiple symbol->Tick aliases under lock."""
+        if not ticks_by_key:
+            return
+        with self._lock:
+            self._ticks.update(ticks_by_key)
+
     def purge_symbols(self, symbols: list[str]) -> int:
         """Remove specified symbols and their canonical aliases from tick cache."""
         ws_syms: set[str] = set()
@@ -847,7 +949,7 @@ class WebSocketManager:
             self._ws = data_ws.FyersDataSocket(
                 access_token=f"{self._app_id}:{self._access_token}",
                 log_path="",
-                litemode=False,
+                litemode=bool(self._lite_mode),
                 write_to_file=True,
                 reconnect=False,  # Autonomous control: ensures on_close triggers our self-healing reconnect and resubscription
                 on_connect=self._on_connect,
@@ -1138,15 +1240,58 @@ class WebSocketManager:
                 raw_low = float(data.get("low_price", data.get("low", 0)) or 0.0)
                 raw_close = float(data.get("prev_close_price", data.get("close", 0)) or 0.0)
                 raw_vol = int(data.get("vol_traded_today", data.get("volume", 0)) or 0)
+                raw_ltq = int(data.get("last_traded_qty", data.get("ltq", 0)) or 0)
                 raw_ch = float(data.get("ch", 0) or 0.0)
                 raw_chp = float(data.get("chp", 0) or 0.0)
                 raw_ts = float(data.get("exch_feed_time", time.time()) or time.time())
-                raw_bid = float(data.get("bid", 0) or 0.0)
-                raw_ask = float(data.get("ask", 0) or 0.0)
-                raw_atp = float(data.get("atp", data.get("avg_traded_price", 0.0)) or 0.0)
+                raw_bid = float(data.get("bid_price", data.get("bid", 0)) or 0.0)
+                raw_ask = float(data.get("ask_price", data.get("ask", 0)) or 0.0)
+                raw_bid_qty = int(data.get("bid_size", data.get("bq", 0)) or 0)
+                raw_ask_qty = int(data.get("ask_size", data.get("sq", 0)) or 0)
+                raw_oi = int(data.get("OI", data.get("oi", data.get("open_interest", 0))) or 0)
+                raw_atp = float(
+                    data.get("avg_trade_price", data.get("atp", data.get("avg_traded_price", 0.0)))
+                    or 0.0
+                )
+
+                # DepthUpdate packets emit flat 5-level keys (bid_price1..5 / ask_price1..5)
+                depth_bids_5: list[dict[str, Any]] = []
+                depth_asks_5: list[dict[str, Any]] = []
+                if "bid_price1" in data or "ask_price1" in data:
+                    for lvl in range(1, 6):
+                        bp = float(data.get(f"bid_price{lvl}", 0) or 0.0)
+                        bq = int(data.get(f"bid_size{lvl}", 0) or 0)
+                        bo = int(data.get(f"bid_order{lvl}", 0) or 0)
+                        if bp > 0 and bq > 0:
+                            depth_bids_5.append(
+                                {"level": lvl, "price": bp, "qty": bq, "orders": bo}
+                            )
+                        ap = float(data.get(f"ask_price{lvl}", 0) or 0.0)
+                        aq = int(data.get(f"ask_size{lvl}", 0) or 0)
+                        ao = int(data.get(f"ask_order{lvl}", 0) or 0)
+                        if ap > 0 and aq > 0:
+                            depth_asks_5.append(
+                                {"level": lvl, "price": ap, "qty": aq, "orders": ao}
+                            )
+                    if depth_bids_5 and raw_bid <= 0:
+                        raw_bid = depth_bids_5[0]["price"]
+                        raw_bid_qty = depth_bids_5[0]["qty"]
+                    if depth_asks_5 and raw_ask <= 0:
+                        raw_ask = depth_asks_5[0]["price"]
+                        raw_ask_qty = depth_asks_5[0]["qty"]
 
                 with self._lock:
                     existing_tick = self._ticks.get(symbol)
+                    prev_day_vol = self._last_day_volume.get(symbol, 0)
+                    delta_vol = 0
+                    if raw_vol > 0:
+                        if prev_day_vol > 0 and raw_vol >= prev_day_vol:
+                            delta_vol = raw_vol - prev_day_vol
+                        elif raw_ltq > 0:
+                            delta_vol = raw_ltq
+                        self._last_day_volume[symbol] = raw_vol
+                    elif raw_ltq > 0:
+                        delta_vol = raw_ltq
 
                 final_ltp = (
                     raw_ltp if raw_ltp > 0 else (existing_tick.ltp if existing_tick else 0.0)
@@ -1175,6 +1320,17 @@ class WebSocketManager:
                 final_ask = (
                     raw_ask if raw_ask > 0 else (existing_tick.ask if existing_tick else 0.0)
                 )
+                final_bid_qty = (
+                    raw_bid_qty
+                    if raw_bid_qty > 0
+                    else (existing_tick.bid_qty if existing_tick else 0)
+                )
+                final_ask_qty = (
+                    raw_ask_qty
+                    if raw_ask_qty > 0
+                    else (existing_tick.ask_qty if existing_tick else 0)
+                )
+                final_oi = raw_oi if raw_oi > 0 else (existing_tick.oi if existing_tick else 0)
                 final_ch = (
                     raw_ch if raw_ch != 0.0 else (existing_tick.change if existing_tick else 0.0)
                 )
@@ -1204,6 +1360,10 @@ class WebSocketManager:
                     ask=final_ask,
                     atp=final_atp,
                     received_at=time.time(),
+                    delta_volume=delta_vol,
+                    bid_qty=final_bid_qty,
+                    ask_qty=final_ask_qty,
+                    oi=final_oi,
                 )
 
                 with self._lock:
@@ -1271,24 +1431,57 @@ class WebSocketManager:
                     clean_sym = clean_sym.strip().upper()
 
                     book = get_depth_book(clean_sym)
-                    b_raw = data.get("bids") or (data.get("depth", {}).get("buy", []))
-                    a_raw = data.get("asks") or (data.get("depth", {}).get("sell", []))
+                    b_raw = (
+                        depth_bids_5 or data.get("bids") or (data.get("depth", {}).get("buy", []))
+                    )
+                    a_raw = (
+                        depth_asks_5 or data.get("asks") or (data.get("depth", {}).get("sell", []))
+                    )
                     if b_raw or a_raw:
                         book.batch_update(b_raw or [], a_raw or [])
-                    elif tick.bid > 0 and tick.ask > 0:
-                        book.update_level(
-                            "BUY", tick.bid, max(1, tick.volume // 10 if tick.volume else 1)
-                        )
-                        book.update_level(
-                            "SELL", tick.ask, max(1, tick.volume // 10 if tick.volume else 1)
-                        )
+                    elif tick.bid > 0 and tick.ask > 0 and (tick.bid_qty > 0 or tick.ask_qty > 0):
+                        if tick.bid_qty > 0:
+                            book.update_level("BUY", tick.bid, tick.bid_qty)
+                        if tick.ask_qty > 0:
+                            book.update_level("SELL", tick.ask, tick.ask_qty)
 
-                    if tick.ltp > 0:
+                    if tick.ltp > 0 and tick.delta_volume > 0:
                         book.record_tick(
-                            price=tick.ltp, volume=tick.volume or 1, timestamp=tick.timestamp
+                            price=tick.ltp,
+                            volume=tick.delta_volume,
+                            timestamp=tick.timestamp,
+                            best_bid=tick.bid if tick.bid > 0 else None,
+                            best_ask=tick.ask if tick.ask > 0 else None,
                         )
                 except Exception as e_book:
                     logger.debug(f"Failed updating BisectDepthBook for {symbol}: {e_book}")
+
+                if depth_bids_5 or depth_asks_5:
+                    tot_b5 = sum(int(x.get("qty", 0) or 0) for x in depth_bids_5)
+                    tot_a5 = sum(int(x.get("qty", 0) or 0) for x in depth_asks_5)
+                    ratio5 = round(tot_b5 / max(tot_a5, 1), 3) if tot_a5 > 0 else 1.0
+                    depth_snap = {
+                        "status": "ok",
+                        "market_data_state": "LIVE",
+                        "depth_level": 5,
+                        "provider": "fyers_ws_depth_5",
+                        "symbol": symbol,
+                        "bids": depth_bids_5,
+                        "asks": depth_asks_5,
+                        "total_buy_qty": tot_b5,
+                        "total_sell_qty": tot_a5,
+                        "bid_ask_ratio": ratio5,
+                        "order_book_imbalance_ratio": ratio5,
+                        "ltp": tick.ltp if tick.ltp > 0 else None,
+                        "atp": tick.atp if tick.atp > 0 else None,
+                        "volume": tick.volume,
+                        "oi": tick.oi,
+                        "received_at": tick.received_at,
+                    }
+                    with self._lock:
+                        self._depth_5_cache[symbol] = depth_snap
+                        if ":" in symbol:
+                            self._depth_5_cache[symbol.split(":", 1)[1]] = depth_snap
 
                 # Fire callbacks asynchronously via bounded queue to decouple WS thread
                 try:

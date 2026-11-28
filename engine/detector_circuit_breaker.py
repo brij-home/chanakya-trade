@@ -124,7 +124,7 @@ class DetectorCircuitBreaker:
         self.ledger_file = Path(ledger_file) if ledger_file else get_performance_ledger_file()
         self.rolling_window = rolling_window
         self.min_samples = min_samples
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._history: dict[str, deque[TradeOutcome]] = {}
         self._seen_outcomes: dict[str, str] = {}
         self._load()
@@ -344,13 +344,21 @@ class DetectorCircuitBreaker:
         if today_consecutive_losses >= 5 or (expectancy < -0.60 and today_consecutive_losses >= 3):
             status: DetectorStatus = "HALTED"
             multiplier = 0.0
-        elif (
+        elif has_verified_performance_provenance and (
             consecutive_losses >= 3
             or today_consecutive_losses >= 2
             or expectancy < 0.0
-            or (has_verified_performance_provenance and kelly <= 0.0)
-            or (expectancy < -0.60 and today_consecutive_losses < 3)
+            or kelly <= 0.0
+            or expectancy < -0.60
         ):
+            status = "PROBATION"
+            multiplier = 0.75
+        elif not has_verified_performance_provenance and (
+            today_consecutive_losses >= 2 or (expectancy < -0.55 and count >= 10)
+        ):
+            # Forward-path terminal logs intentionally exclude partial/T1+ winners (SAFETY_CONTRACTS #18).
+            # Apply probation only on same-day intraday losing streaks or severe unscaled drawdown
+            # so censored historical negative expectancy does not permanently mute healthy detectors.
             status = "PROBATION"
             multiplier = 0.75
         elif has_verified_performance_provenance and expectancy >= 0.20 and win_rate >= 0.40:
@@ -422,6 +430,11 @@ class DetectorCircuitBreaker:
         with self._lock:
             keys = sorted(self._history.keys())
         return {k: self.get_metrics(k).to_dict() for k in keys}
+
+    def has_seen_outcome(self, dedup_key: str) -> bool:
+        """Return whether an outcome dedup key has already been recorded."""
+        with self._lock:
+            return dedup_key in self._seen_outcomes
 
     def reset_detector(self, alert_type: str) -> None:
         """Manually clears history for a detector (e.g. after parameter tuning or regime reset)."""

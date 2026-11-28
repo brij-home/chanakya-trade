@@ -508,3 +508,163 @@ def test_0dte_post_t0_5_stagnation_triggers_time_stop_scratch():
     assert res.new_milestone == "TIME_STOP_SCRATCH"
     assert res.trailing_decision == "TIME_STOP_SCRATCH"
     assert "0-DTE Theta Expiry" in res.trailing_rationale
+
+
+def test_stagnation_time_stop_negative_5pct_not_called_scratch():
+    """Alert 10 RCA: A -5.0% / -0.42R stagnation exit must report early CMP cut (/pt) rather than 'scratch level'."""
+    from engine.alert_evaluator import evaluate_alert_invalidation
+
+    created_time = (datetime.now(IST) - timedelta(minutes=62)).strftime("%Y-%m-%d %H:%M:%S IST")
+    alert = AutoAlert(
+        alert_id="aa-crude-stagnation-cut",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="CRUDEOIL 7800 CE",
+        summary="CRUDEOIL call",
+        ltp=370.0,
+        trigger_level=389.40,
+        target_level=482.90,
+        stop_loss=342.67,
+        strike=7800.0,
+        option_type="CE",
+        option_premium=389.40,
+        initial_stop_loss=342.67,
+        lot_size=100,
+        contract_symbol="MCX:CRUDEOIL26DEC7800CE",
+        time_horizon="INTRADAY",
+        created_at=created_time,
+        triggered_at=created_time,
+        is_live=True,
+        environment="LIVE",
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹389.40",
+            "stop_loss": "₹342.67",
+            "lot_size": 100,
+        },
+        metrics={"rvol": 0.8},
+    )
+    alert._force_test_expiry = True
+
+    reason = evaluate_alert_invalidation(alert, current_ltp=370.0)
+    assert reason is not None
+    assert "Velocity Stagnation Time-Stop" in reason
+    assert "scratch level" not in reason.lower()
+    assert "early cut CMP" in reason
+
+    alert.stage = "TIME_STOP_EXIT"
+    alert.target_status = "STAGNATION_SCRATCH"
+    alert.invalidation_reason = reason
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "₹-19.40/pt (-5.0%" in rendered
+    assert "EARLY CUT" in rendered
+    assert "SCRATCH POSITION" not in rendered
+
+
+def test_mcx_20dte_commodity_exempt_from_equity_midday_stagnation_warning(monkeypatch):
+    """Alert 11 RCA: MCX/COMMODITY and >=14 DTE options must not get equity midday stagnation scratch warnings."""
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    monkeypatch.setattr(engine, "_save", lambda *a, **kw: None)
+    dispatched = []
+    monkeypatch.setattr(engine, "_dispatch", lambda a: dispatched.append(a))
+
+    fake_now = datetime(2026, 11, 26, 12, 26, tzinfo=IST)
+    created_ts = datetime(2026, 11, 26, 11, 41, tzinfo=IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    alert = AutoAlert(
+        alert_id="aa-crude-midday-exempt",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="CRUDEOIL 7800 CE",
+        summary="CRUDEOIL call",
+        ltp=371.30,
+        trigger_level=389.40,
+        target_level=482.90,
+        stop_loss=342.67,
+        strike=7800.0,
+        option_type="CE",
+        option_premium=389.40,
+        initial_stop_loss=342.67,
+        lot_size=100,
+        contract_symbol="MCX:CRUDEOIL26DEC7800CE",
+        time_horizon="INTRADAY",
+        created_at=created_ts,
+        triggered_at=created_ts,
+        pnl_pct=-4.6,
+        telegram_dispatched=True,
+        is_live=True,
+        environment="LIVE",
+        actionable_plan={"action": "BUY CE"},
+        metrics={"dte": 20},
+    )
+    engine._alerts = [alert]
+
+    _fake_dt_cls = type(
+        "FakeDT",
+        (),
+        {
+            "now": staticmethod(lambda tz=None: fake_now),
+            "strptime": staticmethod(datetime.strptime),
+        },
+    )
+    monkeypatch.setattr("engine.auto_alert_engine.datetime", _fake_dt_cls)
+    monkeypatch.setattr("engine.alert_evaluator.datetime", _fake_dt_cls)
+
+    warnings = engine.check_and_alert_in_flight_decay(
+        quotes_map={engine._lookup_sym(alert): 371.30}
+    )
+    assert not any(
+        "Midday lull" in str(getattr(w, "in_flight_warning_reason", "") or "") for w in warnings
+    )
+    assert "Midday lull" not in str(alert.in_flight_warning_reason or "")
+    assert "VELOCITY STAGNATION SCRATCH" not in str(alert.headline)
+
+
+def test_in_flight_warning_negative_4pct_clarifies_pt_and_early_cut():
+    """Alert 11 RCA: Negative (-4.6%) in-flight stagnation warning renders /pt and EARLY CUT instead of SCRATCH."""
+    alert = AutoAlert(
+        alert_id="aa-crude-inflight-render",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IN_FLIGHT_WARNING",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="CRUDEOIL 7800 CE",
+        summary="Midday lull velocity stagnation: Position active for 45m without directional progress.",
+        in_flight_warning_reason="Midday lull velocity stagnation: Position active for 45m without directional progress.",
+        trailing_decision="VELOCITY_STAGNATION_SCRATCH",
+        ltp=371.30,
+        trigger_level=389.40,
+        target_level=482.90,
+        stop_loss=342.67,
+        strike=7800.0,
+        option_type="CE",
+        option_premium=389.40,
+        initial_stop_loss=342.67,
+        lot_size=100,
+        contract_symbol="MCX:CRUDEOIL26DEC7800CE",
+        is_live=True,
+        environment="LIVE",
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹389.40",
+            "stop_loss": "₹342.67",
+            "lot_size": 100,
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "₹-18.10/pt (-4.6%" in rendered
+    assert "EARLY CUT" in rendered
+    assert "VELOCITY STAGNATION SCRATCH" not in rendered

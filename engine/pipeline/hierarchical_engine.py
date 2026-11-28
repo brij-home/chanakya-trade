@@ -253,7 +253,13 @@ class HierarchicalSignalPipeline:
             from market.participant_oi import get_latest_participant_oi
 
             poi = get_latest_participant_oi()
-            if poi and getattr(poi, "fii_index_long_ratio", None) is not None:
+            if (
+                poi
+                and getattr(poi, "status", "AVAILABLE") == "AVAILABLE"
+                and getattr(poi, "provenance", "") != "UNAVAILABLE"
+                and getattr(poi, "fii_index_long_ratio", None) is not None
+                and float(poi.fii_index_long_ratio) > 0
+            ):
                 ratio = float(poi.fii_index_long_ratio)
                 if ratio < 0.20:
                     res.participant_fii_bias = "EXTREME_BEARISH_EXHAUSTION"  # Squeeze imminent
@@ -307,19 +313,43 @@ class HierarchicalSignalPipeline:
                 res.sector_id = sec_info.get("sector")
                 res.sector_rrg_quadrant = sec_info.get("quadrant")
                 if is_directional:
-                    # Directional trades prefer LEADING or IMPROVING sectors
+                    # Directional trades prefer LEADING or IMPROVING sectors, but genuine
+                    # high-RVOL institutional decouplers (e.g. Defence surging in LAGGING INFRA)
+                    # are sector-rotation leaders, not beta-drag traps.
                     direction_str = str(getattr(alert, "direction", "BULLISH")).upper()
                     is_bull = direction_str not in ("BEARISH", "SHORT", "SELL")
+                    chg_val = abs(
+                        float(
+                            metrics_dict.get("spot_change_pct")
+                            or metrics_dict.get("change_pct")
+                            or 0.0
+                        )
+                    )
+                    is_strong_decoupler = bool(
+                        metrics_dict.get("is_decoupler")
+                        or res.tod_rvol >= 2.2
+                        or (chg_val >= 2.5 and res.tod_rvol >= 1.8)
+                    )
                     if is_bull and res.sector_rrg_quadrant == "LAGGING":
-                        res.sector_aligned = False
-                        res.reasons.append(
-                            f"Sector {res.sector_id} is in LAGGING RRG quadrant with negative relative momentum"
-                        )
+                        if is_strong_decoupler:
+                            res.coaching_notes.append(
+                                f"Institutional decoupler in {res.sector_id} (LAGGING RRG overridden by {res.tod_rvol:.1f}x RVOL)"
+                            )
+                        else:
+                            res.sector_aligned = False
+                            res.reasons.append(
+                                f"Sector {res.sector_id} is in LAGGING RRG quadrant with negative relative momentum"
+                            )
                     elif not is_bull and res.sector_rrg_quadrant == "LEADING":
-                        res.sector_aligned = False
-                        res.reasons.append(
-                            f"Sector {res.sector_id} is in LEADING RRG quadrant; shorting leaders has low expectancy"
-                        )
+                        if is_strong_decoupler:
+                            res.coaching_notes.append(
+                                f"Institutional breakdown decoupler in {res.sector_id} (LEADING RRG overridden by {res.tod_rvol:.1f}x RVOL)"
+                            )
+                        else:
+                            res.sector_aligned = False
+                            res.reasons.append(
+                                f"Sector {res.sector_id} is in LEADING RRG quadrant; shorting leaders has low expectancy"
+                            )
             except Exception as e_sec:
                 logger.debug(f"[HierarchicalEngine] Sector alignment lookup: {e_sec}")
 
@@ -695,41 +725,89 @@ class HierarchicalSignalPipeline:
         else:
             res.entry_style = "LIMIT_ON_PULLBACK"
 
-        # Check Anti-Chase Boundary Violation
+        # Check Anti-Chase Boundary Violation strictly within consistent price units (Spot vs Option)
         direction_str = str(getattr(alert, "direction", "BULLISH")).upper()
         is_bull = direction_str not in ("BEARISH", "SHORT", "SELL")
         act_plan_str = str((plan_dict or {}).get("action", "")).upper()
-        is_option_long = bool(
+        spot_no_chase = float(
+            getattr(alert, "spot_no_chase_boundary", 0.0)
+            or metrics.get("spot_no_chase_boundary")
+            or (plan_dict.get("spot_no_chase_boundary") if isinstance(plan_dict, dict) else 0.0)
+            or 0.0
+        )
+        opt_prem_val = float(
+            getattr(alert, "option_premium", 0.0) or metrics.get("option_premium") or 0.0
+        )
+        is_option_contract = bool(
             getattr(alert, "contract_symbol", None)
             or getattr(alert, "option_type", None)
             or str(getattr(alert, "preferred_vehicle", "")).upper()
             in ("NAKED_OPTION", "OPTION", "SPREAD_ONLY")
-            or act_plan_str.startswith("BUY")
-            or "LONG" in act_plan_str
         )
-        if is_option_long:
-            is_upside_profit = True
-        elif (
-            alert.target_level and alert.trigger_level and alert.target_level != alert.trigger_level
-        ):
-            is_upside_profit = alert.target_level > alert.trigger_level
-        else:
-            is_upside_profit = is_bull
+        # Determine whether ltp + no_chase are both in option premium space, or spot space
+        ltp_is_opt_space = bool(
+            is_option_contract
+            and opt_prem_val > 0
+            and ltp > 0
+            and abs(ltp - opt_prem_val) <= max(5.0, opt_prem_val * 0.35)
+        )
+        nc_looks_like_opt = bool(
+            is_option_contract
+            and opt_prem_val > 0
+            and no_chase > 0
+            and ltp > 0
+            and ltp > opt_prem_val * 3.0
+            and abs(no_chase - opt_prem_val) <= max(5.0, opt_prem_val * 0.50)
+        )
 
-        if no_chase > 0 and ltp > 0:
-            if is_upside_profit and ltp > no_chase:
-                res.is_chased = True
-                res.passed = False
-                res.status = "CHASED_ENTRY"
-                res.reasons.append(
-                    f"Price ₹{ltp:,.2f} surged past no-chase boundary ₹{no_chase:,.2f}; chasing prohibited"
+        check_px = ltp
+        check_nc = no_chase
+        is_upside_profit = is_bull
+
+        if ltp_is_opt_space:
+            # Comparing option premium LTP against option no-chase boundary
+            is_option_long = (
+                act_plan_str.startswith("BUY")
+                or "LONG" in act_plan_str
+                or (
+                    not act_plan_str.startswith("SELL")
+                    and "SHORT" not in act_plan_str
+                    and "WRITE" not in act_plan_str
                 )
-            elif not is_upside_profit and ltp < no_chase:
+            )
+            is_upside_profit = True if is_option_long else False
+        else:
+            # Comparing underlying spot LTP: never test spot against option premium no-chase
+            if nc_looks_like_opt:
+                check_nc = spot_no_chase if spot_no_chase > 0 else 0.0
+            elif spot_no_chase > 0 and is_option_contract:
+                check_nc = spot_no_chase
+            if (
+                alert.target_level
+                and alert.trigger_level
+                and alert.target_level != alert.trigger_level
+                and not nc_looks_like_opt
+            ):
+                is_upside_profit = (
+                    not is_option_contract and alert.target_level > alert.trigger_level
+                ) or is_bull
+            else:
+                is_upside_profit = is_bull
+
+        if check_nc > 0 and check_px > 0:
+            if is_upside_profit and check_px > check_nc:
                 res.is_chased = True
                 res.passed = False
                 res.status = "CHASED_ENTRY"
                 res.reasons.append(
-                    f"Price ₹{ltp:,.2f} dropped past short no-chase boundary ₹{no_chase:,.2f}; chasing prohibited"
+                    f"Price ₹{check_px:,.2f} surged past no-chase boundary ₹{check_nc:,.2f}; chasing prohibited"
+                )
+            elif not is_upside_profit and check_px < check_nc:
+                res.is_chased = True
+                res.passed = False
+                res.status = "CHASED_ENTRY"
+                res.reasons.append(
+                    f"Price ₹{check_px:,.2f} dropped past short no-chase boundary ₹{check_nc:,.2f}; chasing prohibited"
                 )
 
         # ── Structural R:R Calibration: Directional vs Non-Directional Defined-Risk Spreads ──

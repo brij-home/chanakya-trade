@@ -318,7 +318,30 @@ class MarketDynamicsGovernor:
                         return cached_ctx
 
         # 1. Evaluate Intraday Phase
-        phase = get_intraday_phase(as_of_time)
+        try:
+            from market.instruments import COMMODITY_SYMBOLS
+
+            _is_mcx_comm = clean_sym in COMMODITY_SYMBOLS or str(symbol).upper().startswith("MCX:")
+        except Exception:
+            _is_mcx_comm = False
+
+        if _is_mcx_comm:
+            _dt_mcx = as_of_time or datetime.now(IST)
+            if _dt_mcx.tzinfo is None:
+                _dt_mcx = _dt_mcx.replace(tzinfo=IST)
+            _t_mcx = _dt_mcx.astimezone(IST).time()
+            if _t_mcx < dtime(9, 0) or _t_mcx >= dtime(23, 30):
+                phase = "OFF_MARKET_POSTCLOSE"
+            elif _t_mcx < dtime(11, 30):
+                phase = "MORNING_INSTITUTIONAL_EXPANSION"
+            elif _t_mcx < dtime(15, 30):
+                phase = "MIDDAY_MEAN_REVERSION_CHOP"
+            elif _t_mcx < dtime(22, 30):
+                phase = "AFTERNOON_TREND_IGNITION"
+            else:
+                phase = "EXPIRY_0DTE_GAMMA_UNPIN"
+        else:
+            phase = get_intraday_phase(as_of_time)
 
         # 2. Evaluate Volatility Regime
         vix_val = vix_override if vix_override is not None else self._fetch_live_vix()

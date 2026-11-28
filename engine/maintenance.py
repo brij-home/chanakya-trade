@@ -324,7 +324,14 @@ def run_maintenance_purge(
                 f"older than {raw_tick_retention_days} days."
             )
             items_deleted += purged_partitions
-        absorbed_segments = warehouse.compact_all_symbols()
+        absorbed_segments = 0
+        wh_stats = warehouse.get_storage_stats()
+        for part_name in wh_stats.get("date_partitions", []):
+            d_part = str(part_name).replace("date=", "").strip()
+            if d_part:
+                absorbed_segments += warehouse.compact_all_symbols(date_str=d_part)
+        if absorbed_segments == 0:
+            absorbed_segments = warehouse.compact_all_symbols()
         if absorbed_segments > 0:
             actions.append(
                 f"Compacted {absorbed_segments} tick warehouse segments into merged generations."
