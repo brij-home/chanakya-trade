@@ -54,8 +54,9 @@ def test_smc_orderblock_15m_timeframe_metrics():
         assert alert.metrics.get("is_intraday") is True
 
 
-def test_cross_asset_macro_headwind_suppression(tmp_path):
+def test_cross_asset_macro_headwind_suppression(tmp_path, monkeypatch):
     """Verify that a Long alert on BPCL or ASIANPAINT is vetoed when Brent Crude experiences a severe spike."""
+    monkeypatch.setenv("TELEGRAM_ALLOW_TREND_DAY_PULLBACK", "1")
     engine = AutoAlertEngine()
     engine._alerts_file = tmp_path / "auto_alerts.json"
     engine._alerts = {}
@@ -81,6 +82,7 @@ def test_cross_asset_macro_headwind_suppression(tmp_path):
             "macro_transmission_score": -60.0,  # Severe adverse drag
             "rvol": 1.2,
             "nifty_change_pct": 0.2,
+            "confluence_score": 82.0,
         },
         actionable_plan={"risk_reward": "1:3.0"},
     )
@@ -91,8 +93,9 @@ def test_cross_asset_macro_headwind_suppression(tmp_path):
     assert "BRENT" in reason
 
 
-def test_cross_asset_macro_tailwind_short_suppression(tmp_path):
+def test_cross_asset_macro_tailwind_short_suppression(tmp_path, monkeypatch):
     """Verify that a Short alert on ONGC is vetoed when Brent Crude experiences a severe spike (+55 pts support)."""
+    monkeypatch.setenv("TELEGRAM_ALLOW_TREND_DAY_PULLBACK", "1")
     engine = AutoAlertEngine()
     engine._alerts_file = tmp_path / "auto_alerts.json"
     engine._alerts = {}
@@ -117,6 +120,7 @@ def test_cross_asset_macro_tailwind_short_suppression(tmp_path):
             "macro_transmission_score": 55.0,  # Strong macro support
             "rvol": 1.2,
             "nifty_change_pct": -0.2,
+            "confluence_score": 82.0,
         },
         actionable_plan={"risk_reward": "1:3.0"},
     )
@@ -162,8 +166,9 @@ def test_cross_asset_macro_decoupler_exemption(tmp_path):
     assert "Cross-asset macro headwind" not in reason
 
 
-def test_cross_asset_macro_confluence_boost(tmp_path):
+def test_cross_asset_macro_confluence_boost(tmp_path, monkeypatch):
     """Verify that a Bullish alert aligned with a macro tailwind receives a +4% confluence boost."""
+    monkeypatch.setenv("TELEGRAM_ALLOW_TREND_DAY_PULLBACK", "1")
     engine = AutoAlertEngine()
     engine._alerts_file = tmp_path / "auto_alerts.json"
     engine._alerts = {}
@@ -189,6 +194,7 @@ def test_cross_asset_macro_confluence_boost(tmp_path):
             "macro_transmission_score": 45.0,  # Tailwind
             "rvol": 1.5,
             "nifty_change_pct": 0.2,
+            "confluence_score": 82.0,
         },
         actionable_plan={"risk_reward": "1:3.0"},
     )

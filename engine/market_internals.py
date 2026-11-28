@@ -28,31 +28,23 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from engine.feature_bus import INDEX_CONSTITUENT_WEIGHTS
 from market.instruments import canonical_symbol
 
 logger = logging.getLogger("engine.market_internals")
 
 
-# ── Authoritative Benchmark Weights ──
+# ── Authoritative Benchmark Weights (Synchronized with feature_bus SSOT) ──
 
 NIFTY_WEIGHTS: dict[str, float] = {
-    "HDFCBANK": 0.115,
-    "RELIANCE": 0.095,
-    "ICICIBANK": 0.078,
-    "INFY": 0.056,
-    "TCS": 0.042,
-    "BHARTIARTL": 0.040,
-    "ITC": 0.038,
-    "LT": 0.036,
+    **INDEX_CONSTITUENT_WEIGHTS["NIFTY"],
     "KOTAKBANK": 0.028,
-    "AXISBANK": 0.027,
-    "SBIN": 0.026,
     "HINDUNILVR": 0.024,
     "BAJFINANCE": 0.020,
     "M&M": 0.019,
     "MARUTI": 0.016,
     "SUNPHARMA": 0.015,
-    "TATAMOTORS": 0.014,
+    "TMPV": 0.014,
     "HCLTECH": 0.014,
     "NTPC": 0.013,
     "POWERGRID": 0.012,
@@ -69,12 +61,7 @@ NIFTY_WEIGHTS: dict[str, float] = {
 }
 
 BANKNIFTY_WEIGHTS: dict[str, float] = {
-    "HDFCBANK": 0.290,
-    "ICICIBANK": 0.230,
-    "SBIN": 0.120,
-    "AXISBANK": 0.100,
-    "KOTAKBANK": 0.090,
-    "INDUSINDBK": 0.055,
+    **INDEX_CONSTITUENT_WEIGHTS["BANKNIFTY"],
     "PNB": 0.030,
     "BANKBARODA": 0.025,
     "FEDERALBNK": 0.025,
@@ -82,6 +69,10 @@ BANKNIFTY_WEIGHTS: dict[str, float] = {
     "IDFCFIRSTB": 0.010,
     "BANDHANBNK": 0.010,
 }
+
+SENSEX_WEIGHTS: dict[str, float] = dict(INDEX_CONSTITUENT_WEIGHTS["SENSEX"])
+MIDCPNIFTY_WEIGHTS: dict[str, float] = dict(INDEX_CONSTITUENT_WEIGHTS["MIDCPNIFTY"])
+FINNIFTY_WEIGHTS: dict[str, float] = dict(INDEX_CONSTITUENT_WEIGHTS["FINNIFTY"])
 
 
 @dataclass
@@ -117,6 +108,7 @@ class IndexInternalsReport:
     top_positive_drivers: list[dict[str, Any]]
     top_negative_drivers: list[dict[str, Any]]
     as_of: str
+    status: str = "AVAILABLE"  # "AVAILABLE" | "UNAVAILABLE"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,11 +122,38 @@ _CACHE_TTL_SECS = 15.0
 def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
     """
     Computes real-time market internals (A/D ratio, % > VWAP, and weighted point contributions)
-    for NIFTY 50 or BANKNIFTY.
+    for NIFTY 50, BANKNIFTY, SENSEX, MIDCPNIFTY, or FINNIFTY.
+    Fails closed with status='UNAVAILABLE' when live index spot or constituent quotes are absent.
     """
     clean_idx = canonical_symbol(index).upper()
-    is_bank = any(k in clean_idx for k in ("BANK", "BANKNIFTY", "BANKEX"))
-    target_idx = "BANKNIFTY" if is_bank else "NIFTY"
+    if "SENSEX" in clean_idx:
+        target_idx = "SENSEX"
+        index_sym = "BSE:SENSEX-INDEX"
+        weights_map = SENSEX_WEIGHTS
+        constituents = list(SENSEX_WEIGHTS.keys())
+    elif any(k in clean_idx for k in ("BANK", "BANKNIFTY", "BANKEX")):
+        target_idx = "BANKNIFTY"
+        index_sym = "NSE:NIFTY BANK"
+        weights_map = BANKNIFTY_WEIGHTS
+        constituents = list(BANKNIFTY_WEIGHTS.keys())
+    elif "MID" in clean_idx:
+        target_idx = "MIDCPNIFTY"
+        index_sym = "NSE:MIDCPNIFTY-INDEX"
+        weights_map = MIDCPNIFTY_WEIGHTS
+        constituents = list(MIDCPNIFTY_WEIGHTS.keys())
+    elif "FIN" in clean_idx:
+        target_idx = "FINNIFTY"
+        index_sym = "NSE:FINNIFTY-INDEX"
+        weights_map = FINNIFTY_WEIGHTS
+        constituents = list(FINNIFTY_WEIGHTS.keys())
+    else:
+        target_idx = "NIFTY"
+        index_sym = "NSE:NIFTY 50"
+        weights_map = NIFTY_WEIGHTS
+        from analysis.universe import THEMATIC_PRESETS
+
+        n50_list = THEMATIC_PRESETS.get("nifty50", {}).get("symbols", [])
+        constituents = n50_list if len(n50_list) >= 40 else list(NIFTY_WEIGHTS.keys())
 
     now = time.time()
     with _INTERNALS_LOCK:
@@ -143,43 +162,33 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
             if now - cached_time < _CACHE_TTL_SECS:
                 return cached_rep
 
-    # 1. Resolve constituents and weights
-    if is_bank:
-        weights_map = BANKNIFTY_WEIGHTS
-        constituents = list(BANKNIFTY_WEIGHTS.keys())
-        default_spot = 52000.0
-    else:
-        weights_map = NIFTY_WEIGHTS
-        from analysis.universe import THEMATIC_PRESETS
-
-        n50_list = THEMATIC_PRESETS.get("nifty50", {}).get("symbols", [])
-        constituents = n50_list if len(n50_list) >= 40 else list(NIFTY_WEIGHTS.keys())
-        default_spot = 24500.0
-
-    # 2. Fetch Index Spot and Quotes
+    # Fetch Index Spot and Constituent Quotes (never fabricate default spot prices)
+    spot = 0.0
+    quotes_map: dict[str, Any] = {}
+    official_idx_chg = 0.0
     try:
         from market.quotes import get_ltp, get_quote
 
-        index_sym = "NSE:NIFTY BANK" if is_bank else "NSE:NIFTY 50"
-        spot = float(get_ltp(index_sym) or default_spot)
+        spot = float(get_ltp(index_sym) or 0.0)
         formatted_symbols = [f"NSE:{s}" for s in constituents]
-        quotes_map = get_quote(formatted_symbols + [index_sym])
-        idx_q = quotes_map.get(index_sym)
+        quotes_map = get_quote(formatted_symbols + [index_sym]) or {}
+        idx_q = quotes_map.get(index_sym) or quotes_map.get(target_idx)
+        if spot <= 0 and idx_q is not None:
+            spot = float(getattr(idx_q, "last_price", 0.0) or getattr(idx_q, "ltp", 0.0) or 0.0)
         official_idx_chg = float(getattr(idx_q, "change_pct", 0.0) or 0.0)
     except Exception as exc:
         logger.warning(f"[compute_index_internals] Quote resolution note for {target_idx}: {exc}")
-        spot = default_spot
-        quotes_map = {}
-        official_idx_chg = 0.0
 
-    # 3. Analyze each constituent
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S IST", time.localtime())
+
+    # Analyze reporting constituents
     contributions: list[ConstituentContribution] = []
     advances = 0
     declines = 0
     unchanged = 0
     above_vwap_count = 0
+    reporting = 0
 
-    # Remaining unassigned weight distributed equally across remaining constituents
     assigned_weight = sum(weights_map.get(s, 0.0) for s in constituents)
     unassigned_count = sum(1 for s in constituents if s not in weights_map)
     rem_per_stock = (
@@ -188,7 +197,10 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
 
     for s in constituents:
         q = quotes_map.get(f"NSE:{s}") or quotes_map.get(s)
-        ltp = float(getattr(q, "last_price", 0.0) or 0.0)
+        ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+        if ltp <= 0:
+            continue
+        reporting += 1
         vwap = float(getattr(q, "vwap", 0.0) or ltp)
         chg = float(getattr(q, "change_pct", 0.0) or 0.0)
 
@@ -205,8 +217,7 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
         else:
             unchanged += 1
 
-        # Point contribution: Weight * (ChangePct / 100) * IndexSpot
-        pt_contrib = round(weight * (chg / 100.0) * spot, 2)
+        pt_contrib = round(weight * (chg / 100.0) * spot, 2) if spot > 0 else 0.0
 
         contributions.append(
             ConstituentContribution(
@@ -220,7 +231,28 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
             )
         )
 
-    total_count = len(constituents)
+    if spot <= 0 or reporting == 0:
+        return IndexInternalsReport(
+            index=target_idx,
+            spot=0.0,
+            change_pct=0.0,
+            total_constituents=0,
+            advances=0,
+            declines=0,
+            unchanged=0,
+            ad_ratio=0.0,
+            pct_above_vwap=0.0,
+            net_point_contribution=0.0,
+            regime="UNAVAILABLE",
+            regime_summary=f"Live {target_idx} spot or constituent quotes unavailable.",
+            actionable_option_guidance="Feed unavailable; withhold directional index internals inference.",
+            top_positive_drivers=[],
+            top_negative_drivers=[],
+            as_of=now_iso,
+            status="UNAVAILABLE",
+        )
+
+    total_count = reporting
     ad_ratio = round(advances / max(1, declines), 2)
     pct_above_vwap = round((above_vwap_count / max(1, total_count)) * 100.0, 1)
     net_pts = round(sum(c.point_contribution for c in contributions), 2)
@@ -250,30 +282,8 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
         if c.point_contribution < 0
     ][:5]
 
-    # 4. Regime & Guidance Synthesis
-    if ad_ratio >= 2.2 and pct_above_vwap >= 65.0:
-        regime = "BROAD_BASED_BULLISH"
-        summary = (
-            f"Strong broad institutional buying across {target_idx}. "
-            f"A/D ratio is {ad_ratio:.1f} ({advances} advances vs {declines} declines), "
-            f"and {pct_above_vwap:.0f}% of constituents are holding above session VWAP."
-        )
-        guidance = (
-            "Apex high-conviction Call buying regime. Trend breakouts have institutional tailwinds. "
-            "Favor ATM/ITM Call options (Delta >= 0.50) or Momentum Breakout spreads."
-        )
-    elif ad_ratio <= 0.45 and pct_above_vwap <= 35.0:
-        regime = "BROAD_BASED_BEARISH"
-        summary = (
-            f"Broad institutional liquidation across {target_idx}. "
-            f"A/D ratio is {ad_ratio:.1f} ({advances} advances vs {declines} declines), "
-            f"and only {pct_above_vwap:.0f}% of constituents are above VWAP."
-        )
-        guidance = (
-            "High-conviction Put buying regime. Breakdown moves have broad institutional participation. "
-            "Favor ATM Put options or Bear Put Spreads."
-        )
-    elif idx_chg_pct >= 0.20 and (ad_ratio < 1.0 or pct_above_vwap < 45.0):
+    # 4. Regime & Guidance Synthesis (Head-Fake Divergence evaluated before Broad-Based regimes)
+    if idx_chg_pct >= 0.20 and (ad_ratio < 1.0 or pct_above_vwap < 45.0):
         regime = "HEAD_FAKE_DIVERGENCE"
         top_driver = top_pos[0]["symbol"] if top_pos else "Mega-caps"
         summary = (
@@ -295,6 +305,28 @@ def compute_index_internals(index: str = "NIFTY") -> IndexInternalsReport:
         guidance = (
             "VETO aggressive breakdown shorts. High probability of bear trap bounce. "
             "Look for pullback-to-value longs in strong outperforming constituents."
+        )
+    elif ad_ratio >= 2.2 and pct_above_vwap >= 65.0:
+        regime = "BROAD_BASED_BULLISH"
+        summary = (
+            f"Strong broad institutional buying across {target_idx}. "
+            f"A/D ratio is {ad_ratio:.1f} ({advances} advances vs {declines} declines), "
+            f"and {pct_above_vwap:.0f}% of constituents are holding above session VWAP."
+        )
+        guidance = (
+            "Apex high-conviction Call buying regime. Trend breakouts have institutional tailwinds. "
+            "Favor ATM/ITM Call options (Delta >= 0.50) or Momentum Breakout spreads."
+        )
+    elif ad_ratio <= 0.45 and pct_above_vwap <= 35.0:
+        regime = "BROAD_BASED_BEARISH"
+        summary = (
+            f"Broad institutional liquidation across {target_idx}. "
+            f"A/D ratio is {ad_ratio:.1f} ({advances} advances vs {declines} declines), "
+            f"and only {pct_above_vwap:.0f}% of constituents are above VWAP."
+        )
+        guidance = (
+            "High-conviction Put buying regime. Breakdown moves have broad institutional participation. "
+            "Favor ATM Put options or Bear Put Spreads."
         )
     else:
         regime = "CHOPPY_EQUILIBRIUM"

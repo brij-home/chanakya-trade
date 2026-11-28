@@ -103,18 +103,28 @@ def calibrate_alert_confidence(
         max_cap = min(max_cap, 84)
         notes.append("Uncalibrated setup (<3 full pillars) capped at 84")
 
-    # 2. Statutory + spread friction relative to Target-1 distance
-    entry = float(
+    # 2. Statutory + spread friction relative to planned Target-1 distance
+    ltp_entry = float(
         _alert_field(alert, "ltp", 0.0) or _alert_field(alert, "trigger_level", 0.0) or 0.0
     )
+    trig_entry = float(_alert_field(alert, "trigger_level", 0.0) or 0.0)
     t1 = float(_alert_field(alert, "target_level", 0.0) or 0.0)
     lot_sz = max(1, int(_alert_field(alert, "lot_size", 1) or 1))
     is_opt = bool(_alert_field(alert, "option_type", None) in ("CE", "PE"))
     exch_u = str(_alert_field(alert, "exchange", "NSE") or "NSE").upper()
 
+    # For fast option breakouts where live premium accelerated close to or past initial T1,
+    # measure setup friction against planned setup target distance (trigger -> T1) so winners
+    # aren't misclassified as narrow micro-targets.
+    entry = ltp_entry
+    reward_per_unit = abs(t1 - entry) if (entry > 0 and t1 > 0) else 0.0
+    if is_opt and trig_entry > 0 and t1 > trig_entry and abs(t1 - trig_entry) > reward_per_unit:
+        entry = trig_entry
+        reward_per_unit = abs(t1 - trig_entry)
+
     cost_friction_pct: Optional[float] = None
     high_friction_risk = False
-    if entry > 0 and t1 > 0 and abs(t1 - entry) > 0:
+    if entry > 0 and t1 > 0 and reward_per_unit > 0:
         try:
             from engine.charges import calculate_transaction_charges
 
@@ -141,7 +151,6 @@ def calibrate_alert_confidence(
                 or 0.0
             )
             spread_per_unit = entry * (bas_pct / 100.0) if bas_pct > 0 else 0.0
-            reward_per_unit = abs(t1 - entry)
             cost_friction_pct = round(
                 ((stat_per_unit + spread_per_unit) / reward_per_unit) * 100.0, 2
             )

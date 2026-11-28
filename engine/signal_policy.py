@@ -1048,6 +1048,139 @@ def evaluate_candidate_policy(
         except Exception as e_cas:
             logger.debug(f"[SignalPolicy] CAS spread dispersion guard check skipped: {e_cas}")
 
+    # B0c. Index Market Internals Head-Fake Divergence Gate (when live breadth is AVAILABLE)
+    if not is_comm_or_crypto:
+        try:
+            from engine.option_resolver import is_index_symbol
+
+            atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+            dir_u = str(getattr(alert, "direction", "") or ctx.direction or "").upper()
+            is_reversal_type = any(
+                k in atype_u
+                for k in (
+                    "REVERSAL",
+                    "TURTLE_SOUP",
+                    "INVERSION",
+                    "SMT_SWEEP",
+                    "PREDATOR",
+                    "NEUTRAL",
+                    "IRON_CONDOR",
+                )
+            )
+            if (
+                is_index_symbol(ctx.canonical_symbol)
+                and dir_u in ("BULLISH", "BEARISH", "BUY", "SELL", "LONG", "SHORT")
+                and not is_reversal_type
+            ):
+                from engine.market_internals import compute_index_internals
+
+                rep = compute_index_internals(ctx.canonical_symbol)
+                if getattr(rep, "status", "AVAILABLE") == "AVAILABLE":
+                    is_bull_dir = dir_u in ("BULLISH", "BUY", "LONG")
+                    head_fake_conflict = rep.regime == "HEAD_FAKE_DIVERGENCE" and (
+                        (is_bull_dir and rep.change_pct >= 0.20)
+                        or (not is_bull_dir and rep.change_pct <= -0.20)
+                    )
+                    if head_fake_conflict:
+                        blocking = GateVerdict(
+                            gate_name="INDEX_INTERNALS_HEAD_FAKE_GATE",
+                            category="CONTEXT",
+                            status="REJECT",
+                            reason=(
+                                f"Index internals HEAD_FAKE_DIVERGENCE veto: {rep.index} "
+                                f"({rep.change_pct:+.2f}%) lacks breadth (A/D={rep.ad_ratio}, "
+                                f"{rep.pct_above_vwap:.0f}% > VWAP)"
+                            ),
+                            evidence={
+                                "regime": rep.regime,
+                                "ad_ratio": rep.ad_ratio,
+                                "pct_above_vwap": rep.pct_above_vwap,
+                            },
+                            is_safety_gate=False,
+                            veto_code=PolicyVetoCode.QUALITY_GATE_VETO.value,
+                        )
+                        gate_verdicts.append(blocking)
+                        latency = (time.perf_counter() - t0) * 1000.0
+                        return _build_result(
+                            "REJECT",
+                            "SHADOW_ONLY",
+                            "REJECTED",
+                            "VETOED",
+                            gate_verdicts,
+                            blocking,
+                            ctx,
+                            now_str,
+                            latency,
+                            cache_key,
+                        )
+                    gate_verdicts.append(
+                        GateVerdict(
+                            gate_name="INDEX_INTERNALS_HEAD_FAKE_GATE",
+                            category="CONTEXT",
+                            status="ACCEPT",
+                            reason=f"Index internals clear ({rep.regime}, A/D={rep.ad_ratio})",
+                            evidence={"regime": rep.regime, "ad_ratio": rep.ad_ratio},
+                            is_safety_gate=False,
+                        )
+                    )
+        except Exception as e_int:
+            logger.debug(f"[SignalPolicy] Index internals gate skipped: {e_int}")
+
+    # B0d. Stock F&O MWPL Ban / Late-Day Ban-Lock Gate (fresh directional entries)
+    if not is_comm_or_crypto:
+        try:
+            from engine.option_resolver import is_index_symbol
+            from engine.stock_fno_catalysts import evaluate_mwpl_squeeze_state
+
+            atype_u = str(getattr(alert, "alert_type", "") or "").upper()
+            action_u = str(getattr(alert, "action", "") or "").upper()
+            is_exit_action = any(
+                k in f"{atype_u} {action_u}" for k in ("EXIT", "SQUAREOFF", "REDUCE", "UNWIND")
+            )
+            if not is_index_symbol(ctx.canonical_symbol) and not is_exit_action:
+                mwpl_st = evaluate_mwpl_squeeze_state(ctx.canonical_symbol)
+                if mwpl_st.status == "AVAILABLE" and not mwpl_st.allow_fresh_directional:
+                    blocking = GateVerdict(
+                        gate_name="STOCK_FNO_MWPL_BAN_GATE",
+                        category="SAFETY",
+                        status="REJECT",
+                        reason=mwpl_st.reason,
+                        evidence={
+                            "regime": mwpl_st.regime,
+                            "mwpl_pct": mwpl_st.mwpl_pct,
+                            "in_ban": mwpl_st.in_ban,
+                        },
+                        is_safety_gate=True,
+                        veto_code=PolicyVetoCode.QUALITY_GATE_VETO.value,
+                    )
+                    gate_verdicts.append(blocking)
+                    latency = (time.perf_counter() - t0) * 1000.0
+                    return _build_result(
+                        "REJECT",
+                        "SUPPRESS",
+                        "REJECTED",
+                        "VETOED",
+                        gate_verdicts,
+                        blocking,
+                        ctx,
+                        now_str,
+                        latency,
+                        cache_key,
+                    )
+                if mwpl_st.status == "AVAILABLE":
+                    gate_verdicts.append(
+                        GateVerdict(
+                            gate_name="STOCK_FNO_MWPL_BAN_GATE",
+                            category="SAFETY",
+                            status="ACCEPT",
+                            reason=mwpl_st.reason,
+                            evidence={"regime": mwpl_st.regime, "mwpl_pct": mwpl_st.mwpl_pct},
+                            is_safety_gate=False,
+                        )
+                    )
+        except Exception as e_mwpl:
+            logger.debug(f"[SignalPolicy] Stock F&O MWPL gate skipped: {e_mwpl}")
+
     # ─────────────────────────────────────────────────────────────────────────
 
     # Phase B2: Institutional Index Tide & Regime Alignment Gate

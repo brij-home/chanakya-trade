@@ -31,12 +31,14 @@ class FyersOrderStreamManager:
         self._callbacks_orders: list[Callable] = []
         self._callbacks_trades: list[Callable] = []
         self._callbacks_positions: list[Callable] = []
+        self._callbacks_reconnect_sync: list[Callable[[bool], None]] = []
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._reconnect_lock = threading.Lock()
         self._is_reconnecting = False
         self._reconnect_thread: Optional[threading.Thread] = None
         self._last_packet_at: float = 0.0
+        self._has_connected_once: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -114,6 +116,11 @@ class FyersOrderStreamManager:
         """Register a callback for position changes."""
         self._callbacks_positions.append(callback)
 
+    def on_reconnect_sync(self, callback: Callable[[bool], None]) -> None:
+        """Register a callback invoked after OrderSocket connect/reconnect to resync missed REST updates."""
+        if callback not in self._callbacks_reconnect_sync:
+            self._callbacks_reconnect_sync.append(callback)
+
     # ── Private ──────────────────────────────────────────────
 
     def _schedule_proactive_reconnect(self, delay_sec: Optional[float] = None) -> None:
@@ -138,7 +145,9 @@ class FyersOrderStreamManager:
                     try:
                         from market.calendar import is_market_open
 
-                        if not is_market_open("NSE"):
+                        if not (
+                            is_market_open("NSE") or is_market_open("BSE") or is_market_open("MCX")
+                        ):
                             logger.info(
                                 "[OrderStream] Off-market session detected. Pausing order stream reconnect."
                             )
@@ -172,7 +181,7 @@ class FyersOrderStreamManager:
             try:
                 from market.calendar import is_market_open
 
-                if not is_market_open("NSE"):
+                if not (is_market_open("NSE") or is_market_open("BSE") or is_market_open("MCX")):
                     return True
             except Exception as e_suppressed:
                 logger.debug(f"[OrderStream] Health check market status non-fatal: {e_suppressed}")
@@ -217,12 +226,40 @@ class FyersOrderStreamManager:
             if self._running:
                 self._schedule_proactive_reconnect(delay_sec=5.0)
 
+    def _trigger_connect_resync(self, is_reconnect: bool) -> None:
+        """Asynchronously reconcile REST orderbook/inflight orders after OrderSocket connect or reconnect."""
+
+        def _sync_worker() -> None:
+            try:
+                if is_reconnect:
+                    from engine.order_lifecycle import recover_stale_inflight_orders
+
+                    report = recover_stale_inflight_orders()
+                    logger.info(
+                        "[OrderStream] Reconnect REST resync complete (resolved=%s, submitting=%s, frozen=%s)",
+                        report.get("resolved_via_sync", 0),
+                        len(report.get("remaining_submitting", [])),
+                        len(report.get("remaining_unknown_freeze", [])),
+                    )
+            except Exception as exc:
+                logger.debug(f"[OrderStream] Reconnect REST resync skipped: {exc}")
+
+            for cb in list(self._callbacks_reconnect_sync):
+                try:
+                    cb(is_reconnect)
+                except Exception as cb_exc:
+                    logger.debug(f"[OrderStream] Reconnect sync callback error: {cb_exc}")
+
+        threading.Thread(target=_sync_worker, daemon=True, name="FyersOrderResync").start()
+
     def _handle_connect(self) -> None:
         import time
 
+        is_reconnect = self._has_connected_once
+        self._has_connected_once = True
         self._connected = True
         self._last_packet_at = time.time()
-        logger.info("Fyers Order WebSocket: connected")
+        logger.info("Fyers Order WebSocket: connected (reconnect=%s)", is_reconnect)
         try:
             if self._ws:
                 self._ws.subscribe(data_type="OnOrders,OnTrades,OnPositions,OnGeneral")
@@ -231,6 +268,7 @@ class FyersOrderStreamManager:
                 )
         except Exception as e:
             logger.warning("Fyers Order WebSocket subscription failed: %s", e)
+        self._trigger_connect_resync(is_reconnect=is_reconnect)
 
     def _handle_close(self, *args, **kwargs) -> None:
         self._connected = False

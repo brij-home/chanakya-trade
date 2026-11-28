@@ -358,6 +358,7 @@ CORPORATE_ALIASES: dict[str, str] = {
     "ICICIPRULI": "ICICILIFE",  # ICICI Prudential Life Insurance -> ICICILIFE on Fyers / derivatives
     "HEG": "HEGAM",  # HEG Ltd demerger into HEGAM
     "SILLYMONKS": "CRESTO",  # Silly Monks Entertainment renamed to Cresto
+    "GUJGASLTD": "GUJENERGY",  # Gujarat Gas Ltd renamed to Gujarat Energy Ltd (NSE:GUJENERGY-EQ)
 }
 
 # Known Active NSE Trade-for-Trade (BE Series) Stocks in Top Benchmarks (Advisory fallback; prefer market.symbol_master)

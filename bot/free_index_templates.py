@@ -164,7 +164,8 @@ def render_free_index_milestone(
     if d.pnl_pts is not None and d.pnl_pct is not None:
         sign = "+" if d.pnl_pts >= 0 else ""
         r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
-        move_str = f" · 🚀 <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
+        mv_icon = "🚀" if d.pnl_pts >= 0 else "📉"
+        move_str = f" · {mv_icon} <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
 
     # Determine if this trade's payoff direction is downward (short/sell)
     # Option contracts: Buyers (both Call CE and Put PE) profit on premium expansion (UPWARD); Writers profit on decay (DOWNWARD).
@@ -333,7 +334,7 @@ def render_free_index_milestone(
         return (
             f"🛑 <b>{update_prefix}SL HIT / VIEW INVALIDATED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚨 <b>{color_icon} {contract_title}</b> exited @ <code>₹{d.ltp:,.2f}</code>\n"
+            f"🚨 <b>{color_icon} {contract_title}</b> exited @ <code>₹{d.ltp:,.2f}</code>{move_str}\n"
             f"• <b>Reason:</b> <i>{reason}</i>\n"
             f"• <b>Action:</b> Close position / cancel pending orders. Capital preserved.\n\n"
             f"{SEBI_COMPACT_DISCLAIMER}"
@@ -369,20 +370,29 @@ def render_free_index_milestone(
             or getattr(d, "stage", "") == "EXPIRED"
             or getattr(d, "target_status", "") == "TIME_EXPIRED"
         )
+        is_early_cut = bool(d.pnl_pct is not None and d.pnl_pct <= -2.0 and not is_untriggered)
         header_text = (
             f"⏳ <b>{update_prefix}SETUP EXPIRED</b>"
             if is_untriggered
-            else f"⏳ <b>{update_prefix}TIME-STOP SCRATCH</b>"
+            else (
+                f"⏳ <b>{update_prefix}TIME-STOP EXIT (EARLY CUT)</b>"
+                if is_early_cut
+                else f"⏳ <b>{update_prefix}TIME-STOP SCRATCH</b>"
+            )
         )
         reason_text = (
             "Setup did not trigger within momentum window. Cancel pending orders."
             if is_untriggered
-            else "Momentum stagnated, theta bleed risk. Scratch at CMP."
+            else (
+                "Momentum faded without expansion; cut at CMP to halt decay."
+                if is_early_cut
+                else "Momentum stagnated, theta bleed risk. Scratch at CMP."
+            )
         )
         return (
             f"{header_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚨 <b>{color_icon} {contract_title}</b> @ <code>₹{d.ltp:,.2f}</code>\n"
+            f"🚨 <b>{color_icon} {contract_title}</b> @ <code>₹{d.ltp:,.2f}</code>{move_str}\n"
             f"• <b>Reason:</b> {reason_text}\n\n"
             f"{SEBI_COMPACT_DISCLAIMER}"
             f"{footer_line}"

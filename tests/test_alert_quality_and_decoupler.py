@@ -398,7 +398,12 @@ def test_intraday_spark_phase_transition_recognition(monkeypatch):
             return df_5m
         return df_daily
 
+    from engine.detectors.intraday_spark import _AVG_VOL_SESSION_CACHE
+
+    _AVG_VOL_SESSION_CACHE.pop("TCS", None)
     monkeypatch.setattr("market.history.get_ohlcv", mock_get_ohlcv)
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym: None)
+    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda sym: None)
     monkeypatch.setattr(
         "market.quotes.get_quote",
         lambda syms: {

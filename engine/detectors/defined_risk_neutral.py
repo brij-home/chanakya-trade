@@ -76,7 +76,7 @@ def detect_defined_risk_neutral(
             f"Day change |{ctx.day_change_pct:.2f}%| > {max_neutral_chg:.2f}% indicates directional expansion."
         )
         return None
-    is_narrow_day = day_chg <= 0.85
+    is_narrow_day = day_chg <= (0.85 if getattr(ctx, "is_index", False) else 1.15)
 
     # 3. Open interest flanking walls check
     oi_walls_present = False
@@ -270,6 +270,43 @@ def detect_defined_risk_neutral(
 
     if not spread.legs or spread.max_profit <= 0 or spread.max_loss <= 0:
         return None
+
+    # 4-Leg Net-of-Cost Viability Gate (statutory charges + bid-ask slippage vs credit collected)
+    try:
+        from engine.charges import calculate_roundtrip_charges
+
+        gross_credit = abs(float(spread.net_debit_or_credit))
+        total_leg_fees = 0.0
+        total_leg_slippage = 0.0
+        for leg in spread.legs:
+            leg_prem = max(0.05, float(getattr(leg, "premium", 0.0) or 0.0))
+            leg_qty = max(1, int(getattr(leg, "quantity", lot_size) or lot_size or 1))
+            leg_side = "BUY" if str(getattr(leg, "side", "BUY")).upper() == "BUY" else "SELL"
+            _, _, rt_fee = calculate_roundtrip_charges(
+                entry_price=leg_prem,
+                exit_price=max(0.05, leg_prem * 0.5),
+                quantity=leg_qty,
+                segment="OPTIONS",
+                entry_side=leg_side,
+            )
+            total_leg_fees += float(rt_fee)
+            # Minimum 1 exchange tick (₹0.05) or 0.35% spread slippage per leg on options book
+            total_leg_slippage += max(0.05, leg_prem * 0.0035) * leg_qty
+
+        total_friction = total_leg_fees + total_leg_slippage
+        net_credit_after_cost = gross_credit - total_friction
+        if net_credit_after_cost <= 0 or (
+            gross_credit > 0 and (total_friction / gross_credit) > 0.35
+        ):
+            logger.info(
+                "[DefinedRiskNeutral] Rejected %s Iron Condor: 4-leg cost drag ₹%.0f exceeds 35%% of credit ₹%.0f.",
+                symbol,
+                total_friction,
+                gross_credit,
+            )
+            return None
+    except Exception as _e_cost_ic:
+        logger.debug("4-leg cost check skipped for %s: %s", symbol, _e_cost_ic)
 
     # Extract strikes for actionable blueprint
     put_legs = [l for l in spread.legs if l.option_type == "PE"]

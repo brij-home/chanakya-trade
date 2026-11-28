@@ -79,9 +79,9 @@ BANKEX_LOT_SIZE: int = 30
 
 #: Default operational focus mode during live trading sessions.
 #: 'FNO_ONLY': Strict domestic F&O discovery; preserve existing-exposure monitoring.
-#: 'FNO_PRIORITY': Legacy session-level prioritization (not a strict scope).
+#: 'FNO_PRIORITY': Prioritize NSE/BSE F&O while keeping cash/multi-asset discovery active.
 #: 'BALANCED': Standard multi-asset operation across all segments.
-SESSION_FOCUS_MODE: str = "FNO_ONLY"
+SESSION_FOCUS_MODE: str = "FNO_PRIORITY"
 
 # ── Alert & Analysis TTLs ─────────────────────────────────────────────────────
 

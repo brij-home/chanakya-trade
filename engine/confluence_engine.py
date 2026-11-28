@@ -130,24 +130,33 @@ def evaluate_confluence(
     # ── Factor 2: Time-of-Day Relative Volume Acceleration (20 Pts) ──
     f2_score = 0.0
     f2_status = "ABSENT"
-    rvol_val = float(rvol) if rvol is not None else 1.0
-    if rvol_val >= 2.2:
-        f2_score = 20.0
-        f2_status = "CONFIRMED"
-        f2_desc = f"Aggressive institutional volume acceleration ({rvol_val:.1f}x TOD-RVOL)."
-    elif rvol_val >= 1.6:
-        f2_score = 15.0
-        f2_status = "CONFIRMED"
-        f2_desc = f"Strong volume expansion ({rvol_val:.1f}x TOD-RVOL)."
-    elif rvol_val >= 1.2:
-        f2_score = 10.0
-        f2_status = "PARTIAL"
-        f2_desc = f"Moderate volume expansion ({rvol_val:.1f}x TOD-RVOL)."
-    else:
-        f2_score = 4.0
+    rvol_missing = rvol is None
+    if rvol_missing:
         f2_status = "ABSENT"
-        f2_desc = f"Routine baseline volume ({rvol_val:.1f}x TOD-RVOL)."
-    factors.append(ConfluenceFactor("Volume Acceleration", f2_score, 20.0, f2_status, f2_desc))
+        f2_desc = "TOD-RVOL unrecorded in feed; renormalized across active factors."
+    else:
+        rvol_val = float(rvol)
+        if rvol_val >= 2.2:
+            f2_score = 20.0
+            f2_status = "CONFIRMED"
+            f2_desc = f"Aggressive institutional volume acceleration ({rvol_val:.1f}x TOD-RVOL)."
+        elif rvol_val >= 1.6:
+            f2_score = 15.0
+            f2_status = "CONFIRMED"
+            f2_desc = f"Strong volume expansion ({rvol_val:.1f}x TOD-RVOL)."
+        elif rvol_val >= 1.2:
+            f2_score = 10.0
+            f2_status = "PARTIAL"
+            f2_desc = f"Moderate volume expansion ({rvol_val:.1f}x TOD-RVOL)."
+        else:
+            f2_score = 4.0
+            f2_status = "ABSENT"
+            f2_desc = f"Routine baseline volume ({rvol_val:.1f}x TOD-RVOL)."
+    factors.append(
+        ConfluenceFactor(
+            "Volume Acceleration", f2_score, 0.0 if rvol_missing else 20.0, f2_status, f2_desc
+        )
+    )
     total_score += f2_score
 
     # ── Factor 3: Intraday Trend & VWAP Fair Value Anchor (20 Pts) ──
@@ -325,7 +334,15 @@ def evaluate_confluence(
     factors.append(ConfluenceFactor("Market Structure", f6_score, 10.0, f6_status, f6_desc))
     total_score += f6_score
 
-    final_score = round(min(100.0, total_score), 1)
+    # Intraday Renormalization: when pre_open_gap_pct or rvol is unrecorded (None) in normal intraday
+    # feeds, redistribute unrecorded weights across active intraday factors instead of capping score.
+    active_max_weight = (
+        100.0 - (15.0 if pre_open_gap_pct is None else 0.0) - (20.0 if rvol_missing else 0.0)
+    )
+    if active_max_weight > 0 and active_max_weight < 100.0 and total_score > 0:
+        final_score = round(min(100.0, (total_score / active_max_weight) * 100.0), 1)
+    else:
+        final_score = round(min(100.0, total_score), 1)
     is_qualified = final_score >= 70.0
 
     # Calculate Pullback Level Plan

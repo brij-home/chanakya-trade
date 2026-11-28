@@ -396,7 +396,15 @@ class BisectDepthBook:
         """Alias for simulate_sweep for compatibility with pretrade validation."""
         return self.simulate_sweep(side=side, quantity=quantity)
 
-    def record_tick(self, price: float, volume: int = 1, timestamp: Optional[float] = None) -> None:
+    def record_tick(
+        self,
+        price: float,
+        volume: int = 1,
+        timestamp: Optional[float] = None,
+        *,
+        best_bid: Optional[float] = None,
+        best_ask: Optional[float] = None,
+    ) -> None:
         """Record a price/volume tick into the internal circular ring buffer and CVD engine in O(1)."""
         if price > 0:
             self._tick_buffer.append(price, volume, timestamp)
@@ -405,12 +413,14 @@ class BisectDepthBook:
                 try:
                     from engine.cvd_engine import record_market_trade
 
+                    eff_bid = float(best_bid) if (best_bid and best_bid > 0) else self.best_bid
+                    eff_ask = float(best_ask) if (best_ask and best_ask > 0) else self.best_ask
                     record_market_trade(
                         symbol=sym,
                         price=price,
                         volume=volume,
-                        best_bid=self.best_bid,
-                        best_ask=self.best_ask,
+                        best_bid=eff_bid,
+                        best_ask=eff_ask,
                         timestamp=timestamp,
                     )
                 except Exception as _e_cvd:

@@ -88,6 +88,31 @@ TICK_SCHEMA = pa.schema(
     ]
 )
 
+OPTION_CHAIN_SCHEMA = pa.schema(
+    [
+        ("timestamp", pa.int64()),  # Snapshot receipt Unix epoch in milliseconds
+        ("underlying", pa.string()),
+        ("symbol", pa.string()),
+        ("expiry", pa.string()),
+        ("strike", pa.float64()),
+        ("option_type", pa.string()),
+        ("ltp", pa.float64()),
+        ("bid", pa.float64()),
+        ("ask", pa.float64()),
+        ("oi", pa.int64()),
+        ("oi_change", pa.int64()),
+        ("volume", pa.int64()),
+        ("iv", pa.float64()),
+        ("delta", pa.float64()),
+        ("gamma", pa.float64()),
+        ("theta", pa.float64()),
+        ("vega", pa.float64()),
+        ("spot", pa.float64()),
+        ("vix", pa.float64()),
+        ("provider", pa.string()),
+    ]
+)
+
 
 @dataclass(slots=True)
 class TickRecord:
@@ -500,9 +525,7 @@ class TickWarehouse:
         ) as got:
             if not got:
                 self._bump("compaction_skipped_locked")
-                logger.warning(
-                    f"[engine.tick_warehouse] Compaction skipped for {symbol}: lock busy"
-                )
+                logger.debug(f"[engine.tick_warehouse] Compaction skipped for {symbol}: lock busy")
                 return 0
 
             merged_gen, merged_path = self._latest_merged(parts_dir)
@@ -627,7 +650,18 @@ class TickWarehouse:
             empty_table = pa.Table.from_batches([], schema=TICK_SCHEMA)
             return empty_table.to_pandas() if as_dataframe else empty_table
 
-        combined = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+        # Align schemas (drop stray Hive partition columns such as 'date' if present in external merged files)
+        schema_names = set(TICK_SCHEMA.names)
+        aligned_tables: list[pa.Table] = []
+        for tbl in tables:
+            extra_cols = [c for c in tbl.column_names if c not in schema_names]
+            if extra_cols:
+                tbl = tbl.drop(extra_cols)
+            aligned_tables.append(tbl.cast(TICK_SCHEMA))
+
+        combined = (
+            pa.concat_tables(aligned_tables) if len(aligned_tables) > 1 else aligned_tables[0]
+        )
 
         # Source-level duplicate suppression. Historic single-file appends and
         # repeated polling already stored identical ticks; without this, VWAP,
@@ -664,6 +698,168 @@ class TickWarehouse:
             return df
         return combined
 
+    def build_seconds_bars(
+        self,
+        symbol: str,
+        interval_sec: int = 5,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+        date_str: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Resample recorded L1/trade ticks (ltp > 0) into timezone-naive IST seconds OHLCV bars."""
+        df = self.query_ticks(
+            symbol,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            date_str=date_str,
+            as_dataframe=True,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        valid = df[df["ltp"] > 0].copy()
+        if valid.empty:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        dt_idx = (
+            pd.to_datetime(valid["timestamp"], unit="ms", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+            .dt.tz_localize(None)
+        )
+        valid = valid.assign(_dt=dt_idx).set_index("_dt").sort_index()
+        sec = max(1, int(interval_sec))
+        freq = f"{sec}s"
+        ohlc = valid["ltp"].resample(freq).ohlc()
+        vol = valid["volume"].fillna(0.0).resample(freq).sum()
+        bars = ohlc.join(vol).dropna(subset=["open", "high", "low", "close"])
+        bars.index.name = "date"
+        return bars[["open", "high", "low", "close", "volume"]].astype(float)
+
+    def _option_chain_parts_dir(self, underlying: str, date_str: str) -> Path:
+        return self._get_partition_path(date_str) / "option_chains" / _clean_symbol(underlying)
+
+    @staticmethod
+    def _opt_field(contract: Any, name: str, default: Any = None) -> Any:
+        if isinstance(contract, dict):
+            return contract.get(name, default)
+        return getattr(contract, name, default)
+
+    @staticmethod
+    def _opt_float_or_none(val: Any) -> Optional[float]:
+        if val is None or val == "":
+            return None
+        try:
+            f = float(val)
+            return f if pd.notna(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    def record_option_chain_snapshot(
+        self,
+        underlying: str,
+        contracts: Sequence[Any],
+        *,
+        spot: Optional[float] = None,
+        vix: Optional[float] = None,
+        provider: str = "fyers",
+        timestamp_ms: Optional[int] = None,
+    ) -> int:
+        """Persist an immutable point-in-time option chain snapshot preserving null Greeks/IV."""
+        if not underlying or not contracts:
+            return 0
+        ts = int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)
+        clean_und = _clean_symbol(underlying)
+        spot_val = self._opt_float_or_none(spot)
+        vix_val = self._opt_float_or_none(vix)
+
+        rows: list[dict[str, Any]] = []
+        for c in contracts:
+            sym = str(self._opt_field(c, "symbol", "") or "").strip()
+            strike = self._opt_float_or_none(self._opt_field(c, "strike"))
+            opt_type = str(self._opt_field(c, "option_type", "") or "").upper().strip()
+            if not sym or strike is None or opt_type not in ("CE", "PE"):
+                continue
+            rows.append(
+                {
+                    "timestamp": ts,
+                    "underlying": clean_und,
+                    "symbol": sym.upper(),
+                    "expiry": str(self._opt_field(c, "expiry", "") or ""),
+                    "strike": float(strike),
+                    "option_type": opt_type,
+                    "ltp": float(self._opt_field(c, "last_price", 0.0) or 0.0),
+                    "bid": self._opt_float_or_none(self._opt_field(c, "bid")),
+                    "ask": self._opt_float_or_none(self._opt_field(c, "ask")),
+                    "oi": int(self._opt_field(c, "oi", 0) or 0),
+                    "oi_change": int(self._opt_field(c, "oi_change", 0) or 0),
+                    "volume": int(self._opt_field(c, "volume", 0) or 0),
+                    "iv": self._opt_float_or_none(self._opt_field(c, "iv")),
+                    "delta": self._opt_float_or_none(self._opt_field(c, "delta")),
+                    "gamma": self._opt_float_or_none(self._opt_field(c, "gamma")),
+                    "theta": self._opt_float_or_none(self._opt_field(c, "theta")),
+                    "vega": self._opt_float_or_none(self._opt_field(c, "vega")),
+                    "spot": spot_val,
+                    "vix": vix_val,
+                    "provider": str(provider or "unknown"),
+                }
+            )
+
+        if not rows:
+            return 0
+
+        date_str = datetime.fromtimestamp(ts / 1000.0, tz=IST).strftime("%Y%m%d")
+        parts_dir = self._option_chain_parts_dir(clean_und, date_str)
+        seq = self._next_seq()
+        target = parts_dir / f"part-{seq:020d}-p{os.getpid()}.parquet"
+        table = pa.Table.from_pylist(rows, schema=OPTION_CHAIN_SCHEMA)
+        self._write_table_atomic(table, target)
+        self._bump("segments_written")
+        return len(rows)
+
+    def query_option_chain_snapshots(
+        self,
+        underlying: str,
+        date_str: Optional[str] = None,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Query archived point-in-time option chain snapshots for an underlying."""
+        d_str = (
+            str(date_str).replace("-", "").strip()
+            if date_str
+            else self._get_current_date_partition()
+        )
+        parts_dir = self._option_chain_parts_dir(underlying, d_str)
+        if not parts_dir.exists():
+            return pa.Table.from_batches([], schema=OPTION_CHAIN_SCHEMA).to_pandas()
+
+        pq_filters: Any = None
+        if start_time_ms is not None or end_time_ms is not None:
+            pq_filters = []
+            if start_time_ms is not None:
+                pq_filters.append(("timestamp", ">=", start_time_ms))
+            if end_time_ms is not None:
+                pq_filters.append(("timestamp", "<=", end_time_ms))
+
+        tables: list[pa.Table] = []
+        for part in sorted(parts_dir.glob("part-*.parquet"), key=self._parse_seq):
+            tbl = self._read_parquet_with_retry(part, filters=pq_filters)
+            if tbl is not None and tbl.num_rows > 0:
+                tables.append(tbl)
+
+        if not tables:
+            return pa.Table.from_batches([], schema=OPTION_CHAIN_SCHEMA).to_pandas()
+
+        combined = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+        df = combined.to_pandas()
+        if start_time_ms is not None:
+            df = df[df["timestamp"] >= start_time_ms]
+        if end_time_ms is not None:
+            df = df[df["timestamp"] <= end_time_ms]
+        if not df.empty:
+            df = df.sort_values(["timestamp", "strike", "option_type"]).reset_index(drop=True)
+        return df
+
     # ── Retention & stats ────────────────────────────────────────────────────
     def purge_expired_partitions(self, retention_days: Optional[int] = None) -> int:
         """Deletes date partitions older than the retention window."""
@@ -690,27 +886,50 @@ class TickWarehouse:
                         )
         return purged_count
 
-    def get_storage_stats(self) -> dict[str, Any]:
-        """Returns warehouse disk usage, partition and segment counts."""
+    def get_storage_stats(self, *, max_cache_sec: float = 0.0) -> dict[str, Any]:
+        """Returns warehouse disk usage, partition and segment counts (fast os.scandir walk)."""
+        now_mono = time.monotonic()
+        if max_cache_sec > 0:
+            cached = getattr(self, "_storage_stats_cache", None)
+            if cached and (now_mono - cached[0]) <= max_cache_sec:
+                return dict(cached[1])
+
         total_bytes = 0
         file_count = 0
         partitions: list[str] = []
         segments = 0
 
         if self.base_dir.exists():
-            for p in self.base_dir.iterdir():
-                if p.is_dir() and p.name.startswith("date="):
-                    partitions.append(p.name)
-                    for f in p.rglob("*.parquet"):
-                        total_bytes += f.stat().st_size
-                        file_count += 1
-                        if f.name.startswith(("part-", "merged-")):
-                            segments += 1
+            stack: list[str] = []
+            try:
+                with os.scandir(self.base_dir) as top_it:
+                    for entry in top_it:
+                        if entry.is_dir(follow_symlinks=False) and entry.name.startswith("date="):
+                            partitions.append(entry.name)
+                            stack.append(entry.path)
+                while stack:
+                    cur_dir = stack.pop()
+                    with os.scandir(cur_dir) as it:
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(entry.path)
+                            elif entry.name.endswith(".parquet"):
+                                file_count += 1
+                                try:
+                                    total_bytes += entry.stat(follow_symlinks=False).st_size
+                                except OSError as e_stat:
+                                    logger.debug(
+                                        f"[engine.tick_warehouse] Stat skipped for {entry.name}: {e_stat}"
+                                    )
+                                if entry.name.startswith(("part-", "merged-")):
+                                    segments += 1
+            except OSError as e_walk:
+                logger.debug(f"[engine.tick_warehouse] Stats walk error: {e_walk}")
 
         with self._buffer_lock:
             buffered_rows = self._buffered_rows
 
-        return {
+        result = {
             "warehouse_path": str(self.base_dir),
             "total_bytes": total_bytes,
             "total_mb": round(total_bytes / (1024 * 1024), 2),
@@ -722,6 +941,8 @@ class TickWarehouse:
             "storage_model": "append_only_segments",
             "counters": dict(self._counters),
         }
+        self._storage_stats_cache = (now_mono, result)
+        return dict(result)
 
 
 # Global singleton instance

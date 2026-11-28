@@ -1023,3 +1023,388 @@ def test_compute_options_iv_skew_honest_state():
     assert res_dead["status"] == "UNAVAILABLE"
     assert res_dead["regime"] == "UNAVAILABLE"
     assert res_dead["atm_skew"] is None
+
+
+def test_crudeoil_commodity_hedge_plan_dte_iv_and_spread_only():
+    """Verify MCX CRUDEOIL uses commodity IV/DTE, suppresses 1x2 ratio in SPREAD_ONLY, and avoids stock guard."""
+    now_dt = datetime(2026, 11, 27, 12, 38)
+
+    c1 = DummyContract(8000.0, "CE", 401.5, volume=12063, oi=5000)
+    c1.symbol = "MCX:CRUDEOIL26DEC8000CE"
+    c1.expiry = "2026-12-16"
+    c1.iv = 0.0
+
+    c2 = DummyContract(8400.0, "CE", 243.8, volume=3500, oi=4000)
+    c2.symbol = "MCX:CRUDEOIL26DEC8400CE"
+    c2.expiry = "2026-12-16"
+    c2.iv = 0.0
+
+    plan = build_defined_risk_hedge_plan(
+        symbol="MCX:CRUDEOIL",
+        direction="BULLISH",
+        spot=8045.0,
+        strike=8000.0,
+        opt_type="CE",
+        opt_ltp=401.5,
+        chain=[c1, c2],
+        lot_size=100,
+        vix=18.5,
+        now_dt=now_dt,
+        vel_score=90.0,
+        expiry_date="2026-12-16",
+    )
+    assert plan is not None
+    # With 19 DTE and commodity IV (~34%), OTM 8400 CE delta should be realistic (> 0.25), not 0.03
+    assert plan["short_delta"] > 0.25
+    assert plan["ratio_spread_1x2"] is None
+    assert "Commodity Option Liquidity Guard" in plan["execution_guidance"]
+    assert "Stock Option Liquidity Guard" not in plan["execution_guidance"]
+    assert "Commodity Option Liquidity Guard" in (plan["combo_execution_note"] or "")
+
+
+def test_crudeoil_spread_only_template_render_eliminates_contradictions():
+    """Verify SPREAD_ONLY commodity alerts render coherent spread labels, MCX 23:15 ETA, and no naked leaks."""
+    hedge_dict = {
+        "strategy": "BULL_PUT_CREDIT_SPREAD",
+        "strategy_type": "CREDIT_SPREAD",
+        "preferred_vehicle": "SPREAD_ONLY",
+        "buy_leg": "BUY CRUDEOIL 8000 CE @ ₹401.5",
+        "sell_leg": "SELL CRUDEOIL 8400 CE @ ₹243.8",
+        "net_debit_per_share": 157.7,
+        "max_loss": 15770.0,
+        "max_profit": 24230.0,
+        "booking_target_70": 327.3,
+        "spread_stop_loss": 78.8,
+        "strike_width": 400.0,
+        "long_delta": 0.62,
+        "short_delta": 0.36,
+        "net_delta": 0.26,
+        "adaptive_regime": "HIGH-VELOCITY MOMENTUM / THRUST (400 pt width)",
+        "combo_execution_note": "Commodity Option Liquidity Guard: Enter as atomic Limit Multi-Leg combo at Net Price (Limit ₹157.70).",
+        "ratio_spread_1x2": {
+            "description": "Buy 1x 8000 CE & Sell 2x 8550 CE (Net Debit ₹1.9)",
+            "risk_reward": "1:288.5",
+            "sweet_spot_gain": 54810.0,
+            "upper_breakeven": 9098.0,
+        },
+    }
+
+    alert = make_dummy_alert(
+        alert_id="aa-options_momentum-crudeoil-20261127",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        direction="BULLISH",
+        confidence=96,
+        ltp=401.5,
+        trigger_level=401.5,
+        target_level=497.9,
+        stop_loss=353.3,
+        headline="🟢 CRUDEOIL 8000 CE CALL BREAKOUT @ ₹401.5 (Lot: 100) · [COMMODITIES] 🛡️ [HEDGED SPREAD MANDATORY] (Vol/OI 2.47x)",
+        summary="Institutional Call surge in CRUDEOIL 8000 CE. Underlying spot ₹8,045.0 (Spot Anchor: ₹7,993.8).",
+        created_at="2026-11-27 12:38:52 IST",
+        time_horizon="INTRADAY",
+        preferred_vehicle="SPREAD_ONLY",
+        contract_symbol="MCX:CRUDEOIL26DEC8000CE",
+        option_type="CE",
+        strike=8000.0,
+        expiry_date="2026-12-16",
+        lot_size=100,
+        underlying_spot=8045.0,
+        option_premium=401.5,
+        option_stop_loss=353.3,
+        structural_spot_sl=7993.8,
+        no_chase_boundary=419.6,
+        metrics={"vol_oi_ratio": 2.47, "rs": 1.64},
+        actionable_plan={
+            "action": "BUY",
+            "entry_range": "₹401.50",
+            "trigger_level": 401.5,
+            "stop_loss": 353.3,
+            "target_1": 497.9,
+            "target_2": 546.0,
+            "target_3": 594.2,
+            "risk_reward": "1:2.0",
+            "expected_value_r": 0.65,
+            "lot_size": 100,
+            "no_chase_limit": 419.6,
+            "preferred_vehicle": "SPREAD_ONLY",
+            "execution_style_mandate": "HEDGED_SPREAD_MANDATORY",
+            "hedge_plan": hedge_dict,
+            "free_roll_plan": {
+                "status": "ELIGIBLE",
+                "msg": "Multi-lot: Bank 50% at T1, ratchet SL to Cost (₹402.3)",
+            },
+        },
+    )
+
+    assert alert.eta_label == "Today 23:15 IST"
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "Bull Call Spread" in rendered
+    assert "Bull Put Credit Spread" not in rendered
+    assert "EXECUTE HEDGED SPREAD" in rendered
+    assert "DO NOT BUY NAKED" in rendered
+    assert "[Naked Leg]" not in rendered
+    assert "1x2 Ratio" not in rendered
+    assert "Free-Roll Protocol" not in rendered
+    assert "Today 23:15 IST" in rendered
+    assert "15:15 IST" not in rendered
+    assert "Commodity Option Liquidity Guard" in rendered
+
+    # Symmetric bearish put debit spread normalization check
+    bear_alert = make_dummy_alert(
+        alert_id="aa-options_momentum-crudeoil-bear-20261127",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        direction="BEARISH",
+        confidence=94,
+        ltp=380.0,
+        trigger_level=380.0,
+        target_level=480.0,
+        stop_loss=330.0,
+        headline="🔴 CRUDEOIL 8000 PE PUT BREAKDOWN @ ₹380.0 (Lot: 100)",
+        summary="Institutional Put surge in CRUDEOIL 8000 PE.",
+        created_at="2026-11-27 12:40:00 IST",
+        time_horizon="INTRADAY",
+        preferred_vehicle="SPREAD_ONLY",
+        contract_symbol="MCX:CRUDEOIL26DEC8000PE",
+        option_type="PE",
+        strike=8000.0,
+        expiry_date="2026-12-16",
+        lot_size=100,
+        underlying_spot=7950.0,
+        option_premium=380.0,
+        option_stop_loss=330.0,
+        structural_spot_sl=8010.0,
+        actionable_plan={
+            "action": "BUY",
+            "entry_range": "₹380.00",
+            "trigger_level": 380.0,
+            "stop_loss": 330.0,
+            "target_1": 480.0,
+            "target_2": 530.0,
+            "target_3": 580.0,
+            "risk_reward": "1:2.0",
+            "lot_size": 100,
+            "preferred_vehicle": "SPREAD_ONLY",
+            "execution_style_mandate": "HEDGED_SPREAD_MANDATORY",
+            "hedge_plan": {
+                "strategy": "BEAR_CALL_CREDIT_SPREAD",
+                "strategy_type": "CREDIT_SPREAD",
+                "preferred_vehicle": "SPREAD_ONLY",
+                "buy_leg": "BUY CRUDEOIL 8000 PE @ ₹380.0",
+                "sell_leg": "SELL CRUDEOIL 7600 PE @ ₹210.0",
+                "net_debit_per_share": 170.0,
+                "max_loss": 17000.0,
+                "max_profit": 23000.0,
+                "booking_target_70": 300.0,
+                "spread_stop_loss": 85.0,
+                "strike_width": 400.0,
+                "long_delta": -0.60,
+                "short_delta": -0.34,
+                "net_delta": -0.26,
+                "adaptive_regime": "HIGH-VELOCITY BREAKDOWN",
+                "combo_execution_note": "Commodity Option Liquidity Guard: Enter as atomic Limit Multi-Leg combo.",
+            },
+        },
+    )
+    bear_rendered = render_auto_alert(bear_alert, in_market=True)
+    assert "Bear Put Spread" in bear_rendered
+    assert "Bear Call Credit Spread" not in bear_rendered
+
+
+def test_infy_put_hedge_solved_iv_non_zero_short_delta():
+    """Stock option hedge spreads solve implied IV from market premiums when broker omits IV (never -0.00)."""
+    now_dt = datetime(2026, 11, 27, 12, 40)
+
+    c1 = DummyContract(1154.0, "PE", 39.0, volume=150000, oi=80000)
+    c1.expiry = "2026-12-29"
+    c1.iv = 0.0
+
+    c2 = DummyContract(1074.0, "PE", 12.2, volume=90000, oi=60000)
+    c2.expiry = "2026-12-29"
+    c2.iv = 0.0
+
+    plan = build_defined_risk_hedge_plan(
+        symbol="INFY",
+        direction="BEARISH",
+        spot=1156.9,
+        strike=1154.0,
+        opt_type="PE",
+        opt_ltp=39.0,
+        chain=[c1, c2],
+        lot_size=400,
+        vix=14.0,
+        now_dt=now_dt,
+        vel_score=85.0,
+        spread_width=80.0,
+        expiry_date="2026-12-29",
+    )
+    assert plan is not None
+    assert plan["long_delta"] < -0.35
+    # With 32 DTE and market premium ₹12.2 on 1074 PE, short delta must be realistic (< -0.10, never -0.00)
+    assert plan["short_delta"] < -0.10
+
+
+def test_put_ratio_spread_lower_breakeven_and_slot_target_parity():
+    """Put 1x2 ratio displays Lower Breakeven (never Upper), and conflicting opt_plan T2 never pushes T3 out."""
+    from bot.alert_templates import _resolve_monotonic_display_targets
+
+    ap = {
+        "action": "BUY",
+        "entry_range": "₹38.95",
+        "trigger_level": 38.95,
+        "stop_loss": 34.3,
+        "target_1": "₹48.29",
+        "target_2": "₹53.00",
+        "target_3": "₹60.00",
+        "option_plan": {
+            "t1_premium": 48.29,
+            "t2_premium": 53.89,
+            "t3_premium": 56.10,
+        },
+        "risk_reward": "1:2.0",
+        "lot_size": 400,
+        "preferred_vehicle": "RATIO_SPREAD_1X2",
+        "hedge_plan": {
+            "strategy": "BEAR_CALL_CREDIT_SPREAD",
+            "strategy_type": "CREDIT_SPREAD",
+            "preferred_vehicle": "RATIO_SPREAD_1X2",
+            "buy_leg": "BUY INFY 1154 PE @ ₹39.0",
+            "sell_leg": "SELL INFY 1074 PE @ ₹12.2",
+            "net_debit_per_share": 26.7,
+            "max_loss": 10680.0,
+            "max_profit": 21320.0,
+            "booking_target_70": 64.0,
+            "spread_stop_loss": 13.3,
+            "strike_width": 80.0,
+            "long_delta": -0.45,
+            "short_delta": -0.22,
+            "net_delta": -0.23,
+            "ratio_spread_1x2": {
+                "strategy": "RATIO_PUT_SPREAD_1X2",
+                "sentiment": "BEARISH",
+                "description": "Buy 1x 1154 PE & Sell 2x 1100 PE (Net Debit ₹1.8)",
+                "risk_reward": "1:29.9",
+                "sweet_spot_gain": 20900.0,
+                "upper_breakeven": 1048.0,
+                "lower_breakeven": 1048.0,
+            },
+        },
+    }
+    alert = make_dummy_alert(
+        alert_id="aa-options_momentum-infy-20261127",
+        symbol="INFY",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        direction="BEARISH",
+        confidence=96,
+        ltp=38.95,
+        trigger_level=38.95,
+        target_level=48.29,
+        stop_loss=34.3,
+        headline="🔴 INFY 1154 PE PUT SURGE @ ₹39.0 (Lot: 400)",
+        summary="Institutional Put surge in INFY 1154 PE.",
+        created_at="2026-11-27 12:40:41 IST",
+        time_horizon="INTRADAY",
+        preferred_vehicle="RATIO_SPREAD_1X2",
+        contract_symbol="NSE:INFY26DEC1154PE",
+        option_type="PE",
+        strike=1154.0,
+        expiry_date="2026-12-29",
+        lot_size=400,
+        underlying_spot=1156.9,
+        option_premium=38.95,
+        option_stop_loss=34.3,
+        structural_spot_sl=1165.0,
+        actionable_plan=ap,
+    )
+
+    t1, t2, t3 = _resolve_monotonic_display_targets(ap, alert, entry_val=38.95)
+    assert t1 == "₹48.29"
+    assert t2 == "₹53.00"
+    assert t3 == "₹60.00"  # Real T3 preserved instead of 53.89 shadowing T3
+
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "Bear Put Spread" in rendered
+    assert "Bear Call Credit Spread" not in rendered
+    assert "Lower Breakeven: ₹1,048" in rendered
+    assert "Upper Breakeven" not in rendered
+
+
+def test_hedged_spread_dict_adapts_into_hedge_box_and_symmetric_bull_anchoring():
+    """Alerts carrying hedged_spread (e.g. from quality_gate) render DEFINED-RISK HEDGE SPREAD without raw dict legs."""
+    from engine.defined_risk_spreads import build_defined_risk_spread
+
+    bear_sp = build_defined_risk_spread(
+        underlying="SENSEX",
+        spot_price=83702.7,
+        strategy="BEAR_PUT_SPREAD",
+        dte=6,
+        lot_size=20,
+        primary_strike=83700.0,
+        primary_premium=729.95,
+    )
+    bull_sp = build_defined_risk_spread(
+        underlying="SENSEX",
+        spot_price=83702.7,
+        strategy="BULL_CALL_SPREAD",
+        dte=6,
+        lot_size=20,
+        primary_strike=83700.0,
+        primary_premium=745.0,
+    )
+    # Both BULL and BEAR spreads honor primary_strike & primary_premium symmetrically
+    assert bear_sp.legs[0].strike == 83700.0 and bear_sp.legs[0].premium == 729.95
+    assert bull_sp.legs[0].strike == 83700.0 and bull_sp.legs[0].premium == 745.0
+
+    alert = make_dummy_alert(
+        alert_id="aa-trend-pullback-sensex-20261127",
+        symbol="SENSEX",
+        exchange="BFO",
+        segment="FNO_INDEX",
+        alert_type="TREND_DAY_PULLBACK",
+        stage="IGNITED",
+        direction="BEARISH",
+        confidence=98,
+        ltp=729.95,
+        trigger_level=729.95,
+        target_level=882.0,
+        stop_loss=654.0,
+        headline="🎯 [TREND PULLBACK] SENSEX 83700 PE Buy: 9-EMA Resistance Reject (Spot ₹83,702.7)",
+        summary="Institutional shallow bounce into 9-EMA on SENSEX.",
+        contract_symbol="BSE:SENSEX26D0383700PE",
+        option_type="PE",
+        strike=83700.0,
+        expiry_date="2026-12-03",
+        lot_size=20,
+        underlying_spot=83702.7,
+        option_premium=729.95,
+        option_stop_loss=654.0,
+        structural_spot_sl=83854.7,
+        actionable_plan={
+            "action": "BUY PE",
+            "entry_range": "₹729.95",
+            "stop_loss": "₹654.0",
+            "target_1": "₹882.0",
+            "target_2": "₹1,003.6",
+            "target_3": "₹1,184.2",
+            "lot_size": 20,
+            "execution_style_mandate": "HEDGED_SPREAD_MANDATORY",
+            "hedged_spread": bear_sp.to_dict(),
+        },
+    )
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "DEFINED-RISK HEDGE SPREAD" in rendered
+    assert "BUY SENSEX 83700 PE @ ₹730.0" in rendered
+    assert "SELL SENSEX 83500 PE" in rendered
+    assert "{'symbol':" not in rendered
+    assert "illiquid strikes" not in rendered.lower()
+    assert "EXECUTE HEDGED SPREAD" in rendered

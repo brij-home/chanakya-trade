@@ -242,6 +242,17 @@ def detect_index_micro_scalp(
                 f"[engine.detectors.index_micro_scalp] Non-fatal exception suppressed: {e_suppressed}"
             )
 
+    _ims_lead_bull: dict[str, Any] = {}
+    _ims_lead_bear: dict[str, Any] = {}
+    if not is_test_runner and clean_sym in ("NIFTY", "BANKNIFTY"):
+        try:
+            from engine.feature_bus import evaluate_index_constituent_confluence
+
+            _ims_lead_bull = evaluate_index_constituent_confluence(clean_sym, "BULLISH")
+            _ims_lead_bear = evaluate_index_constituent_confluence(clean_sym, "BEARISH")
+        except Exception as _e_ims_ll:
+            logger.debug(f"[IndexMicroScalp] Constituent lead lookup skipped: {_e_ims_ll}")
+
     for c in candidate_contracts:
         try:
             c_strk = float(getattr(c, "strike", 0.0) or 0.0)
@@ -256,6 +267,8 @@ def detect_index_micro_scalp(
 
             # Directional alignment check with spot
             if c_opt == "PE":
+                if _ims_lead_bear.get("opposed"):
+                    continue
                 # Short-Squeeze / Bear-Trap Guard: Reject Puts if spot is surging off lows, above VWAP, or printing green candles
                 if (
                     is_spot_surging
@@ -267,6 +280,8 @@ def detect_index_micro_scalp(
                 if not is_spot_flushing and c_pch < 12.0 and c_vol_oi < 1.5:
                     continue
             elif c_opt == "CE":
+                if _ims_lead_bull.get("opposed"):
+                    continue
                 # Dynamic V-Reversal / Bottom Bounce Engine:
                 # If spot has staged a structural bounce >= 0.28% off session low with bullish momentum,
                 # permit the CE micro-breakout even if spot began below VWAP or is off the morning high!

@@ -139,7 +139,17 @@ def detect_index_call_setup(
                     underlying,
                 )
                 if clean_sym == "NIFTY"
-                else (clean_sym, f"NSE:{clean_sym}", underlying)
+                else (
+                    (
+                        clean_sym,
+                        f"BSE:{clean_sym}",
+                        f"BSE:{clean_sym}-INDEX",
+                        f"NSE:{clean_sym}",
+                        underlying,
+                    )
+                    if clean_sym in ("SENSEX", "BANKEX")
+                    else (clean_sym, f"NSE:{clean_sym}", underlying)
+                )
             )
         )
         for k in possible_keys:
@@ -303,6 +313,24 @@ def detect_index_call_setup(
         )
         return []
 
+    _ce_lead: dict[str, Any] = {}
+    if clean_sym in ("NIFTY", "BANKNIFTY"):
+        try:
+            from engine.feature_bus import evaluate_index_constituent_confluence
+
+            _ce_lead = evaluate_index_constituent_confluence(
+                clean_sym, "BULLISH", quotes_map=quotes_map
+            )
+            if not is_test_runner and _ce_lead.get("opposed"):
+                logger.info(
+                    f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweight constituents "
+                    f"strongly bearish ({_ce_lead.get('weighted_impulse_pct', 0.0):+.2f}%, "
+                    f"{_ce_lead.get('bearish_vwap_weight_pct', 0.0):.0f}% < VWAP)."
+                )
+                return []
+        except Exception as _e_ce_lead:
+            logger.debug(f"[IndexCallSetup] Constituent lead check skipped: {_e_ce_lead}")
+
     # ── Effective-Dated Option Entry Cutoff Gate (market.rule_schedule) ───
     # Stop new intraday entries 10 minutes before canonical intraday square-off cutoff
     # (15:05 IST before 2026-12-07 or on expiring-index 0DTE; 15:20 IST from 2026-12-07 on non-expiry).
@@ -345,7 +373,7 @@ def detect_index_call_setup(
         try:
             from market.calendar import is_market_open
 
-            if is_market_open(exchange="NSE"):
+            if is_market_open(exchange=_exch_sched):
                 last_bar_dt = active_ohlcv.index[-1]
                 if hasattr(last_bar_dt, "to_pydatetime"):
                     last_bar_dt = last_bar_dt.to_pydatetime()
@@ -668,6 +696,7 @@ def detect_index_call_setup(
         (cand_ce_pchange >= 10.0 and cand_ce_vol >= min_vol)
         or (cand_ce_pchange >= 10.0 and cand_ce_vol_oi >= 0.35 and cand_ce_vol >= min_vol)
         or (cand_ce_pchange >= 10.0 and cand_ce_vol >= int(min_vol * 1.5))
+        or (bool(_ce_lead.get("aligned")) and cand_ce_vol >= int(min_vol * 0.8))
         or _is_opening_displacement
         or _is_trend_exp_day
     ) and (spot > effective_vwap)
@@ -715,7 +744,13 @@ def detect_index_call_setup(
     # Veto when: PCR < 0.65 AND writers are NOT unwinding (call ceiling building/holding)
     # NOT when writers are unwinding (short squeeze = CE rally signal)
     _pcr_writers_unwinding = ce_oi_change_sum < 0
-    if chain_pcr is not None and chain_pcr < 0.65 and not _pcr_writers_unwinding:
+    _ce_basket_override = bool(_ce_lead.get("strongly_aligned"))
+    if (
+        chain_pcr is not None
+        and chain_pcr < 0.65
+        and not _pcr_writers_unwinding
+        and not _ce_basket_override
+    ):
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Active Call Writing Wall "
             f"(PCR: {chain_pcr:.2f} < 0.65, CE OI change {ce_oi_change_sum:+,}). Ceiling-building writers resist breakout."
@@ -2996,6 +3031,28 @@ def detect_index_call_setup(
         )
         return []
 
+    if (
+        not is_test_runner
+        and effective_vwap > 0
+        and spot < (effective_vwap * 0.997)
+        and mtf_15m == "BEARISH"
+        and not has_bull_absorption
+    ):
+        _verified_bottom_signals = {
+            "DAY_LOW_DEMAND_BOUNCE",
+            "INTRADAY_CAPITULATION_REVERSAL",
+            "FAILED_DAY_LOW_BREAKDOWN",
+            "ACCUMULATION_BOTTOM",
+            "DOUBLE_BOTTOM_BREAKOUT",
+            "V_BOTTOM",
+        }
+        if not any(s in _verified_bottom_signals for s in signals):
+            logger.info(
+                f"[IndexCallSetup] Counter-VWAP 15m-Bearish Gate on {clean_sym}: "
+                f"Spot ₹{spot:,.1f} < VWAP ₹{effective_vwap:,.1f} in 15m BEARISH regime without bottom reversal confirmation."
+            )
+            return []
+
     confidence = max(50, min(92, confidence) - flow_penalty)
 
     # Chop / Balanced Range Confidence Dampener:
@@ -3547,6 +3604,36 @@ def detect_index_call_setup(
             f"status={liquidity_status}, spread={bid_ask_spread_pct:.1f}%"
         )
         return []
+
+    if not is_test_runner and opt_ltp > 0 and t1_premium > opt_ltp and 0 < sl_premium < opt_ltp:
+        try:
+            from engine.option_target_calibration import evaluate_option_friction_viability
+
+            _ce_bid = float(
+                getattr(best_ce, "best_bid", 0.0) or getattr(best_ce, "bid", 0.0) or 0.0
+            )
+            _ce_ask = float(
+                getattr(best_ce, "best_ask", 0.0) or getattr(best_ce, "ask", 0.0) or 0.0
+            )
+            _ce_fric = evaluate_option_friction_viability(
+                entry_price=opt_ltp,
+                target_1=t1_premium,
+                stop_loss=sl_premium,
+                quantity=lot_sz,
+                bid=_ce_bid,
+                ask=_ce_ask,
+                segment="OPTIONS",
+                max_spread_pct=5.5,
+                max_friction_drag_pct=28.0,
+                min_net_rr=1.05,
+            )
+            if not _ce_fric["viable"]:
+                logger.info(
+                    f"[{clean_sym}] Index call setup rejected pre-creation on friction/spread: {_ce_fric['reason']}"
+                )
+                return []
+        except Exception as _e_fric:
+            logger.debug(f"[{clean_sym}] Index call friction check skipped: {_e_fric}")
 
     execution_friction_badge = (
         f"⚠️ WIDE SPREAD ({bid_ask_spread_pct:.1f}%) — STRICT LIMIT ONLY"

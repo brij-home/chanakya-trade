@@ -59,6 +59,9 @@ def _is_fyers_sdk_available() -> bool:
         if _FYERS_APIV3_AVAILABLE is not None:
             return _FYERS_APIV3_AVAILABLE
         try:
+            # Ensure pkg_resources -> importlib.resources shim is installed for Python 3.13+
+            import market.fyers_socket_patch  # noqa: F401
+
             # A top-level package import does not check WebSocket dependencies.
             module = import_module("fyers_apiv3.FyersWebsocket.tbt_ws")
             if not callable(getattr(module, "FyersTbtSocket", None)):
@@ -681,7 +684,8 @@ class TbtSocketWorker:
             if self.worker_id > 0:
                 logger.info(
                     f"[TbtWorker-{self.worker_id}] Fyers single-user account limit active (429 connection cap). "
-                    f"Secondary worker quiescent; primary worker (Worker-0) multiplexes all 15 symbols across channels 1..3."
+                    "Secondary worker quiescent; primary worker (Worker-0) retains top 5 priority slots "
+                    "and overflow exposures route to 5-level DepthUpdate/REST."
                 )
             elif self._consecutive_429 <= 2:
                 logger.warning(
@@ -753,6 +757,24 @@ class TbtSocketWorker:
                     self.ws.switchChannel(resume_channels={"1"}, pause_channels=set())
                 except Exception as e:
                     logger.debug(f"[TbtWorker-{self.worker_id}] switchChannel failed: {e}")
+
+    def switch_channels(
+        self,
+        resume_channels: Optional[set[str]] = None,
+        pause_channels: Optional[set[str]] = None,
+    ) -> bool:
+        """Pause or resume warm TBT channels (1..50) without tearing down the WebSocket."""
+        with self._lock:
+            if not self.connected or not self.ws or not hasattr(self.ws, "switchChannel"):
+                return False
+            resume_set = {str(c) for c in (resume_channels or set())}
+            pause_set = {str(c) for c in (pause_channels or set())}
+            try:
+                self.ws.switchChannel(resume_channels=resume_set, pause_channels=pause_set)
+                return True
+            except Exception as exc:
+                logger.debug(f"[TbtWorker-{self.worker_id}] switch_channels failed: {exc}")
+                return False
 
     def unsubscribe(self, symbols: set[str] | list[str]) -> None:
         with self._lock:
@@ -1505,6 +1527,35 @@ class FyersTbtManager:
                 if b_list or a_list:
                     get_depth_book(symbol, max_depth=50).batch_update(b_list, a_list)
                     get_depth_book(clean_sym, max_depth=50).batch_update(b_list, a_list)
+                    # Throttled archival of live 50-depth top-of-book & microstate to TickWarehouse
+                    if (
+                        os.environ.get("CHANAKYA_TESTING") != "1"
+                        and "PYTEST_CURRENT_TEST" not in os.environ
+                    ):
+                        now_arch = time.time()
+                        last_arch = getattr(self, "_tbt_archive_ts", None)
+                        if last_arch is None:
+                            self._tbt_archive_ts = {}
+                            last_arch = self._tbt_archive_ts
+                        if (now_arch - last_arch.get(symbol, 0.0)) >= 1.0:
+                            last_arch[symbol] = now_arch
+                            from engine.tick_warehouse import get_tick_warehouse
+
+                            top_b_px = float(b_list[0]["price"]) if b_list else 0.0
+                            top_a_px = float(a_list[0]["price"]) if a_list else 0.0
+                            top_b_qty = int(b_list[0].get("qty", 0) or 0) if b_list else 0
+                            top_a_qty = int(a_list[0].get("qty", 0) or 0) if a_list else 0
+                            get_tick_warehouse().record_tick(
+                                symbol=symbol,
+                                ltp=float(parsed.get("ltp") or 0.0),
+                                bid=top_b_px,
+                                ask=top_a_px,
+                                bid_qty=top_b_qty,
+                                ask_qty=top_a_qty,
+                                volume=0,
+                                flag="TBT_L2",
+                                timestamp_ms=int(now_arch * 1000),
+                            )
             except Exception as e_suppressed:
                 logger.debug(
                     f"[market.fyers_tbt_manager] BisectDepthBook bridge suppressed: {e_suppressed}"
@@ -2230,12 +2281,15 @@ class FyersTbtManager:
 
         sector_key_map = {
             "BANK": "banking",
+            "CAPITAL_MARKETS": "capital_markets",
+            "FIN_SERV": "insurance",
             "IT": "it",
+            "FINTECH": "fintech_internet",
             "AUTO": "auto",
             "PHARMA": "pharma",
             "FMCG": "fmcg",
             "METAL": "metals",
-            "REALTY": "infra",
+            "REALTY": "realty",
             "ENERGY": "energy",
             "INFRA": "infra",
             "PSU_BANK": "banking",
@@ -2439,6 +2493,17 @@ class FyersTbtManager:
                         worker.sync()
 
                     self._subscribed = set().union(*(w.subscribed for w in connected_workers))
+                    uncovered_exposures = [s for s in self._in_flight if s not in self._subscribed]
+                    if uncovered_exposures:
+                        try:
+                            from market.websocket import ws_manager
+
+                            if getattr(ws_manager, "connected", False):
+                                ws_manager.subscribe_depth(uncovered_exposures)
+                        except Exception as e_cov:
+                            logger.debug(
+                                f"[TbtManager] Exposure DepthUpdate fallback note: {e_cov}"
+                            )
                 else:
                     # All workers disconnected or initializing: stage chunks statically
                     for idx, chunk in enumerate(chunks):
@@ -3072,6 +3137,16 @@ class FyersTbtManager:
                 "in_flight_without_tbt_subscription": [
                     s for s in self._in_flight if s not in self._subscribed
                 ],
+                "uncovered_exposure_symbols": [
+                    s for s in self._in_flight if s not in self._subscribed
+                ],
+                "depth_capabilities": {
+                    "nse_nfo": "TBT_50",
+                    "bse_bfo": "WS_DEPTH_5",
+                    "tbt_connections_verified": 3,
+                    "tbt_symbol_capacity": 15,
+                    "tbt_channels": "1..50",
+                },
                 "exposure_subscription_coverage": "COMPLETE"
                 if all(s in self._subscribed for s in self._in_flight)
                 else "INCOMPLETE",
@@ -3122,6 +3197,22 @@ class FyersTbtManager:
                 return self._depth_cache[fyers_sym]
             if clean in self._depth_cache:
                 return self._depth_cache[clean]
+
+        # Streaming 5-level DataSocket depth (channel 12): serves BFO/BSE (SENSEX/BANKEX) and overflow contracts
+        try:
+            from market.websocket import ws_manager
+
+            ws_l2 = ws_manager.get_l2_depth(symbol) or ws_manager.get_l2_depth(fyers_sym)
+            if ws_l2 and (ws_l2.get("bids") or ws_l2.get("asks")):
+                conv = self._convert_l2_to_depth_format(symbol, ws_l2)
+                conv["status"] = "DATA_SOCKET_5L"
+                conv["transport"] = "DATA_SOCKET_5L"
+                conv["depth_levels"] = 5
+                return conv
+        except Exception as e_ws5:
+            logger.debug(
+                f"[market.fyers_tbt_manager] WS 5L depth lookup skipped for {symbol}: {e_ws5}"
+            )
 
         # Optional Fallback to Broker L2 5-depth REST API (only if explicitly allowed)
         if allow_rest_fallback:
@@ -3587,4 +3678,27 @@ def get_realtime_orderbook_greeks(
         "microstructure_wall_conviction": conviction,
         "wall_bias": wall_bias,
         "synthesis": synthesis,
+    }
+
+
+def get_exchange_depth_capability(symbol: str) -> dict[str, Any]:
+    """Return explicit market-depth transport capabilities per exchange (NSE/NFO vs BSE/BFO)."""
+    raw = str(symbol or "").upper().strip()
+    exch = (
+        raw.split(":", 1)[0]
+        if ":" in raw
+        else ("BSE" if raw.startswith(("SENSEX", "BANKEX")) else "NSE")
+    )
+    if exch in ("BSE", "BFO"):
+        return {
+            "exchange": exch,
+            "supports_50_depth_tbt": False,
+            "feed_mode": "DATASOCKET_5_LEVEL",
+            "reason": "FYERS 50-depth TBT covers NSE/NFO only; BSE/BFO contracts consume DataSocket 5-level depth.",
+        }
+    return {
+        "exchange": exch,
+        "supports_50_depth_tbt": True,
+        "feed_mode": "TBT_50_LEVEL",
+        "reason": "Supported NSE/NFO 50-level TBT order book.",
     }

@@ -123,6 +123,10 @@ class Quote:
     vwap: Optional[float] = None  # Intraday Volume-Weighted Average Price
     upper_circuit: Optional[float] = None  # Price upper band / circuit limit
     lower_circuit: Optional[float] = None  # Price lower band / circuit limit
+    reference_price: Optional[float] = None  # CAS / Call Auction reference price
+    indicative_price: Optional[float] = None  # CAS / Pre-open equilibrium price
+    imbalance: Optional[float] = None  # Call auction order imbalance
+    mkt_imbalance: Optional[float] = None  # Market-order call auction imbalance
     provider: str = "UNKNOWN"
     source: str = "UNKNOWN"  # STREAM | REST | EOD_SNAPSHOT | FALLBACK | CACHE
     data_state: str = "UNAVAILABLE"  # LIVE | DELAYED | EOD | DEGRADED | UNAVAILABLE
@@ -255,6 +259,9 @@ class GTTLeg:
     price: float
     trigger_price: float
     quantity: int
+    order_type: Optional[str] = (
+        None  # Optional: "LIMIT" (1) or "MARKET" (2) per Fyers Nov-2026 spec
+    )
 
 
 @dataclass

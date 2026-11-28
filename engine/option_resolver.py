@@ -708,13 +708,13 @@ def resolve_option_contract(
         # Stock Options: -15% floor for high-premium monthly (>= ₹150), -22% otherwise
         _stk_dd = 0.85 if opt_ltp >= 150.0 else 0.78
         disciplined_sl_floor = round(max(0.1, opt_ltp * _stk_dd), 2)
-        opt_t0_5 = round(opt_ltp * (1.08 if opt_ltp >= 150.0 else 1.10), 2)
-        opt_t1 = round(opt_ltp * (1.18 if opt_ltp >= 150.0 else 1.22), 2)
-        opt_t2 = round(opt_ltp * (1.30 if opt_ltp >= 150.0 else 1.38), 2)
-        opt_t3 = round(opt_ltp * (1.48 if opt_ltp >= 150.0 else 1.60), 2)
-        t1_ceiling = round(opt_ltp * (1.20 if opt_ltp >= 150.0 else 1.24), 2)
-        t2_ceiling = round(opt_ltp * (1.35 if opt_ltp >= 150.0 else 1.42), 2)
-        t3_ceiling = round(opt_ltp * (1.60 if opt_ltp >= 150.0 else 1.80), 2)
+        opt_t0_5 = round(opt_ltp * (1.08 if opt_ltp >= 150.0 else 1.12), 2)
+        opt_t1 = round(opt_ltp * (1.20 if opt_ltp >= 150.0 else 1.35), 2)
+        opt_t2 = round(opt_ltp * (1.35 if opt_ltp >= 150.0 else 1.58), 2)
+        opt_t3 = round(opt_ltp * (1.55 if opt_ltp >= 150.0 else 1.90), 2)
+        t1_ceiling = round(opt_ltp * (1.25 if opt_ltp >= 150.0 else 1.55), 2)
+        t2_ceiling = round(opt_ltp * (1.42 if opt_ltp >= 150.0 else 1.95), 2)
+        t3_ceiling = round(opt_ltp * (1.70 if opt_ltp >= 150.0 else 2.50), 2)
         exec_trig = f"CMP_OR_PULLBACK_₹{opt_ltp:,.1f}"
         conf_rule = "STANDARD_EXECUTION"
         exec_notes = f"Enter near ₹{opt_ltp:,.1f} on pullback or confirmation."

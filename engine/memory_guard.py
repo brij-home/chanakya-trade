@@ -28,9 +28,10 @@ _trim_callbacks: List[Callable[[], int]] = []
 _callbacks_lock = threading.Lock()
 _mem_status_lock = threading.Lock()
 _mem_status_refresh_lock = threading.Lock()
-_MEM_STATUS_TTL_SEC = 15.0
+_MEM_STATUS_TTL_SEC = 30.0
 _mem_status_cache: tuple[float, Optional["MemoryStatus"]] = (0.0, None)
 _cached_proc = None
+_has_psutil: Optional[bool] = None
 
 
 @dataclass
@@ -70,17 +71,21 @@ def unregister_trim_callback(callback: Callable[[], int]) -> None:
 
 def _get_process_rss_mb() -> float:
     """Return current process RSS memory in MB."""
-    global _cached_proc
-    # 1. Try psutil if available (reuse Process handle to avoid repeated handle allocation)
-    try:
-        import psutil
+    global _cached_proc, _has_psutil
+    # 1. Try psutil if available (reuse Process handle and cache absence to avoid repeated import fails)
+    if _has_psutil is not False:
+        try:
+            import psutil
 
-        if _cached_proc is None:
-            _cached_proc = psutil.Process(os.getpid())
-        return _cached_proc.memory_info().rss / (1024 * 1024)
-    except Exception as e_suppressed:
-        _cached_proc = None
-        logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
+            _has_psutil = True
+            if _cached_proc is None:
+                _cached_proc = psutil.Process(os.getpid())
+            return _cached_proc.memory_info().rss / (1024 * 1024)
+        except ImportError:
+            _has_psutil = False
+        except Exception as e_suppressed:
+            _cached_proc = None
+            logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Windows ctypes fallback
     if sys.platform == "win32":
@@ -118,16 +123,21 @@ def _get_process_rss_mb() -> float:
 
 def _get_system_ram_mb() -> tuple[float, float, float]:
     """Return (total_mb, available_mb, used_pct)."""
+    global _has_psutil
     # 1. Try psutil if available
-    try:
-        import psutil
+    if _has_psutil is not False:
+        try:
+            import psutil
 
-        vm = psutil.virtual_memory()
-        total_mb = vm.total / (1024 * 1024)
-        avail_mb = vm.available / (1024 * 1024)
-        return total_mb, avail_mb, vm.percent
-    except Exception as e_suppressed:
-        logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
+            _has_psutil = True
+            vm = psutil.virtual_memory()
+            total_mb = vm.total / (1024 * 1024)
+            avail_mb = vm.available / (1024 * 1024)
+            return total_mb, avail_mb, vm.percent
+        except ImportError:
+            _has_psutil = False
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Windows ctypes GlobalMemoryStatusEx fallback
     if sys.platform == "win32":
@@ -184,17 +194,26 @@ def get_memory_budget_mb(total_ram_mb: float) -> tuple[float, float, float, floa
     return target_budget, moderate_rss, critical_rss, min_avail_mb
 
 
-def get_memory_status(force: bool = False) -> MemoryStatus:
+def get_memory_status(force: bool = False, stale_ok: bool = False) -> MemoryStatus:
     """Evaluate current host and process memory metrics dynamically (cached 15s, single-flight)."""
     global _mem_status_cache
     now = time.monotonic()
+    effective_ttl = 90.0 if stale_ok else _MEM_STATUS_TTL_SEC
     if not force:
         with _mem_status_lock:
             cached_at, cached_val = _mem_status_cache
-            if cached_val is not None and (now - cached_at) < _MEM_STATUS_TTL_SEC:
+            if cached_val is not None and (now - cached_at) < effective_ttl:
                 return cached_val
 
-    with _mem_status_refresh_lock:
+    acquired = _mem_status_refresh_lock.acquire(blocking=not stale_ok)
+    if not acquired:
+        with _mem_status_lock:
+            _, cached_val = _mem_status_cache
+            if cached_val is not None:
+                return cached_val
+        _mem_status_refresh_lock.acquire()
+
+    try:
         if not force:
             with _mem_status_lock:
                 cached_at, cached_val = _mem_status_cache
@@ -232,6 +251,8 @@ def get_memory_status(force: bool = False) -> MemoryStatus:
         with _mem_status_lock:
             _mem_status_cache = (time.monotonic(), status)
         return status
+    finally:
+        _mem_status_refresh_lock.release()
 
 
 def trim_memory_if_needed(force: bool = False) -> dict:

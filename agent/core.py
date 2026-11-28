@@ -2516,7 +2516,11 @@ class GeminiProvider(LLMProvider):
         }
         if effective_max_tokens is not None:
             config_kwargs["max_output_tokens"] = effective_max_tokens
-        thinking_budget = kwargs.get("thinking_budget") or os.environ.get("GEMINI_THINKING_BUDGET")
+        thinking_budget = (
+            kwargs["thinking_budget"]
+            if kwargs.get("thinking_budget") is not None
+            else os.environ.get("GEMINI_THINKING_BUDGET")
+        )
         if thinking_budget is not None and hasattr(types, "ThinkingConfig"):
             # Flash-lite models reject ThinkingConfig with 400 INVALID_ARGUMENT; only apply to thinking-capable models
             if "lite" not in str(self.model or "").lower():

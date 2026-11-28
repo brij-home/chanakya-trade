@@ -22,62 +22,15 @@ from typing import Any, Optional
 
 from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
+from engine.feature_bus import INDEX_CONSTITUENT_WEIGHTS
 
 logger = logging.getLogger("engine.index_contagion")
 from config.constants import IST_ZONE as IST
 
-# ── Institutional Constituent Weightings (Active 2026) ───────────────────────
+# ── Institutional Constituent Weightings (SSOT: engine.feature_bus) ───────────────────────
 
 INDEX_CONSTITUENTS: dict[str, dict[str, float]] = {
-    "BANKNIFTY": {
-        "HDFCBANK": 0.285,
-        "ICICIBANK": 0.240,
-        "SBIN": 0.102,
-        "AXISBANK": 0.092,
-        "KOTAKBANK": 0.088,
-    },
-    "NIFTY": {
-        "HDFCBANK": 0.112,
-        "RELIANCE": 0.096,
-        "ICICIBANK": 0.081,
-        "INFY": 0.054,
-        "TCS": 0.040,
-        "LT": 0.038,
-        "BHARTIARTL": 0.035,
-        "SBIN": 0.030,
-    },
-    "MIDCPNIFTY": {
-        "PERSISTENT": 0.078,
-        "FEDERALBNK": 0.069,
-        "DIXON": 0.064,
-        "POLYCAB": 0.061,
-        "COFORGE": 0.058,
-        "AUBANK": 0.055,
-        "HDFCAMC": 0.052,
-        "ASHOKLEY": 0.049,
-        "MAXHEALTH": 0.047,
-        "CONCOR": 0.044,
-    },
-    "SENSEX": {
-        "HDFCBANK": 0.148,
-        "RELIANCE": 0.122,
-        "ICICIBANK": 0.105,
-        "INFY": 0.072,
-        "TCS": 0.052,
-        "LT": 0.049,
-        "BHARTIARTL": 0.045,
-        "SBIN": 0.039,
-        "AXISBANK": 0.038,
-        "KOTAKBANK": 0.032,
-    },
-    "FINNIFTY": {
-        "HDFCBANK": 0.280,
-        "ICICIBANK": 0.220,
-        "BAJFINANCE": 0.095,
-        "SBIN": 0.075,
-        "AXISBANK": 0.070,
-        "KOTAKBANK": 0.065,
-    },
+    k: dict(v) for k, v in INDEX_CONSTITUENT_WEIGHTS.items()
 }
 
 
@@ -216,6 +169,7 @@ class IndexContagionEngine:
 
         # 2. Evaluate each constituent
         total_tracked_weight = sum(weights.values())
+        reporting_weight = 0.0
         bullish_weight = 0.0
         bearish_weight = 0.0
         weighted_impulse = 0.0
@@ -227,6 +181,7 @@ class IndexContagionEngine:
             ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
             if ltp <= 0:
                 continue
+            reporting_weight += weight
 
             vwap = float(getattr(q, "vwap", 0.0) or ltp)
             chg = float(getattr(q, "change_pct", 0.0) or 0.0)
@@ -278,9 +233,14 @@ class IndexContagionEngine:
 
             weighted_impulse += c_score * weight
 
+        norm_denom = (
+            reporting_weight
+            if reporting_weight >= (total_tracked_weight * 0.5)
+            else total_tracked_weight
+        )
         bullish_pct = round((bullish_weight / total_tracked_weight) * 100.0, 1)
         bearish_pct = round((bearish_weight / total_tracked_weight) * 100.0, 1)
-        net_score = round(weighted_impulse / total_tracked_weight, 2)
+        net_score = round(weighted_impulse / max(norm_denom, 1e-6), 2)
 
         result = IndexContagionResult(
             index_name=clean_idx,

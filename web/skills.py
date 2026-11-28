@@ -319,6 +319,15 @@ async def skill_quotes_batch(req: BatchQuotesRequest):
                     "source": getattr(q, "source", "REST"),
                     "received_at": getattr(q, "received_at", None),
                 }
+                for cas_field in (
+                    "reference_price",
+                    "indicative_price",
+                    "imbalance",
+                    "mkt_imbalance",
+                ):
+                    cas_val = getattr(q, cas_field, None)
+                    if cas_val is not None:
+                        quote_entry[cas_field] = float(cas_val)
                 out[sym_clean] = quote_entry
                 out[k] = quote_entry
         return _ok(out)

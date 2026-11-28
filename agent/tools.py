@@ -2230,6 +2230,294 @@ def build_registry() -> ToolRegistry:
         fn=_simulate_order_book_sweep,
     )
 
+    def _get_fyers_depth_50(symbol: str, allow_rest_fallback: bool = False) -> dict:
+        from market.fyers_tbt_manager import fyers_tbt_manager
+
+        return fyers_tbt_manager.get_50_depth(symbol, allow_rest_fallback=allow_rest_fallback)
+
+    reg.register(
+        name="get_fyers_depth_50",
+        description=(
+            "Retrieve live Fyers 50-level Tick-By-Tick (TBT) market depth, OBI-50 imbalance, "
+            "Fortress/Spoof institutional wall detection, and Sentinel decision intelligence."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "NSE/NFO symbol e.g. NIFTY26DECFUT, RELIANCE",
+                },
+                "allow_rest_fallback": {"type": "boolean", "default": False},
+            },
+            "required": ["symbol"],
+        },
+        fn=_get_fyers_depth_50,
+    )
+
+    def _check_order_margin(orders: list[dict]) -> dict:
+        brk = _bs.get_execution_broker() or _bs.get_data_broker()
+        if brk and hasattr(brk, "check_order_margin"):
+            return brk.check_order_margin(orders)
+        return {
+            "status": "UNAVAILABLE",
+            "message": "Active broker does not support margin calculation",
+        }
+
+    reg.register(
+        name="check_order_margin",
+        description=(
+            "Pre-flight margin & statutory charges calculation via Fyers Multi-Order Margin API "
+            "(includes Apr-2026 STT, GST, SEBI fees, and stamp duty)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "orders": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "List of order dicts with symbol, qty, side (BUY/SELL), product_type, limit_price",
+                },
+            },
+            "required": ["orders"],
+        },
+        fn=_check_order_margin,
+    )
+
+    def _get_futures_chain(underlying: str) -> dict:
+        brk = _bs.get_data_broker()
+        if brk and hasattr(brk, "get_futures_chain"):
+            return brk.get_futures_chain(underlying)
+        return {
+            "status": "UNAVAILABLE",
+            "message": "Data broker does not support futures_chain",
+            "contracts": [],
+        }
+
+    reg.register(
+        name="get_futures_chain",
+        description="Fetch live near/next/far futures contracts, LTP, OI, and volume for an underlying via Fyers.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "underlying": {
+                    "type": "string",
+                    "description": "Underlying symbol e.g. NIFTY, BANKNIFTY, RELIANCE",
+                },
+            },
+            "required": ["underlying"],
+        },
+        fn=_get_futures_chain,
+    )
+
+    def _get_fyers_telemetry() -> dict:
+        from market.fyers_rate_gate import get_fyers_rate_gate
+        from market.fyers_tbt_manager import fyers_tbt_manager
+        from market.ws_subscription_manager import get_ws_subscription_manager
+
+        brk = _bs.get_data_broker()
+        cap = (
+            brk.get_fyers_capability_status()
+            if brk and hasattr(brk, "get_fyers_capability_status")
+            else {}
+        )
+        return {
+            "capabilities": cap,
+            "rate_gate": get_fyers_rate_gate().get_diagnostics(),
+            "ws_subscriptions": get_ws_subscription_manager().get_diagnostics(),
+            "tbt_slots": fyers_tbt_manager.get_active_slots_status(),
+        }
+
+    reg.register(
+        name="get_fyers_telemetry",
+        description="Inspect Fyers Prime RateGate budgets (DATA vs TX), WebSocket 5,000-slot usage, and 15-slot TBT coverage.",
+        parameters={"type": "object", "properties": {}},
+        fn=_get_fyers_telemetry,
+    )
+
+    def _get_expired_fno_history(
+        symbol: str,
+        exchange: str = "NFO",
+        interval: str = "day",
+        from_date: str = "",
+        to_date: str = "",
+        include_oi: bool = True,
+        include_greeks: bool = True,
+    ) -> dict:
+        from datetime import datetime
+
+        brk = _bs.get_data_broker()
+        if not brk or not hasattr(brk, "get_expired_fno_history"):
+            return {"status": "UNAVAILABLE", "research_only": True, "rows": []}
+        dt_from = datetime.fromisoformat(from_date) if from_date else None
+        dt_to = datetime.fromisoformat(to_date) if to_date else None
+        rows = brk.get_expired_fno_history(
+            symbol=symbol,
+            exchange=exchange,
+            interval=interval,
+            from_date=dt_from,
+            to_date=dt_to,
+            include_oi=include_oi,
+            include_greeks=include_greeks,
+        )
+        return {
+            "status": "ok" if rows else "UNAVAILABLE",
+            "research_only": True,
+            "caveat": "Expired-contract history only; preserves null provider Greeks and does not establish constant-tenor IV rank.",
+            "count": len(rows),
+            "rows": rows[:500],
+        }
+
+    reg.register(
+        name="get_expired_fno_history",
+        description=(
+            "Research-only loader for Fyers Prime expired F&O OHLCV, OI, and optional Greeks. "
+            "Preserves null fields; does not construct live IV rank."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Expired contract symbol e.g. NSE:NIFTY25JAN22000CE",
+                },
+                "exchange": {"type": "string", "default": "NFO"},
+                "interval": {"type": "string", "default": "day"},
+                "from_date": {"type": "string", "description": "YYYY-MM-DD (optional)"},
+                "to_date": {"type": "string", "description": "YYYY-MM-DD (optional)"},
+                "include_oi": {"type": "boolean", "default": True},
+                "include_greeks": {"type": "boolean", "default": True},
+            },
+            "required": ["symbol"],
+        },
+        fn=_get_expired_fno_history,
+    )
+
+    reg.register(
+        name="get_fyers_screener_config",
+        description="Inspect available FYERS Screeners API v3 screener_ids, universes, fields, and timeframes.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "force_refresh": {"type": "boolean", "default": False},
+            },
+        },
+        fn=lambda force_refresh=False: (
+            _bs.get_data_broker().get_screener_config(force_refresh=force_refresh)
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_screener_config")
+            else {"s": "error", "message": "Data broker does not support screener config"}
+        ),
+    )
+
+    reg.register(
+        name="fyers_standard_screener",
+        description=(
+            "Run FYERS Oct-2026 Standard Screener (/api/v3/screeners/standard) across equities, "
+            "futures, or options universes using screener_ids from get_fyers_screener_config."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "screener_id": {
+                    "type": "string",
+                    "description": "Standard screener_id from get_fyers_screener_config",
+                },
+                "universe": {"type": "string", "default": ""},
+                "fields": {"type": "string", "default": ""},
+                "order_by": {"type": "string", "default": ""},
+                "order": {"type": "string", "default": ""},
+                "timeframe": {"type": "string", "default": ""},
+                "option_type": {"type": "string", "default": ""},
+            },
+            "required": ["screener_id"],
+        },
+        fn=lambda screener_id, universe="", fields="", order_by="", order="", timeframe="", option_type="": (
+            _bs.get_data_broker().get_screener_standard(
+                screener_id=screener_id,
+                universe=universe,
+                fields=fields,
+                order_by=order_by,
+                order=order,
+                timeframe=timeframe,
+                option_type=option_type,
+            )
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_screener_standard")
+            else {"s": "error", "message": "Data broker does not support standard screeners"}
+        ),
+    )
+
+    reg.register(
+        name="get_expired_fno_contracts",
+        description="Discover expired F&O contract symbols for a given underlying and YYYY-MM-DD expiry date.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Underlying symbol e.g. NIFTY, BANKNIFTY",
+                },
+                "expiry_date": {
+                    "type": "string",
+                    "description": "Expiry date in YYYY-MM-DD format",
+                },
+            },
+            "required": ["symbol", "expiry_date"],
+        },
+        fn=lambda symbol, expiry_date: (
+            _bs.get_data_broker().get_expired_fno_contracts(symbol, expiry_date)
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_expired_fno_contracts")
+            else {
+                "s": "error",
+                "message": "Data broker does not support expired contract lookup",
+                "contracts": [],
+            }
+        ),
+    )
+
+    reg.register(
+        name="get_fyers_killswitch_status",
+        description="Read-only check of FYERS broker-level Kill Switch active state, open positions, and pending orders.",
+        parameters={"type": "object", "properties": {}},
+        fn=lambda: (
+            _bs.get_execution_broker().get_killswitch_status()
+            if _bs.get_execution_broker()
+            and hasattr(_bs.get_execution_broker(), "get_killswitch_status")
+            else {
+                "status": "UNAVAILABLE",
+                "message": "Execution broker does not support killswitch status",
+            }
+        ),
+    )
+
+    def _calculate_span_margin(orders: list[dict]) -> dict:
+        brk = _bs.get_execution_broker() or _bs.get_data_broker()
+        if brk and hasattr(brk, "calculate_span_margin"):
+            return brk.calculate_span_margin(orders)
+        return {
+            "status": "UNAVAILABLE",
+            "message": "Active broker does not support SPAN margin calculation",
+        }
+
+    reg.register(
+        name="calculate_span_margin",
+        description=(
+            "Calculate combined F&O SPAN, exposure margin, and multi-leg hedge benefit "
+            "via FYERS SPAN Margin API (up to 20 derivative contracts)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "orders": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "List of F&O legs with symbol, qty, side (BUY/SELL), product_type",
+                },
+            },
+            "required": ["orders"],
+        },
+        fn=_calculate_span_margin,
+    )
+
     # ── Tag all registered tools as read-only + concurrency-safe ──
     # Every tool in the base registry is a read/analyse tool — none place orders.
     # Destructive tools (execute_trade) are added separately by the harness.

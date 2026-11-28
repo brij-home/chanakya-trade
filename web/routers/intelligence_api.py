@@ -497,6 +497,101 @@ async def skill_register_explosive_move(req: RegisterExplosiveMoveRequest):
         raise _err(str(e))
 
 
+@router.get("/quant/armed-radar")
+async def get_quant_armed_radar(stage: Optional[str] = None):
+    """Return current WATCH / ARMED / TRIGGERED causal level staging radar."""
+    try:
+        from engine.level_state_machine import armed_radar
+
+        items = armed_radar.snapshot(stage_filter=stage)
+        return _ok({"count": len(items), "stage_filter": stage, "items": items})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/tournament")
+async def get_quant_tournament_report():
+    """Return latest persisted Purged Walk-Forward Detector Ablation Tournament report."""
+    try:
+        from engine.detector_tournament import load_tournament_report
+
+        report = await asyncio.to_thread(load_tournament_report)
+        return _ok(report)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/iv-surface/{symbol}")
+async def get_quant_iv_surface(symbol: str):
+    """Return constant-tenor 7D/30D IV surface, 25D skew & VRP from archived option chains."""
+    try:
+        from engine.iv_surface import build_iv_surface_from_warehouse
+
+        snap = await asyncio.to_thread(build_iv_surface_from_warehouse, symbol, persist=False)
+        return _ok(snap.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/cas-regime/{symbol}")
+async def get_quant_cas_regime(symbol: str, is_expiry: bool = False, spot: float = 0.0):
+    """Return effective-dated Dec-7 CAS dispersion window & close schedule diagnostics."""
+    try:
+        from engine.cas_dispersion import assess_cas_dispersion_regime
+
+        res = await asyncio.to_thread(
+            assess_cas_dispersion_regime, symbol, spot=spot, is_expiry=is_expiry
+        )
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/meta-labeler")
+async def get_quant_meta_labeler_status():
+    """Return Purged Meta-Model calibration status & Forward-Path vs Fill telemetry separation."""
+    try:
+        from engine.meta_labeler import load_meta_model, stage_telemetry_store
+
+        model = await asyncio.to_thread(load_meta_model)
+        tel = await asyncio.to_thread(stage_telemetry_store.summary)
+        return _ok(
+            {
+                "model_status": model.status if model else "UNCALIBRATED",
+                "model": model.to_dict() if model else None,
+                "stage_telemetry": tel,
+            }
+        )
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/eod-5w-postmortem")
+async def get_quant_eod_5w_postmortem():
+    """Return EOD 5W Post-Mortem synthesis across persisted session alerts."""
+    try:
+        from agent.async_catalyst_and_postmortem import synthesize_eod_5w_postmortem
+        from engine.auto_alert_engine import auto_alert_engine
+
+        alerts = list(auto_alert_engine.get_alerts(limit=300) or [])
+        report = await asyncio.to_thread(synthesize_eod_5w_postmortem, alerts)
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/quant/readiness")
+async def get_quant_operational_readiness():
+    """Return honest end-to-end calibration, feed, and qualification readiness audit."""
+    try:
+        from engine.operational_readiness import audit_operational_readiness
+
+        report = await asyncio.to_thread(audit_operational_readiness, max_cache_sec=15.0)
+        return _ok(report)
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.get("/terminal/target_setup")
 @router.post("/terminal/target_setup")
 async def skill_terminal_target_setup(symbol: str = "NIFTY", timeframe: str = "15m"):
@@ -583,5 +678,20 @@ async def skill_terminal_target_setup(symbol: str = "NIFTY", timeframe: str = "1
                 "target_1": target_1,
             }
         )
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/analytics/expectancy")
+async def skill_signal_expectancy(include_test: bool = False):
+    """Return read-only post-cost walk-forward expectancy segmented by detector/session/RVOL."""
+    try:
+        from engine.signal_expectancy import compute_signal_expectancy_report
+
+        report = await asyncio.to_thread(
+            compute_signal_expectancy_report,
+            include_test=include_test,
+        )
+        return _ok(report)
     except Exception as e:
         raise _err(str(e))

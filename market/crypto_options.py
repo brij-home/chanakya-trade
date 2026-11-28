@@ -41,6 +41,8 @@ DERIBIT_BOOK_SUMMARY_URL = "https://www.deribit.com/api/v2/public/get_book_summa
 _OPTIONS_CACHE_LOCK = threading.Lock()
 _OPTIONS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _OPTIONS_CACHE_TTL = 60.0  # 60s cache
+_OPTIONS_ERROR_COOLDOWN_TTL = 120.0  # Negative cache for transient 503/429 upstream maintenance
+_OPTIONS_ERROR_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 @dataclass
@@ -237,18 +239,39 @@ def get_crypto_options_summary(
             cached_ts, cached_data = _OPTIONS_CACHE[curr]
             if now_ts - cached_ts < _OPTIONS_CACHE_TTL:
                 return cached_data
+        if curr in _OPTIONS_ERROR_CACHE:
+            err_ts, err_payload = _OPTIONS_ERROR_CACHE[curr]
+            if now_ts - err_ts < _OPTIONS_ERROR_COOLDOWN_TTL:
+                return err_payload
 
     params = {"currency": curr, "kind": "option"}
     try:
         client = get_shared_client()
         resp = client.get(DERIBIT_BOOK_SUMMARY_URL, params=params, timeout=8.0)
         if resp.status_code != 200:
-            logger.warning(f"Deribit options API returned {resp.status_code}: {resp.text[:200]}")
-            return {"status": "UNAVAILABLE", "currency": curr, "error": f"HTTP {resp.status_code}"}
+            err_payload = {
+                "status": "UNAVAILABLE",
+                "currency": curr,
+                "error": f"HTTP {resp.status_code}",
+            }
+            if resp.status_code in (429, 502, 503, 504):
+                logger.info(
+                    f"Deribit options API maintenance/throttle {resp.status_code} (cooldown {_OPTIONS_ERROR_COOLDOWN_TTL:.0f}s): {resp.text[:200]}"
+                )
+                with _OPTIONS_CACHE_LOCK:
+                    _OPTIONS_ERROR_CACHE[curr] = (time.time(), err_payload)
+            else:
+                logger.warning(
+                    f"Deribit options API returned {resp.status_code}: {resp.text[:200]}"
+                )
+            return err_payload
         raw_data = resp.json().get("result", [])
     except Exception as e:
-        logger.error(f"Failed to fetch Deribit options for {curr}: {e}")
-        return {"status": "UNAVAILABLE", "currency": curr, "error": str(e)}
+        logger.info(f"Failed to fetch Deribit options for {curr}: {e}")
+        err_payload = {"status": "UNAVAILABLE", "currency": curr, "error": str(e)}
+        with _OPTIONS_CACHE_LOCK:
+            _OPTIONS_ERROR_CACHE[curr] = (time.time(), err_payload)
+        return err_payload
 
     if not raw_data:
         return {"status": "NO_DATA", "currency": curr, "contracts_count": 0}

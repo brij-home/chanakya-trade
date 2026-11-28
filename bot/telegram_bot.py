@@ -1942,6 +1942,58 @@ async def cmd_asymmetric(update, context) -> None:
         await update.message.reply_text(f"Asymmetric scan failed: {e}")
 
 
+async def cmd_quantradar(update, context) -> None:
+    """Display causal WATCH -> ARMED -> TRIGGERED staging radar snapshot."""
+    msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if not msg:
+        return
+    try:
+        from engine.level_state_machine import armed_radar
+
+        items = armed_radar.snapshot()
+        if not items:
+            await msg.reply_text(
+                "🎯 <b>Quant Armed Radar:</b> No active staged levels right now.", parse_mode="HTML"
+            )
+            return
+        lines = [f"🎯 <b>Quant Armed Radar ({len(items)} staged)</b>"]
+        for it in items[:12]:
+            lines.append(
+                f"• <b>{it['symbol']}</b> [{it['stage']}] {it['direction']} @ {it['anchor_name']} "
+                f"({it['anchor_price']}) | {it['distance_atr']} ATR"
+            )
+        await msg.reply_text("\n".join(lines), parse_mode="HTML")
+    except Exception as exc:
+        await msg.reply_text(f"Quant radar check failed: {exc}")
+
+
+async def cmd_readiness(update, context) -> None:
+    """Display honest runtime calibration, feed capability & qualification blockers."""
+    msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if not msg:
+        return
+    try:
+        from engine.operational_readiness import audit_operational_readiness
+
+        rep = audit_operational_readiness(check_warehouse_bars=False)
+        saf = rep["execution_safety"]
+        cal = rep["calibration_and_research"]
+        gaps = rep.get("open_gaps", [])
+        lines = [
+            "🛡️ <b>Operational Readiness & Qualification Audit</b>",
+            f"• Mode: <code>{saf['trading_mode']}</code> | Live Blocked: <code>{saf['live_orders_blocked']}</code>",
+            f"• Scope: <code>{rep['discovery_policy']['profile']}</code> | Token Fresh: <code>{rep['broker_and_feed']['fyers_token'].get('fresh_since_0630_ist')}</code>",
+            f"• Tournament: <code>{cal['tournament_status']}</code> | Meta-Model: <code>{cal['meta_model_status']}</code> ({cal['meta_model_samples']} samples)",
+            f"• IV Rank Ready: <code>{cal['iv_rank_ready']}</code>",
+        ]
+        if gaps:
+            lines.append("<b>Open Gates:</b>")
+            lines.extend(f"  - {g}" for g in gaps[:5])
+        await msg.reply_text("\n".join(lines), parse_mode="HTML")
+    except Exception as exc:
+        await msg.reply_text(f"Readiness check failed: {exc}")
+
+
 async def cmd_unknown(update, context) -> None:
     """Handle unknown messages."""
     msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
@@ -3628,8 +3680,18 @@ def send_push(
                         f"[bot.telegram_bot] Non-fatal record_signal exception: {e_suppressed}"
                     )
 
+            def _post_with_transient_retry(req_payload: dict[str, Any], req_timeout: float = 12.0):
+                try:
+                    return httpx.post(url, json=req_payload, timeout=req_timeout)
+                except (httpx.TimeoutException, httpx.ConnectError) as e_transient:
+                    logger.info(
+                        f"[TelegramPush] Transient network pause ({type(e_transient).__name__}) for chat {target_chat_id}; retrying once..."
+                    )
+                    time.sleep(0.8)
+                    return httpx.post(url, json=req_payload, timeout=req_timeout)
+
             # Stage 1: Attempt standard formatted dispatch
-            resp = httpx.post(url, json=payload, timeout=10)
+            resp = _post_with_transient_retry(payload, req_timeout=12.0)
             if resp.is_success:
                 _record_and_callback(resp.json())
                 return True
@@ -3721,7 +3783,7 @@ def send_push(
                 )
 
             if needs_adaptive_retry:
-                resp2 = httpx.post(url, json=adaptive_payload, timeout=10)
+                resp2 = _post_with_transient_retry(adaptive_payload, req_timeout=12.0)
                 if resp2.is_success:
                     logger.info(
                         f"[TelegramPush] Telegram adaptive retry succeeded for chat {target_chat_id}"
@@ -3751,7 +3813,7 @@ def send_push(
                     "text": barebones_text,
                 }
                 if barebones_payload != adaptive_payload:
-                    resp3 = httpx.post(url, json=barebones_payload, timeout=10)
+                    resp3 = _post_with_transient_retry(barebones_payload, req_timeout=12.0)
                     if resp3.is_success:
                         logger.info(
                             f"[TelegramPush] Telegram barebones fail-safe succeeded for chat {target_chat_id}"
@@ -3974,6 +4036,9 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("opps", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("radar", _track_command(cmd_scan)))
+    app.add_handler(CommandHandler("quantradar", _track_command(cmd_quantradar)))
+    app.add_handler(CommandHandler("armed", _track_command(cmd_quantradar)))
+    app.add_handler(CommandHandler("readiness", _track_command(cmd_readiness)))
     app.add_handler(CommandHandler("flows", _track_command(cmd_flows)))
     app.add_handler(CommandHandler("earnings", _track_command(cmd_earnings)))
     app.add_handler(CommandHandler("events", _track_command(cmd_events)))

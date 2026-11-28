@@ -14,10 +14,11 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 
 | Feature | Module | Purpose |
 | :--- | :--- | :--- |
-| **OAuth Callbacks** | [`web/auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py) | Redirect auth for Zerodha, Fyers, Upstox, Groww |
-| **REST APIs** | [`web/skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) | Portfolio, quotes, watchlist, market breadth, analysis |
-| **SSE Streaming** | [`web/sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py) | Live ticks, agent debate turns, trade notifications |
-| **OpenClaw** | [`web/openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py) | Tool manifests for external AI agents |
+| **OAuth & Security** | [`web/auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py) | OAuth redirects, `X-Sidecar-Token` local guard, `TrustedHostMiddleware`, session auth & CSRF |
+| **Domain Routers** | [`web/routers/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/routers) | Modular routers: `orders_api.py`, `market_data.py`, `options_desk_api.py`, `alerts_api.py`, `intelligence_api.py`, `macro_telemetry_api.py`, `crypto_api.py` |
+| **MCP Bridge** | [`web/mcp.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/mcp.py) | JSON-RPC 2.0 MCP server (`/api/mcp`, `/api/mcp/sse`, `stdio`) exposing read-only tools, prompts, and `chanakya://*` resources |
+| **OpenClaw Skills** | [`web/skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py), [`web/openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py) | `/skills/*` HTTP endpoints and `/.well-known/openclaw.json` manifest |
+| **SSE Streaming** | [`web/sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py) | Live ticks, order/trade updates, alerts, and agent debate turns |
 
 ---
 
@@ -28,7 +29,10 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 | `/` | `GET` | HTML broker login dashboard |
 | `/<broker>/login` | `GET` | Initiate OAuth flow |
 | `/<broker>/callback` | `GET` | Receive auth code/token from broker |
-| `/api/mode` | `GET` | Canonical server-authoritative mode (`DEMO`, `PAPER`, `LIVE`) + `discovery_policy` |
+| `/api/mode` | `GET` / `POST` | Canonical server-authoritative mode (`DEMO`, `PAPER`, `LIVE`) + `discovery_policy` (`POST` requires `X-Sidecar-Token` / session) |
+| `/api/discovery-policy` | `POST` | Switch validated discovery profile (`FNO_ONLY`, `FNO_PRIORITY`, `BALANCED`) |
+| `/api/mcp` | `GET` / `POST` | MCP server metadata and JSON-RPC 2.0 endpoint (read-only tools, prompts, `chanakya://*` resources) |
+| `/api/fyers/postback` | `POST` | HMAC-SHA256 verified Fyers webhook postback broadcasting SSE + reconciling `apply_fyers_stream_order_update()` |
 | `/api/system/health-hub` | `GET` | OpsDeck health hub (circuit breaker, RateGate, 50D TBT slots, `broker_failover`, `code_provenance`) |
 | `/api/fyers/margin-check` | `GET` / `POST` | Rate-gated Fyers Multi-Order SPAN margin + Apr-2026 statutory charges preflight |
 | `/api/reconciliation` | `GET` | Live broker vs internal ledger reconciliation (`UNAVAILABLE` if disconnected) |

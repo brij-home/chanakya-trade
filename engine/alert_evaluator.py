@@ -246,7 +246,7 @@ def evaluate_alert_invalidation(
                 "BREAKEVEN_LOCKED",
             )
         )
-        if elapsed_sec >= 2700 and not has_hit_any_target:
+        if elapsed_sec >= 1800 and not has_hit_any_target:
             ref_entry = float(
                 getattr(alert, "initial_entry_premium", None)
                 or getattr(alert, "entry_price", None)
@@ -284,15 +284,36 @@ def evaluate_alert_invalidation(
                     )
                     if max_gain_pct < 12.0:
                         rvol = float((getattr(alert, "metrics", {}) or {}).get("rvol", 1.0) or 1.0)
-                        is_afternoon_decay = (
-                            now_ist.hour >= 13 or elapsed_sec >= 3600 or rvol < 0.90
+                        drawdown_pct = ((ref_entry - current_ltp) / ref_entry) * 100.0
+                        # Adaptive Time-Stop:
+                        # 1. Fast cut at 30m+ if fading >= 8% on dead volume (rvol < 0.75)
+                        # 2. Grace extension to 75m in morning (<13:00 IST) if rvol >= 1.25 and drawdown <= 4%
+                        # 3. Standard 45m check otherwise
+                        is_dead_fade = not is_opt_sell and drawdown_pct >= 8.0 and rvol < 0.75
+                        is_morning_healthy_coil = (
+                            now_ist.hour < 13
+                            and rvol >= 1.25
+                            and drawdown_pct <= 4.0
+                            and elapsed_sec < 4500
                         )
-                        if is_afternoon_decay:
-                            mins_stalled = int(elapsed_sec / 60)
-                            return (
-                                f"Velocity Stagnation Time-Stop: Option momentum stalled for {mins_stalled}m "
-                                f"without reaching +0.5R expansion. Exited at scratch level ₹{current_ltp:.1f} to prevent theta decay."
+                        if (is_dead_fade or elapsed_sec >= 2700) and not is_morning_healthy_coil:
+                            is_afternoon_decay = (
+                                now_ist.hour >= 13
+                                or elapsed_sec >= 3600
+                                or rvol < 0.90
+                                or is_dead_fade
                             )
+                            if is_afternoon_decay:
+                                mins_stalled = int(elapsed_sec / 60)
+                                exit_mode_desc = (
+                                    f"near scratch level ₹{current_ltp:.1f}"
+                                    if abs(drawdown_pct) <= 3.0
+                                    else f"at early cut CMP ₹{current_ltp:.1f} (-{drawdown_pct:.1f}%)"
+                                )
+                                return (
+                                    f"Velocity Stagnation Time-Stop: Option momentum stalled for {mins_stalled}m "
+                                    f"without reaching +0.5R expansion. Exited {exit_mode_desc} to prevent theta decay."
+                                )
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -478,9 +499,11 @@ def evaluate_alert_invalidation(
 
                 init_sl_val = getattr(alert, "initial_stop_loss", None)
                 is_ratcheted = (
-                    (init_sl_val is not None and alert.stop_loss > init_sl_val + 0.05)
+                    (opt_entry > 0 and alert.stop_loss >= opt_entry - 0.5)
                     or (
-                        init_sl_val is None and opt_entry > 0 and alert.stop_loss >= opt_entry - 0.5
+                        has_hit_target
+                        and init_sl_val is not None
+                        and alert.stop_loss > init_sl_val + 0.05
                     )
                     or has_hit_target
                 )

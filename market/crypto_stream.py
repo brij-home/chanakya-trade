@@ -349,9 +349,9 @@ class CryptoStreamManager:
                 next_endpoint_host = BINANCE_WS_ENDPOINTS[
                     endpoint_idx % len(BINANCE_WS_ENDPOINTS)
                 ].split("/stream")[0]
-                if backoff <= 1.0:
+                if backoff < 30.0:
                     logger.info(
-                        f"CryptoStreamManager: WS connection recycled ({e}), reconnecting in {backoff:.1f}s via {next_endpoint_host}..."
+                        f"CryptoStreamManager: WS handshake retry ({e}), reconnecting in {backoff:.1f}s via {next_endpoint_host}..."
                     )
                 else:
                     logger.warning(

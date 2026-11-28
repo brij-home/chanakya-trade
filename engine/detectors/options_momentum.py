@@ -94,7 +94,10 @@ def detect_options_momentum_breakouts(
     is_opening_freeze = now_dt.hour == 9 and now_dt.minute < 25
     is_opening_drive = now_dt.hour == 9 and (25 <= now_dt.minute <= 45)
     is_midday_lull = (
-        (now_dt.hour == 11) or (now_dt.hour == 12) or (now_dt.hour == 13 and now_dt.minute <= 15)
+        (now_dt.hour == 10 and now_dt.minute >= 30)
+        or (now_dt.hour == 11)
+        or (now_dt.hour == 12)
+        or (now_dt.hour == 13 and now_dt.minute <= 15)
     )
     is_late_session_theta = now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 45)
 
@@ -196,7 +199,10 @@ def detect_options_momentum_breakouts(
                 "SENSEX",
                 "BANKEX",
             )
-            alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
+            from market.instruments import COMMODITY_SYMBOLS
+
+            is_comm = clean_sym in COMMODITY_SYMBOLS or exch == "MCX"
+            alert_segment = "FNO_INDEX" if is_idx else ("COMMODITY" if is_comm else "FNO_STOCK")
 
             # ── STAGE 1: SPOT MOVEMENT & OPENING DRIVE PRE-FILTER ──
             # For single-stock F&O, skip cash equities and skip inactive stocks with 0 momentum.
@@ -222,11 +228,11 @@ def detect_options_momentum_breakouts(
                         is_bull_drive = True  # Open = Low Bullish Institutional Sweep
 
                 is_vwap_displaced = bool(
-                    spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005
+                    spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.0035
                 )
                 is_momentum_active = bool(
-                    abs(spot_change_pct) >= 0.50
-                    or (spot_open > 0 and abs(spot - spot_open) / spot_open >= 0.005)
+                    abs(spot_change_pct) >= 0.35
+                    or (spot_open > 0 and abs(spot - spot_open) / spot_open >= 0.0035)
                 )
 
                 if not is_test_env and not (
@@ -272,36 +278,64 @@ def detect_options_momentum_breakouts(
         spot_chg = float(t.get("spot_change_pct", 0.0) or 0.0)
         base_chg = abs(spot_chg)
         clean_s = t.get("clean_sym", "")
-        # Sweet-spot inflection scoring: favor early 0.55%-2.2% breakouts near VWAP over already-stretched >3% chases
-        if base_chg <= 2.2:
+        # Prioritize active institutional movers (0.5% - 4.5%) monotonically; only dampen extreme >5.5% exhaustion
+        if base_chg <= 4.5:
             move_score = base_chg
+        elif base_chg <= 5.5:
+            move_score = 4.5
         else:
-            move_score = max(0.8, 2.2 - (base_chg - 2.2) * 0.4)
+            move_score = max(2.0, 4.5 - (base_chg - 5.5) * 0.4)
         spot_p = float(t.get("spot", 0.0) or 0.0)
         vwap_p = float(t.get("spot_vwap", 0.0) or 0.0)
         if spot_p > 0 and vwap_p > 0:
             vw_dist_pct = abs(spot_p - vwap_p) / vwap_p * 100.0
             if (
                 (spot_chg > 0 and spot_p >= vwap_p) or (spot_chg < 0 and spot_p <= vwap_p)
-            ) and vw_dist_pct <= 1.2:
+            ) and vw_dist_pct <= 1.5:
                 move_score *= 1.15
-            elif vw_dist_pct > 2.5:
-                move_score *= 0.75
+            elif vw_dist_pct > 3.5:
+                move_score *= 0.80
         multiplier = 1.0
-        # Bidirectional sector boost:
+        # Bidirectional sector boost (daily RRG + live intraday sector rotation):
         # Long side: Positive move + Bullish sector confluence
         # Short side: Negative move + Bearish sector breakdown confluence
         if spot_chg > 0 and clean_s in bullish_sector_syms:
             multiplier = 1.25
         elif spot_chg < 0 and clean_s in bearish_sector_syms:
             multiplier = 1.25
+        sec_breadth = intraday_sector_avg.get(stock_sector_map.get(clean_s, ""), 0.0)
+        if spot_chg > 0 and sec_breadth >= 1.2:
+            multiplier *= 1.20
+        elif spot_chg < 0 and sec_breadth <= -1.2:
+            multiplier *= 1.20
         return move_score * multiplier
+
+    # Zero-REST intraday sector breadth calculation from already-fetched active_targets
+    stock_sector_map: dict[str, str] = {}
+    sector_changes: dict[str, list[float]] = {}
+    try:
+        from analysis.universe import get_stock_sector
+
+        for _t in active_targets:
+            if not _t.get("is_idx"):
+                _cs = _t.get("clean_sym", "")
+                _sid, _ = get_stock_sector(_cs)
+                if _sid and _sid != "index":
+                    stock_sector_map[_cs] = _sid
+                    sector_changes.setdefault(_sid, []).append(
+                        float(_t.get("spot_change_pct", 0.0) or 0.0)
+                    )
+    except Exception as e_sec:
+        logger.debug(f"[options_momentum] Sector baseline map skipped: {e_sec}")
+    intraday_sector_avg: dict[str, float] = {
+        k: (sum(v) / len(v)) for k, v in sector_changes.items() if len(v) >= 2
+    }
 
     idx_targets = [t for t in active_targets if t["is_idx"]]
     eq_targets = [t for t in active_targets if not t["is_idx"]]
     eq_targets.sort(key=_eq_priority_score, reverse=True)
-    has_active_sectors = bool(bullish_sector_syms or bearish_sector_syms)
-    eq_limit = 15 if has_active_sectors else 10
+    has_active_sectors = bool(bullish_sector_syms or bearish_sector_syms or intraday_sector_avg)
+    eq_limit = 65 if has_active_sectors else 40
     active_targets = idx_targets + eq_targets[:eq_limit]
 
     def _eval_sym(sym_info: dict[str, Any]) -> Optional[tuple[float, AutoAlert]]:
@@ -320,6 +354,9 @@ def detect_options_momentum_breakouts(
         spot_high = sym_info.get("spot_high", 0.0)
         spot_vwap = sym_info["spot_vwap"]
         is_idx = sym_info["is_idx"]
+        from market.instruments import COMMODITY_SYMBOLS
+
+        is_comm = clean_sym in COMMODITY_SYMBOLS or exch == "MCX"
         alert_segment = sym_info["alert_segment"]
         is_bear_drive = sym_info["is_bear_drive"]
         is_bull_drive = sym_info["is_bull_drive"]
@@ -332,7 +369,7 @@ def detect_options_momentum_breakouts(
             # series to reduce near-month physical settlement and expiry risk.
             chain = None
             is_next_month_routed = False
-            if not is_idx:
+            if not is_idx and not is_comm:
                 try:
                     from engine.alert_expiry import (
                         is_monthly_physical_expiry_week,
@@ -537,6 +574,43 @@ def detect_options_momentum_breakouts(
                 except Exception:
                     spot_vwap = spot_vwap or 0.0
 
+            spot_rvol: float = 0.0
+            spot_atr: Optional[float] = None
+            if df_5m is not None and len(df_5m) >= 5:
+                try:
+                    _col_v = (
+                        "volume"
+                        if "volume" in df_5m.columns
+                        else ("Volume" if "Volume" in df_5m.columns else None)
+                    )
+                    if _col_v:
+                        _vols = df_5m[_col_v].astype(float)
+                        _last_v = float(_vols.iloc[-1] or 0.0)
+                        _med_v = float(_vols.iloc[:-1].median() or 0.0)
+                        if _med_v > 0 and _last_v > 0:
+                            spot_rvol = round(min(15.0, _last_v / _med_v), 2)
+                except Exception:
+                    spot_rvol = 0.0
+
+                try:
+                    _col_h = "high" if "high" in df_5m.columns else "High"
+                    _col_l = "low" if "low" in df_5m.columns else "Low"
+                    _col_c = "close" if "close" in df_5m.columns else "Close"
+                    _h_s = df_5m[_col_h].astype(float)
+                    _l_s = df_5m[_col_l].astype(float)
+                    _c_s = df_5m[_col_c].astype(float)
+                    _prev_c = _c_s.shift(1).fillna(_c_s)
+                    _tr = (
+                        (_h_s - _l_s)
+                        .combine((_h_s - _prev_c).abs(), max)
+                        .combine((_l_s - _prev_c).abs(), max)
+                    )
+                    _avg_5m_tr = float(_tr.tail(min(14, len(_tr))).mean() or 0.0)
+                    if _avg_5m_tr > 0:
+                        spot_atr = round(_avg_5m_tr * float(np.sqrt(75.0)), 2)
+                except Exception:
+                    spot_atr = None
+
             upper_wick_ratio = 0.0
             lower_wick_ratio = 0.0
             candle_range = 0.0
@@ -691,7 +765,7 @@ def detect_options_momentum_breakouts(
                         continue
 
                 is_physical_expiry_week = False
-                if not is_idx and expiry_date:
+                if not is_idx and not is_comm and expiry_date:
                     try:
                         from engine.alert_expiry import is_monthly_physical_expiry_week
 
@@ -1076,6 +1150,22 @@ def detect_options_momentum_breakouts(
                             continue
 
                 # 3. Theta Drag & Stagnation Defense (Midday Lull 11:15–13:15, Low VIX < 14.0, or Late Session post-14:45 IST)
+                # Enforce minimum 20-minute runway before canonical derivative squareoff cutoff (eliminates 15:03-15:12 EOD traps)
+                from market.rule_schedule import intraday_squareoff_cutoff as _om_sq_cutoff
+
+                _sq_t_om = _om_sq_cutoff(
+                    now_dt.date(), is_derivative=True, expiring_index=bool(is_idx and is_0dte)
+                )
+                _sq_mins = _sq_t_om.hour * 60 + _sq_t_om.minute
+                _cutoff_mins = _sq_mins - 20  # e.g. 14:55 IST pre-Dec 7; 15:10 IST post-Dec 7
+                _now_mins = now_dt.hour * 60 + now_dt.minute
+                if not is_test_env and _now_mins > _cutoff_mins:
+                    logger.debug(
+                        f"[OptionsBreakout] Suppressed {clean_sym} at {now_dt.strftime('%H:%M')} IST: "
+                        f"<20m runway before {_sq_t_om.strftime('%H:%M')} IST square-off cutoff"
+                    )
+                    continue
+
                 # Route single-stock options to defined-risk spreads (Bull Call / Bear Put Spread) to neutralize theta burn
                 mandate_spread_afternoon = False
                 if not is_idx:
@@ -1083,24 +1173,8 @@ def detect_options_momentum_breakouts(
                     if (
                         is_midday_lull or is_late_session_theta or is_low_vix_stock
                     ) and not is_next_month_routed:
-                        if (
-                            not is_test_env
-                            and now_dt.time() > datetime.strptime("15:08", "%H:%M").time()
-                        ):
-                            logger.debug(
-                                f"[OptionsBreakout] Suppressed {clean_sym} post-15:08 IST: terminal session runway"
-                            )
-                            continue
                         mandate_spread_afternoon = True
                 elif is_late_session_theta and not is_next_month_routed:
-                    if (
-                        not is_test_env
-                        and now_dt.time() > datetime.strptime("15:08", "%H:%M").time()
-                    ):
-                        logger.debug(
-                            f"[OptionsBreakout] Suppressed {clean_sym} post-15:08 IST: terminal session runway"
-                        )
-                        continue
                     mandate_spread_afternoon = True
 
                 # Institutional Sector Support Gate ("A rising tide lifts all boats")
@@ -1189,11 +1263,20 @@ def detect_options_momentum_breakouts(
                         or (is_decoupler and spot_change_pct and spot_change_pct > 0)
                     )
                     is_strong_markdown = nifty_change is not None and nifty_change <= -0.60
+                    has_intraday_rs_decouple = bool(
+                        (
+                            tailwind
+                            and float(getattr(tailwind, "intraday_rs", 0.0) or 0.0) >= 0.50
+                            and spot_change_pct is not None
+                            and spot_change_pct >= 2.0
+                            and (not spot_vwap or spot >= spot_vwap)
+                        )
+                    )
                     if is_strong_markdown:
                         if not (
                             is_extreme_catalyst
-                            or (sector_tailwind_bonus > 0 and has_stock_thrust)
-                            or (is_defensive and has_stock_thrust)
+                            or has_intraday_rs_decouple
+                            or (is_defensive and has_stock_thrust and spot_change_pct >= 2.0)
                         ):
                             logger.debug(
                                 f"[OptionsBreakout] Suppressed counter-trend Call on {clean_sym}: NIFTY markdown ({nifty_change:.2f}%)"
@@ -1201,10 +1284,12 @@ def detect_options_momentum_breakouts(
                             continue
                     elif not (
                         is_defensive
-                        or is_thematic
                         or sector_tailwind_bonus > 0
                         or is_extreme_catalyst
-                        or has_stock_thrust
+                        or (
+                            has_stock_thrust
+                            and not (is_nifty_markdown and spot_vwap and spot < spot_vwap)
+                        )
                     ):
                         logger.debug(
                             f"[OptionsBreakout] Suppressed Call breakout on {clean_sym}: NIFTY in markdown ({nifty_change:.2f}%)"
@@ -1522,7 +1607,7 @@ def detect_options_momentum_breakouts(
                             vwap=spot_vwap or 0.0,
                             vol_oi_ratio=float(vol_oi or 0.0),
                             iv_val=float(vix_val) if vix_val is not None else None,
-                            rvol_val=1.0,
+                            rvol_val=spot_rvol if spot_rvol > 0 else 1.0,
                         )
                         if (
                             not is_test_env
@@ -1575,19 +1660,23 @@ def detect_options_momentum_breakouts(
                             f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}"
                         )
 
-                # 2b. Midday Lull Multi-Factor Confluence Filter (11:00 - 13:15 IST):
-                # Require genuine structural confluence during midday chop (eliminates low-quality time-stops)
+                # 2b. Midday Lull Multi-Factor Confluence Filter (10:30 - 13:15 IST):
+                # Require genuine structural confluence + volume participation during midday chop
                 if not is_test_env and is_midday_lull and not is_extreme_catalyst:
-                    has_midday_confluence = bool(
+                    has_midday_structure = bool(
                         mtf_15m_trend == direction
                         or sector_tailwind_bonus > 0
                         or flow_bonus >= 8
                         or is_confirmed
                         or vp_bonus >= 5
                     )
-                    if not has_midday_confluence:
+                    has_midday_volume = bool(
+                        (spot_rvol >= 1.25) or (spot_rvol <= 0 and vol_oi >= 2.2)
+                    )
+                    if not (has_midday_structure and has_midday_volume):
                         logger.debug(
-                            f"[OptionsBreakout] Suppressed {clean_sym} {opt_type} during midday chop (11:00-13:15 IST): lacks multi-factor confluence"
+                            f"[OptionsBreakout] Suppressed {clean_sym} {opt_type} during midday chop (10:30-13:15 IST): "
+                            f"structure={has_midday_structure}, vol={has_midday_volume} (rvol={spot_rvol}, vol_oi={vol_oi})"
                         )
                         continue
 
@@ -1612,7 +1701,7 @@ def detect_options_momentum_breakouts(
                         calculate_option_execution_plan,
                     )
 
-                    opt_exchange = "BFO" if exch == "BSE" else "NFO"
+                    opt_exchange = "MCX" if is_comm else ("BFO" if exch == "BSE" else "NFO")
                     tp = calculate_trade_plan(
                         symbol=clean_sym,
                         direction="BUY" if opt_type == "CE" else "SELL",
@@ -1697,6 +1786,29 @@ def detect_options_momentum_breakouts(
                     if opt_t0_5 >= opt_t1:
                         opt_t0_5 = round(opt_ltp + (0.8 * opt_risk), 2)
                     rr_str = f"1:{round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)}"
+
+                    # Sync calibrated targets back into opt_plan & free_roll_plan (SSOT: no T2/T3 drift)
+                    opt_plan["sl_premium"] = opt_sl
+                    opt_plan["t0_5_premium"] = opt_t0_5
+                    opt_plan["t1_premium"] = opt_t1
+                    opt_plan["t2_premium"] = opt_t2
+                    opt_plan["t3_premium"] = opt_moonshot
+                    fr_plan = opt_plan.get("free_roll_plan")
+                    if isinstance(fr_plan, dict):
+                        be_stop = float(fr_plan.get("breakeven_stop") or round(opt_ltp * 1.002, 2))
+                        ts_mins = int(
+                            fr_plan.get("time_stop_minutes") or (25 if is_index_sym else 35)
+                        )
+                        fr_plan["t1_target_premium"] = opt_t1
+                        fr_plan["runner_target_2"] = opt_t2
+                        fr_plan["runner_target_3"] = opt_moonshot
+                        fr_plan["protocol_summary"] = (
+                            f"Multi-lot: Bank 50% at T1, ratchet SL to Cost (₹{be_stop:,.1f}) | "
+                            f"1-lot: Ratchet SL to Breakeven & hold for T2. "
+                            f"Time stop: {ts_mins}m if stagnation occurs. "
+                            f"Net trade risk becomes ₹0.00 (Free-Roll). "
+                            f"Hold remaining 50% for T2 (₹{opt_t2:,.1f}) and T3 (₹{opt_moonshot:,.1f})."
+                        )
                 else:
                     risk_pts = round(max(0.20, min(max_allowed_risk, opt_ltp - 0.05)), 2)
                     opt_risk = risk_pts
@@ -1707,6 +1819,58 @@ def detect_options_momentum_breakouts(
                     opt_moonshot = round(opt_ltp + (4.5 * risk_pts), 2)
                     rr_val = round((opt_t1 - opt_ltp) / max(0.01, risk_pts), 1)
                     rr_str = f"1:{rr_val}"
+
+                _adr_cal = None
+                try:
+                    from engine.option_target_calibration import compute_option_adr_headroom_targets
+
+                    _iv_hint = (vix_val / 100.0) if (vix_val and vix_val > 0) else 0.20
+                    _adr_cal = compute_option_adr_headroom_targets(
+                        spot=spot,
+                        opt_ltp=opt_ltp,
+                        opt_sl=opt_sl,
+                        raw_t1=opt_t1,
+                        option_type=opt_type,
+                        strike=strike,
+                        dte_days=om_dte_days,
+                        iv=_iv_hint,
+                        spot_atr=spot_atr,
+                        day_high=spot_high if spot_high > 0 else None,
+                        day_low=spot_low if spot_low > 0 else None,
+                        now_dt=now_dt,
+                        segment=alert_segment,
+                        min_rr=1.25,
+                    )
+                    if _adr_cal.was_adr_capped:
+                        opt_t1 = _adr_cal.calibrated_t1
+                        opt_t2 = max(opt_t1 + opt_risk * 0.75, min(opt_t2, _adr_cal.calibrated_t2))
+                        opt_moonshot = max(
+                            opt_t2 + opt_risk * 0.95, min(opt_moonshot, _adr_cal.calibrated_t3)
+                        )
+                        opt_t2 = round(opt_t2, 2)
+                        opt_moonshot = round(opt_moonshot, 2)
+                        if opt_t0_5 >= opt_t1:
+                            opt_t0_5 = round(opt_ltp + ((opt_t1 - opt_ltp) * 0.5), 2)
+                        rr_str = f"1:{round((opt_t1 - opt_ltp) / max(0.01, opt_ltp - opt_sl), 1)}"
+                        if isinstance(opt_plan, dict):
+                            opt_plan["t0_5_premium"] = opt_t0_5
+                            opt_plan["t1_premium"] = opt_t1
+                            opt_plan["t2_premium"] = opt_t2
+                            opt_plan["t3_premium"] = opt_moonshot
+                            _fr_p = opt_plan.get("free_roll_plan")
+                            if isinstance(_fr_p, dict):
+                                _fr_p["t1_target_premium"] = opt_t1
+                                _fr_p["runner_target_2"] = opt_t2
+                                _fr_p["runner_target_3"] = opt_moonshot
+                    if not is_test_env and not _adr_cal.viable_rr:
+                        logger.debug(
+                            f"[OptionsBreakout] Rejected {contract_sym}: ADR-calibrated R:R {_adr_cal.calibrated_rr:.2f} < 1.25"
+                        )
+                        continue
+                except Exception as _e_adr:
+                    logger.debug(
+                        f"[OptionsBreakout] ADR target calibration skipped for {contract_sym}: {_e_adr}"
+                    )
 
                 friday_tag = (
                     " ⚠️ FRIDAY POST-14:30: Weekend theta decay risk; Intraday Quick Scalp only (Square off by 15:20 IST) or trade Bull Call Spread."
@@ -1821,6 +1985,11 @@ def detect_options_momentum_breakouts(
                 conf_score += flow_bonus
 
                 confidence = min(96, max(50, conf_score))
+                if not is_test_env and confidence < 60 and vol_oi < 2.2:
+                    logger.debug(
+                        f"[OptionsBreakout] Suppressed low-confluence setup {contract_sym}: confidence={confidence}, vol_oi={vol_oi}"
+                    )
+                    continue
 
                 best_bid = float(getattr(c, "best_bid", 0.0) or getattr(c, "bid", 0.0) or 0.0)
                 best_ask = float(getattr(c, "best_ask", 0.0) or getattr(c, "ask", 0.0) or 0.0)
@@ -1879,6 +2048,32 @@ def detect_options_momentum_breakouts(
                     midpoint_price = round((best_bid + best_ask) / 2.0, 2)
                     if sfr >= 3.0:
                         is_wide_spread = True
+
+                _fric_eval = None
+                try:
+                    from engine.option_target_calibration import evaluate_option_friction_viability
+
+                    _fric_eval = evaluate_option_friction_viability(
+                        entry_price=opt_ltp,
+                        target_1=opt_t1,
+                        stop_loss=opt_sl,
+                        quantity=lot_sz,
+                        bid=best_bid,
+                        ask=best_ask,
+                        segment=("COMMODITY" if is_comm else "OPTIONS"),
+                        max_spread_pct=(5.5 if is_idx else 4.5),
+                        max_friction_drag_pct=28.0,
+                        min_net_rr=1.05,
+                    )
+                    if not is_test_env and not _fric_eval["viable"]:
+                        logger.debug(
+                            f"[OptionsBreakout] Rejected {contract_sym} pre-creation on friction/liquidity: {_fric_eval['reason']}"
+                        )
+                        continue
+                except Exception as _e_fric_om:
+                    logger.debug(
+                        f"[OptionsBreakout] Friction check skipped for {contract_sym}: {_e_fric_om}"
+                    )
 
                 ote_lower = round(max(0.05, opt_ltp * 0.94), 1)
                 ote_upper = round(opt_ltp * 1.01, 1)
@@ -1976,7 +2171,13 @@ def detect_options_momentum_breakouts(
                         now_dt=now_dt,
                         vel_score=conf_score,
                         asymmetric_r_r=True,
+                        expiry_date=str(expiry_date) if expiry_date else None,
+                        target_level=tp.target_1 if tp else None,
                     )
+                    if mandate_spread_afternoon and isinstance(hedge_plan, dict):
+                        hedge_plan["preferred_vehicle"] = "SPREAD_ONLY"
+                        hedge_plan["regime_verdict"] = "HEDGE_RECOMMENDED"
+                        hedge_plan.pop("ratio_spread_1x2", None)
                 except Exception as e_h:
                     logger.debug(
                         f"[OptionsBreakout] Hedge plan construction error for {clean_sym}: {e_h}"
@@ -1985,28 +2186,50 @@ def detect_options_momentum_breakouts(
                 opt_delta = None
                 opt_gamma = None
                 opt_iv = None
-                dte_days = 0
+                dte_days: Optional[int] = None
                 is_0dte = False
                 try:
                     if expiry_date:
-                        exp_d = datetime.strptime(str(expiry_date)[:10], "%Y-%m-%d").date()
-                        dte_days = max(0, (exp_d - now_dt.date()).days)
-                        is_0dte = dte_days == 0
+                        exp_clean_om = str(expiry_date).strip()[:10]
+                        exp_d = None
+                        for _fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                            try:
+                                exp_d = datetime.strptime(exp_clean_om, _fmt).date()
+                                break
+                            except ValueError:
+                                continue
+                        if exp_d is not None:
+                            dte_days = max(0, (exp_d - now_dt.date()).days)
+                            is_0dte = dte_days == 0
                     from engine.options_backtest import bs_delta
 
                     iv_est = (vix_val / 100.0) if (vix_val and vix_val > 0) else 0.15
                     opt_iv = round(iv_est, 4)
-                    opt_delta = round(bs_delta(spot, strike, dte_days, iv_est, opt_type), 4)
+                    opt_delta = round(
+                        bs_delta(
+                            spot,
+                            strike,
+                            dte_days if dte_days is not None else 7,
+                            iv_est,
+                            opt_type,
+                        ),
+                        4,
+                    )
                 except Exception as e_suppressed:
                     logger.debug(
                         f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
+                _vwap_stretch_cap = (
+                    0.035
+                    if (is_opening_drive or is_bull_drive or is_bear_drive or spot_rvol >= 2.0)
+                    else 0.028
+                )
                 _is_vwap_overextended = bool(
                     not is_idx
                     and spot_vwap
                     and spot_vwap > 0
-                    and abs(spot - spot_vwap) / spot_vwap > 0.025
+                    and abs(spot - spot_vwap) / spot_vwap > _vwap_stretch_cap
                 )
                 if not is_test_env and _is_vwap_overextended and not is_opening_drive:
                     logger.debug(
@@ -2033,6 +2256,18 @@ def detect_options_momentum_breakouts(
                 else:
                     _om_stage = "EARLY_WARNING"
                     _om_trigger = round(opt_ltp * 1.02, 2)
+
+                if (
+                    not is_test_env
+                    and not is_climax_extended
+                    and max_chase > 0
+                    and opt_ltp > max_chase
+                ):
+                    logger.debug(
+                        f"[OptionsBreakout] Suppressed chased {clean_sym} {opt_type}: "
+                        f"LTP ₹{opt_ltp:.2f} > no-chase ₹{max_chase:.2f}"
+                    )
+                    continue
 
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -2194,24 +2429,46 @@ def detect_options_momentum_breakouts(
                         "rsi_5m": rsi_5m,
                         "ema20": ema20_5m,
                         "vsa_fake_breakout_risk": vsa_fake_risk,
+                        "rvol": spot_rvol if spot_rvol > 0 else None,
+                        "spot_atr": spot_atr,
+                        "adr_target_calibration": (
+                            {
+                                "delta": _adr_cal.delta,
+                                "gamma": _adr_cal.gamma,
+                                "remaining_spot_headroom": _adr_cal.remaining_spot_headroom,
+                                "max_adr_t1": _adr_cal.max_adr_t1,
+                                "was_adr_capped": _adr_cal.was_adr_capped,
+                                "calibrated_rr": _adr_cal.calibrated_rr,
+                            }
+                            if _adr_cal is not None
+                            else None
+                        ),
+                        "friction_viability": _fric_eval,
                     },
                     actionable_plan={
                         "action": f"BUY {opt_type}",
                         "segment": "FNO",
                         "contract": contract_sym,
                         "preferred_vehicle": (
-                            hedge_plan.get(
-                                "preferred_vehicle",
-                                "DEEP_ITM_OR_SPREAD"
-                                if is_high_iv_risk
-                                else "NAKED_OPTION_OR_SPREAD",
-                            )
-                            if hedge_plan
+                            "SPREAD_ONLY"
+                            if mandate_spread_afternoon
                             else (
-                                "DEEP_ITM_OR_SPREAD"
-                                if is_high_iv_risk
-                                else "NAKED_OPTION_OR_SPREAD"
+                                hedge_plan.get(
+                                    "preferred_vehicle",
+                                    "DEEP_ITM_OR_SPREAD"
+                                    if is_high_iv_risk
+                                    else "NAKED_OPTION_OR_SPREAD",
+                                )
+                                if hedge_plan
+                                else (
+                                    "DEEP_ITM_OR_SPREAD"
+                                    if is_high_iv_risk
+                                    else "NAKED_OPTION_OR_SPREAD"
+                                )
                             )
+                        ),
+                        "execution_style_mandate": (
+                            "HEDGED_SPREAD_MANDATORY" if mandate_spread_afternoon else None
                         ),
                         "iv_crush_defense": (
                             f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
@@ -2249,6 +2506,7 @@ def detect_options_momentum_breakouts(
                         "target_1": f"₹{opt_t1:,.1f}",
                         "target": f"₹{opt_t1:,.1f}",
                         "target_2": f"₹{opt_t2:,.1f}",
+                        "target_3": f"₹{opt_moonshot:,.1f}",
                         "target_moonshot": f"₹{opt_moonshot:,.1f}",
                         "risk_reward": rr_str,
                         "when_to_buy": when_to_buy_str,
@@ -2356,28 +2614,30 @@ def detect_options_momentum_breakouts(
 
         import concurrent.futures
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(10, len(active_targets))
-        ) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(8, max(1, len(active_targets))),
+            thread_name_prefix="chanakya-optmom-pool",
+        )
+        try:
             future_to_sym = {executor.submit(_eval_sym, sym): sym for sym in active_targets}
-            deadline = time.time() + 28.0
-            for future in concurrent.futures.as_completed(future_to_sym):
-                remaining = max(0.1, deadline - time.time())
-                try:
-                    cand_res = future.result(timeout=remaining)
-                    if cand_res:
-                        candidate_alerts.append(cand_res)
-                except concurrent.futures.TimeoutError:
-                    logger.warning(
-                        f"[OptionsBreakout] Evaluation timeout (28s) reached. "
-                        f"Proceeding safely with {len(candidate_alerts)} qualified candidates."
-                    )
-                    break
-                except Exception as e_sym:
-                    sym_name = future_to_sym.get(future, "unknown")
-                    logger.debug(
-                        f"[OptionsBreakout] Target evaluation notice for {sym_name}: {e_sym}"
-                    )
+            try:
+                for future in concurrent.futures.as_completed(future_to_sym, timeout=20.0):
+                    try:
+                        cand_res = future.result()
+                        if cand_res:
+                            candidate_alerts.append(cand_res)
+                    except Exception as e_sym:
+                        sym_name = future_to_sym.get(future, "unknown")
+                        logger.debug(
+                            f"[OptionsBreakout] Target evaluation notice for {sym_name}: {e_sym}"
+                        )
+            except concurrent.futures.TimeoutError:
+                logger.info(
+                    f"[OptionsBreakout] Evaluation timeout (20s) reached. "
+                    f"Proceeding safely with {len(candidate_alerts)} qualified candidates."
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # ── ANTI-STORM PACING & TOP-N QUALITY SELECTION ──
     candidate_alerts.sort(key=lambda x: x[0], reverse=True)

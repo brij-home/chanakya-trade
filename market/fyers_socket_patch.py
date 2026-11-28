@@ -56,7 +56,10 @@ class _SafeSymbolTokenDict(dict):
             if len(self._tombstones) > 10000:
                 self._tombstones.clear()
             self._tombstones[str(k)] = str(val)
-        return super().pop(k, *d)
+            return super().pop(k)
+        if d:
+            return d[0]
+        return self._tombstones.get(str(k), str(k))
 
     def __missing__(self, key: Any) -> Any:
         str_key = str(key)
@@ -412,9 +415,9 @@ def patch_fyers_websocket_daemon_threads() -> None:
 
             def _patched_run_forever(self, *args, **kwargs):
                 if kwargs.get("ping_interval", 0) == 0:
-                    kwargs["ping_interval"] = 20
+                    kwargs["ping_interval"] = 30
                 if kwargs.get("ping_timeout") is None:
-                    kwargs["ping_timeout"] = 10
+                    kwargs["ping_timeout"] = 25
                 return _orig_run_forever(self, *args, **kwargs)
 
             websocket.WebSocketApp.run_forever = _patched_run_forever

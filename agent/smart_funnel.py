@@ -753,6 +753,52 @@ class SmartFunnel:
 
     # ── Stage 2: Multi-Agent Synthesis on Top Qualified Setups ─────────────────
 
+    def _prefetch_prime_candidate_bundles(
+        self,
+        candidates: list[PreFilterReport],
+        exchange: str = "NSE",
+    ) -> dict[str, dict[str, Any]]:
+        """Warm & attach one bounded Fyers Prime snapshot (futures chain + TBT/L2 depth) per candidate."""
+        bundles: dict[str, dict[str, Any]] = {}
+        if not candidates or exchange.upper() == "CRYPTO":
+            return bundles
+        try:
+            from brokers.session import get_data_broker
+            from market.fyers_tbt_manager import fyers_tbt_manager
+
+            brk = get_data_broker()
+        except Exception:
+            brk = None
+            fyers_tbt_manager = None  # type: ignore[assignment]
+
+        for rep in candidates:
+            bundle: dict[str, Any] = {}
+            try:
+                if brk and hasattr(brk, "get_futures_chain"):
+                    fc = brk.get_futures_chain(rep.symbol)
+                    if isinstance(fc, dict) and fc.get("status") == "ok":
+                        bundle["futures_contracts"] = len(fc.get("contracts", []))
+                        bundle["near_future"] = (fc.get("contracts") or [None])[0]
+            except Exception as exc_fc:
+                logger.debug(
+                    "[SmartFunnel] Prime futures bundle skipped for %s: %s", rep.symbol, exc_fc
+                )
+            try:
+                if fyers_tbt_manager is not None:
+                    d50 = fyers_tbt_manager.get_50_depth(rep.symbol, allow_rest_fallback=False)
+                    if isinstance(d50, dict) and d50.get("status") not in (None, "UNAVAILABLE"):
+                        bundle["depth_status"] = d50.get("status")
+                        bundle["obi_50"] = d50.get("obi_50")
+                        bundle["spread"] = d50.get("spread")
+            except Exception as exc_d:
+                logger.debug(
+                    "[SmartFunnel] Prime depth bundle skipped for %s: %s", rep.symbol, exc_d
+                )
+            if bundle:
+                rep.metrics["prime_context"] = bundle
+                bundles[rep.symbol] = bundle
+        return bundles
+
     def _parse_synthesis_output(self, symbol: str, text: str) -> TradePlanSummary:
         """Parse Fund Manager synthesis into structured trade parameters."""
         verdict = "HOLD"
@@ -914,11 +960,15 @@ class SmartFunnel:
         exchange: str = "NSE",
         top_n: int = 3,
         progress_callback: Optional[Callable[[dict], None]] = None,
+        allow_cross_asset: bool = False,
     ) -> SmartFunnelResult:
         """
         Execute the complete 3-stage Smart Funnel.
         """
+        from config.discovery_policy import allows_context_symbol, get_discovery_policy
+
         t0 = time.time()
+        policy = get_discovery_policy()
 
         if isinstance(symbols, list):
             # Check if list starts with 'sector' or 'sec'
@@ -927,6 +977,7 @@ class SmartFunnel:
             if len(symbols) == 1:
                 symbols = symbols[0]
 
+        from_preset = False
         if isinstance(symbols, str):
             clean_str = symbols.strip().lower().replace("-", "_").replace(" ", "_")
             if clean_str.startswith("sector_"):
@@ -934,9 +985,36 @@ class SmartFunnel:
             if clean_str in SECTOR_NAME_MAP:
                 clean_str = SECTOR_NAME_MAP[clean_str]
 
+            if (
+                policy.fno_only
+                and not allow_cross_asset
+                and clean_str
+                in (
+                    "crypto",
+                    "crypto_majors",
+                    "cryptomajors",
+                    "bitcoin",
+                    "btc",
+                    "commodities",
+                    "commodity",
+                )
+            ):
+                logger.info("[SmartFunnel] FILTERED_BY_FOCUS profile=FNO_ONLY preset=%s", clean_str)
+                return SmartFunnelResult(
+                    total_screened=0,
+                    qualified_count=0,
+                    filtered_count=0,
+                    pre_filter_reports=[],
+                    qualified_symbols=[],
+                    trade_plans=[],
+                    elapsed_sec=0.0,
+                )
+
             if clean_str in WATCHLIST_PRESETS:
+                from_preset = True
                 sym_list = list(WATCHLIST_PRESETS[clean_str])
             elif clean_str in ("nifty", "nifty_50", "nifty50"):
+                from_preset = True
                 sym_list = list(WATCHLIST_PRESETS["nifty_50"])
             else:
                 sym_list = [
@@ -947,8 +1025,23 @@ class SmartFunnel:
 
         # Filter out accidental keywords like "SECTOR"
         sym_list = [s for s in sym_list if s not in ("SECTOR", "SEC", "ALL", "")]
+        if policy.fno_only and not allow_cross_asset:
+            # Exclude crypto symbols unconditionally under FNO_ONLY; filter preset cash lists to F&O eligible
+            sym_list = [
+                s
+                for s in sym_list
+                if not (
+                    s.startswith(("CRYPTO:", "BINANCE:", "BYBIT:"))
+                    or s.endswith(("USDT", "USDC"))
+                    or s in ("BTC", "ETH", "SOL", "BNB")
+                )
+                and (not from_preset or allows_context_symbol(s if ":" in s else f"{exchange}:{s}"))
+            ]
         if not sym_list:
-            sym_list = list(WATCHLIST_PRESETS["nifty_50"])
+            fallback_preset = list(WATCHLIST_PRESETS["nifty_50"])
+            if policy.fno_only and not allow_cross_asset:
+                fallback_preset = [s for s in fallback_preset if allows_context_symbol(f"NSE:{s}")]
+            sym_list = fallback_preset
 
         if self.verbose:
             console.print(
@@ -997,6 +1090,12 @@ class SmartFunnel:
                 )
 
         candidate_symbols = [r.symbol for r in target_candidates]
+
+        # Pre-bundle Fyers Prime context once per shortlisted candidate (bounded, read-only)
+        # so downstream synthesis can inspect futures basis, TBT/L2 depth, and CAS quotes
+        # without duplicate per-analyst broker REST round-trips.
+        if candidate_symbols and not os.environ.get("CHANAKYA_TESTING"):
+            self._prefetch_prime_candidate_bundles(target_candidates, exchange=exchange)
 
         # ── STAGE 2 & 3: Multi-Agent Debate on Top Candidates ──────────────
         trade_plans: list[TradePlanSummary] = []

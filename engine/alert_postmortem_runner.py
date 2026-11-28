@@ -198,17 +198,26 @@ def generate_session_scorecard(
             or getattr(alert, "is_disqualified", False)
         )
         if (
-            hasattr(alert, "stage")
-            and alert.stage
-            in (
-                "STALK",
-                "EARLY_WARNING",
-                "PRIMED",
-                "CANCELLED",
-                "SETUP_DISQUALIFIED",
-                "SUPERSEDED",
+            (
+                hasattr(alert, "stage")
+                and alert.stage
+                in (
+                    "STALK",
+                    "EARLY_WARNING",
+                    "PRIMED",
+                    "CANCELLED",
+                    "SETUP_DISQUALIFIED",
+                    "SUPERSEDED",
+                )
             )
-        ) or is_disqualified:
+            or is_disqualified
+            or (
+                getattr(alert, "stage", "") == "INVALIDATED"
+                and not getattr(alert, "triggered_at", None)
+                and "hierarchical veto"
+                in str(getattr(alert, "invalidation_reason", "") or "").lower()
+            )
+        ):
             has_triggered = False
 
         r_mult = getattr(alert, "r_multiple", None)
@@ -223,7 +232,9 @@ def generate_session_scorecard(
                 or getattr(alert, "ltp", 0.0)
                 or 0.0
             )
-            sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            sl = float(
+                getattr(alert, "initial_stop_loss", None) or getattr(alert, "stop_loss", 0.0) or 0.0
+            )
             cur = float(getattr(alert, "ltp", 0.0) or entry)
             risk = abs(entry - sl) if sl > 0 and sl != entry else (entry * 0.015)
             is_bull = (
@@ -759,17 +770,26 @@ def run_eod_alert_postmortems(
             or getattr(alert, "is_disqualified", False)
         )
         if (
-            hasattr(alert, "stage")
-            and alert.stage
-            in (
-                "STALK",
-                "EARLY_WARNING",
-                "PRIMED",
-                "CANCELLED",
-                "SETUP_DISQUALIFIED",
-                "SUPERSEDED",
+            (
+                hasattr(alert, "stage")
+                and alert.stage
+                in (
+                    "STALK",
+                    "EARLY_WARNING",
+                    "PRIMED",
+                    "CANCELLED",
+                    "SETUP_DISQUALIFIED",
+                    "SUPERSEDED",
+                )
             )
-        ) or is_disqualified:
+            or is_disqualified
+            or (
+                getattr(alert, "stage", "") == "INVALIDATED"
+                and not getattr(alert, "triggered_at", None)
+                and "hierarchical veto"
+                in str(getattr(alert, "invalidation_reason", "") or "").lower()
+            )
+        ):
             has_triggered = False
         if not has_triggered or is_disqualified:
             continue
@@ -812,7 +832,11 @@ def run_eod_alert_postmortems(
             # 1. Resolve R-multiple
             r_mult = getattr(alert, "r_multiple", None)
             if r_mult is None or r_mult == 0.0:
-                sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+                sl = float(
+                    getattr(alert, "initial_stop_loss", None)
+                    or getattr(alert, "stop_loss", 0.0)
+                    or 0.0
+                )
                 risk = abs(entry - sl) if sl > 0 and sl != entry else (entry * 0.015)
                 is_bull = (
                     getattr(alert, "direction", "BULLISH") in ("BULLISH", "LONG", "BUY")

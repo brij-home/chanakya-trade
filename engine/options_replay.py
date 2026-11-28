@@ -166,12 +166,18 @@ def evaluate_triple_barrier_outcomes(
 
         buy_px = eff_exit if is_short else eff_entry
         sell_px = eff_entry if is_short else eff_exit
+        seg_u = str(segment or "OPTIONS").upper().strip()
+        charge_seg: Any = (
+            "OPTIONS"
+            if seg_u in ("FNO", "OPT", "OPTIONS")
+            else ("FUTURES" if seg_u in ("FUT", "FUTURES") else seg_u)
+        )
         charges = float(
             calculate_transaction_charges(
-                price=buy_px, quantity=quantity, segment=segment, side="BUY"
+                price=buy_px, quantity=quantity, segment=charge_seg, side="BUY"
             ).total_charges
             + calculate_transaction_charges(
-                price=sell_px, quantity=quantity, segment=segment, side="SELL"
+                price=sell_px, quantity=quantity, segment=charge_seg, side="SELL"
             ).total_charges
         )
         net_pnl = gross_pnl - charges
@@ -218,6 +224,8 @@ def purged_walk_forward_score(
     pt_r: float = 2.0,
     sl_r: float = 1.0,
     segment: str = "FNO",
+    slippage_bps: float = 5.0,
+    quantity: int = 1,
 ) -> dict[str, Any]:
     """Chronological Purged & Embargoed Walk-Forward evaluation across held-out folds."""
     if bars is None or len(bars) < max(30, n_folds * 15):
@@ -252,6 +260,8 @@ def purged_walk_forward_score(
             pt_r=pt_r,
             sl_r=sl_r,
             segment=segment,
+            slippage_bps=slippage_bps,
+            quantity=quantity,
         )
         fold_r = [o["net_r"] for o in ev["outcomes"]]
         all_oos_r.extend(fold_r)
@@ -288,6 +298,8 @@ def run_detector_ablation_comparison(
     pt_r: float = 2.0,
     sl_r: float = 1.0,
     segment: str = "FNO",
+    slippage_bps: float = 5.0,
+    quantity: int = 1,
 ) -> dict[str, Any]:
     """Compare baseline price-only entries vs enriched/filtered entries via Triple-Barrier outcomes."""
     base_res = evaluate_triple_barrier_outcomes(
@@ -298,6 +310,8 @@ def run_detector_ablation_comparison(
         pt_r=pt_r,
         sl_r=sl_r,
         segment=segment,
+        slippage_bps=slippage_bps,
+        quantity=quantity,
     )
     enr_res = evaluate_triple_barrier_outcomes(
         bars,
@@ -307,6 +321,8 @@ def run_detector_ablation_comparison(
         pt_r=pt_r,
         sl_r=sl_r,
         segment=segment,
+        slippage_bps=slippage_bps,
+        quantity=quantity,
     )
     both_calibrated = base_res["status"] == "CALIBRATED" and enr_res["status"] == "CALIBRATED"
     delta_r = (

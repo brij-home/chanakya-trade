@@ -365,6 +365,13 @@ def run_full_calibration() -> None:
     index_metrics = calibrate_index_parameters()
     fno_metrics, coiling_squeezes = calibrate_fno_stocks()
     save_calibration_payload(tod_curve, index_metrics, fno_metrics, coiling_squeezes)
+    try:
+        from engine.calibration_runner import calibration_runner
+
+        diag = calibration_runner._collect_options_replay_diagnostics()
+        print(f"  Research tournament / Meta-Model status: {diag.get('status')}")
+    except Exception as exc_diag:
+        print(f"  Research tournament diagnostics skipped: {exc_diag}")
     print("\nCalibration cycle completed successfully with 100% data provenance.")
     print("=" * 80)
 

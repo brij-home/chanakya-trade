@@ -599,7 +599,7 @@ def test_render_auto_alert_integration():
     assert "NIFTY 24500 CE" in msg3
     assert "Expiry:</b>" in msg3
     assert "Action:</b> BUY <b>NIFTY 24500 CE</b>" in msg3
-    assert "SL:</b> <code>₹66.0</code>" in msg3
+    assert "Safe SL (Tactical):</b> <code>₹66.0</code>" in msg3
 
 
 def test_minimalist_alert_hierarchy_and_deduplication():
@@ -626,7 +626,7 @@ def test_minimalist_alert_hierarchy_and_deduplication():
             "target": "₹240.0",
             "stop_loss": "₹105.0",
             "risk_reward": "1:2.4",
-            "expiry": "2026-09-17",
+            "expiry": "2026-12-29",
         },
         confidence=94,
     )
@@ -642,7 +642,7 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     # 2. Hierarchy: Action & Levels appear BEFORE Reason
     idx_action = rendered.find("Action:")
     assert idx_action != -1
-    idx_sl = rendered.find("SL:")
+    idx_sl = rendered.find("Safe SL (Tactical):")
     assert idx_sl != -1
     idx_reason = rendered.find("Reason:")
     assert idx_reason != -1
@@ -650,14 +650,13 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     assert idx_action < idx_reason, "Action must appear before Reason"
     assert idx_sl < idx_reason, "Stop Loss must appear before Reason"
 
-    # 3. Compact line count <= 12 lines (or 13 if late session closing warning / runner alternative is active)
+    # 3. Compact line count <= 13 base lines (+1 each when CPR, late-session warning, or Runner Alternative active)
     lines = [l for l in rendered.split("\n") if l.strip()]
     max_lines = (
-        14
-        if (
-            "CPR:" in rendered or "Market closes in" in rendered or "Runner Alternative" in rendered
-        )
-        else 12
+        13
+        + (1 if "CPR:" in rendered else 0)
+        + (1 if "Market closes in" in rendered else 0)
+        + (1 if "Runner Alternative" in rendered else 0)
     )
     assert len(lines) <= max_lines, f"Alert exceeded {max_lines} lines: {len(lines)} lines"
 
@@ -2574,7 +2573,14 @@ def test_auto_alert_telegram_expiry_price_coherence():
     assert "Next Monthly · 29-Oct-2026" not in msg_sep
     assert "0DTE" in msg_sep or "Today's Expiry" in msg_sep
 
-    # 2. Next Month October contract
+    # 2. Future monthly contract (clock-independent +30d expiry so token never goes stale)
+    from datetime import datetime, timedelta
+
+    future_exp = datetime.now() + timedelta(days=30)
+    future_ymd = future_exp.strftime("%Y%m%d")
+    future_disp = future_exp.strftime("%d-%b-%Y")
+    future_sym = f"UNITDSPR{future_ymd}1380PE"
+
     oct_alert = AutoAlert(
         alert_id="aa-opening-drive-ignition-unitdspr-bear-20261027",
         alert_type="OPENING_DRIVE_IGNITION",
@@ -2588,7 +2594,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
         trigger_level=28.0,
         target_level=37.8,
         stop_loss=21.8,
-        contract_symbol="UNITDSPR202611261380PE",
+        contract_symbol=future_sym,
         strike=1380.0,
         option_type="PE",
         option_premium=28.0,
@@ -2597,13 +2603,13 @@ def test_auto_alert_telegram_expiry_price_coherence():
         segment="FNO_STOCK",
         confidence=92,
         actionable_plan={
-            "contract": "UNITDSPR202611261380PE",
+            "contract": future_sym,
             "recommended_entry": "₹28.00",
             "stop_loss": "₹21.8",
             "target_1": "₹37.8",
             "target_2": "₹47.6",
             "option_plan": {
-                "contract_symbol": "UNITDSPR202611261380PE",
+                "contract_symbol": future_sym,
                 "strike": 1380.0,
                 "option_type": "PE",
                 "entry_premium": 28.0,
@@ -2617,7 +2623,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
 
     msg_oct = format_auto_alert_telegram(oct_alert)
     assert "₹28.00" in msg_oct
-    assert "26-Nov-2026" in msg_oct
+    assert future_disp in msg_oct
     assert "DTE" in msg_oct
     assert "29-Sep-2026" not in msg_oct
 
@@ -2923,10 +2929,12 @@ def test_risk_compressed_alert_never_claims_guaranteed_profit():
     assert "+₹22.75" not in rendered
     assert "/sh" not in rendered
 
-    # Must accurately report capped downside risk in option points
+    # Must accurately report capped downside risk in option points and honest runway status
     assert "Downside Risk Capped:" in rendered
     assert "₹22.75 pts" in rendered
     assert "-3.6% max remaining risk" in rendered
+    assert "Profit Protected" not in rendered
+    assert "Risk Compressed (SL Tightened)" in rendered
 
     # Must NOT duplicate shield emojis
     assert "🛡️ 🛡️" not in rendered
@@ -2971,6 +2979,7 @@ def test_breakeven_locked_alert_renders_cleanly():
     assert "Breakeven Locked:" in rendered
     assert "100% Risk-Free" in rendered
     assert "Guaranteed Profit" not in rendered
+    assert "Profit Protected" not in rendered
     assert "🛡️ 🛡️" not in rendered
 
 
@@ -3852,3 +3861,104 @@ def test_render_auto_alert_off_market_primed_scope():
     msg_live = render_auto_alert(alert, in_market=True)
     assert msg_live is not None
     assert "ASIANPAINT" in msg_live
+
+
+def test_invalidated_shows_cmp_pnl_session_close_uses_pt_and_spread_t1_hides_freeroll():
+    """Verify INVALIDATED includes CMP & P&L, SESSION_CLOSE includes /pt + Lot on COMMODITY/BFO, and SPREAD_ONLY TARGET_1 suppresses naked Free-Roll."""
+    inv_alert = AutoAlert(
+        alert_id="aa-inval-cmp-pnl",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="INVALIDATED",
+        symbol="INFY",
+        exchange="NFO",
+        segment="FNO_STOCK",
+        direction="BEARISH",
+        headline="INFY 1154 PE Invalidated",
+        summary="SL breached at ₹34.00",
+        invalidation_reason="Initial stop-loss ₹34.28 breached.",
+        ltp=34.0,
+        trigger_level=38.95,
+        target_level=48.30,
+        stop_loss=34.28,
+        strike=1154.0,
+        option_type="PE",
+        contract_symbol="NSE:INFY26DEC1154PE",
+        lot_size=400,
+        option_premium=38.95,
+        initial_stop_loss=34.28,
+        actionable_plan={"action": "BUY PE", "recommended_entry": "₹38.95", "stop_loss": "₹34.28"},
+    )
+    msg_inv = render_auto_alert(inv_alert, in_market=True)
+    assert "VIEW INVALIDATED" in msg_inv
+    assert "Opt CMP:</b> ₹34.00" in msg_inv
+    assert "/pt" in msg_inv
+
+    sess_alert = AutoAlert(
+        alert_id="aa-sess-close-mcx",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="SESSION_CLOSE_EXIT",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="CRUDEOIL Session Close",
+        summary="MCX squareoff",
+        ltp=6650.0,
+        trigger_level=6500.0,
+        target_level=6800.0,
+        stop_loss=6400.0,
+        lot_size=100,
+        actionable_plan={
+            "action": "BUY FUT",
+            "entry_range": "₹6,500.0",
+            "stop_loss": "₹6,400.0",
+            "lot_size": 100,
+        },
+    )
+    msg_sess = render_auto_alert(sess_alert, in_market=False)
+    assert "Session P&L:" in msg_sess
+    assert "/pt" in msg_sess
+    assert "(Lot: 100)" in msg_sess
+
+    t1_spread_alert = AutoAlert(
+        alert_id="aa-t1-spread-only",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="T1_ACHIEVED",
+        target_status="T1_ACHIEVED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="CRUDEOIL 8000 CE T1",
+        summary="T1 hit",
+        ltp=500.0,
+        trigger_level=401.5,
+        target_level=497.9,
+        stop_loss=353.3,
+        strike=8000.0,
+        option_type="CE",
+        contract_symbol="MCX:CRUDEOIL26DEC8000CE",
+        lot_size=100,
+        preferred_vehicle="SPREAD_ONLY",
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹401.50",
+            "stop_loss": "₹353.3",
+            "target_1": "₹497.9",
+            "target_2": "₹546.0",
+            "preferred_vehicle": "SPREAD_ONLY",
+            "execution_style_mandate": "HEDGED_SPREAD_MANDATORY",
+            "free_roll_plan": {
+                "eligible": True,
+                "short_strike_candidate": 8400.0,
+                "estimated_credit_collected": 243.8,
+                "net_locked_profit_pts": 50.0,
+                "recommendation": "Convert naked call",
+            },
+        },
+    )
+    msg_t1 = render_auto_alert(t1_spread_alert, in_market=True)
+    assert "TARGET 1 HIT" in msg_t1
+    assert "SPREAD MANAGEMENT:" in msg_t1
+    assert "FREE-ROLL ACTIVE" not in msg_t1
+    assert "FREE-ROLL CONVERSION ADVISORY" not in msg_t1

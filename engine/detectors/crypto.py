@@ -1428,6 +1428,12 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             t3_price = (
                 round(ltp + 6.0 * risk_amt, 2) if is_long_flush else round(ltp - 6.0 * risk_amt, 2)
             )
+            # Live ticker may have already moved beyond stale 15m candle targets; suppress stale flushes
+            flush_geom_ok = (
+                (0 < sl_price < ltp < t1_price < t2_price < t3_price)
+                if is_long_flush
+                else (sl_price > ltp > t1_price > t2_price > t3_price > 0)
+            )
             rvol = float(liq_metrics.get("rvol", 1.0))
 
             rr_1 = round(abs(t1_price - ltp) / risk_amt, 1)
@@ -1517,7 +1523,8 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     },
                 },
             )
-            found.append(alert)
+            if flush_geom_ok:
+                found.append(alert)
     except Exception as e:
         logger.debug(f"[CryptoDetector] Liquidation cascade check failed for {clean_sym}: {e}")
 

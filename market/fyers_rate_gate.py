@@ -373,7 +373,10 @@ class UnifiedFyersRateGate:
             bucket_window = [
                 item for item in self._sliding_window if item[1] != FyersCallCategory.ORDER
             ]
-            min_interval = 1.0 / max(self._max_per_sec, 1.0)
+            base_interval = 1.0 / max(self._max_per_sec, 1.0)
+            # Add a 5% anti-burst cushion for high-throughput DATA buckets (e.g. 8/s -> ~131ms)
+            # so slight clock/network jitter never packs >=10 requests into a broker 1s window.
+            min_interval = base_interval * 1.05 if self._max_per_sec >= 5.0 else base_interval
             if self._last_dispatch_ts > now:
                 self._last_dispatch_ts = now
             time_since_last = max(0.0, now - self._last_dispatch_ts)
@@ -428,13 +431,23 @@ class UnifiedFyersRateGate:
                 oldest_hist = min(now, recent_hist[0])
                 sleep_sec = max(sleep_sec, 1.0 - (now - oldest_hist) + 0.01)
 
-        # 2. Check 1-second rolling window for target bucket (DATA vs TRANSACTION)
+        # 2. Check 1-second rolling window for target bucket AND combined all-bucket ceiling
         sec_cutoff = now - 1.0
         recent_sec = [t for t, _ in bucket_window if t >= sec_cutoff]
         if len(recent_sec) >= self._max_per_sec:
             # Must wait until oldest entry in current 1s window ages out
             oldest_in_sec = min(now, recent_sec[0])
             sleep_sec = max(sleep_sec, 1.0 - (now - oldest_in_sec) + 0.005)
+        if not is_tx and self._max_per_sec >= 5.0:
+            # Fyers enforces account/IP-level 10 req/s across DATA + ORDER combined; keep DATA
+            # yielding whenever combined calls in the last 1.0s approach max_per_sec.
+            combined_sec = sorted(
+                [t for t, _ in self._sliding_window if t >= sec_cutoff]
+                + [t for t, _ in self._sliding_window_tx if t >= sec_cutoff]
+            )
+            if len(combined_sec) >= self._max_per_sec:
+                oldest_comb = min(now, combined_sec[0])
+                sleep_sec = max(sleep_sec, 1.0 - (now - oldest_comb) + 0.005)
 
         # 3. Check 60-second rolling window (including queued waiters for new entrants/diagnostics,
         # but not self-blocking the head waiter from consuming available tokens)

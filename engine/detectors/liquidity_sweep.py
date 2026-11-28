@@ -342,6 +342,13 @@ def detect_predator_liquidity_sweep(
         getattr(resolved_opt, "t3_premium", 0.0) if has_opt else (opt_t2 * 1.25 if opt_t2 else 0.0)
     )
     opt_nc = round(opt_entry * 1.05, 2) if has_opt else 0.0
+    eff_lot_size = (
+        int(getattr(resolved_opt, "lot_size", 0) or 0)
+        if has_opt
+        else (stock_lot_size if stock_lot_size > 1 else 1)
+    )
+    if eff_lot_size <= 1 and (has_opt or is_index_symbol(clean_sym) or stock_lot_size > 1):
+        eff_lot_size = stock_lot_size if stock_lot_size > 1 else 1
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
@@ -358,6 +365,7 @@ def detect_predator_liquidity_sweep(
         else f"1:{rr_ratio:.1f}",
         no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
+        lot_size=eff_lot_size,
         when_to_buy=(
             f"Limit order at OTE pullback near ₹{opt_entry:,.2f} ({contract_symbol})."
             if has_opt
@@ -487,6 +495,7 @@ def detect_predator_liquidity_sweep(
         actionable_plan=blueprint.to_dict(),
         option_premium=opt_entry if has_opt else None,
         underlying_spot=curr_ltp,
+        lot_size=eff_lot_size,
         no_chase_boundary=opt_nc if has_opt else no_chase,
         metrics={
             "sweep_type": sweep_type,

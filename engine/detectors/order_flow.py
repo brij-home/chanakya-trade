@@ -195,7 +195,7 @@ def detect_order_flow_divergence(ctx: DetectionContext) -> list[AutoAlert]:
             alert_type="ORDER_FLOW_DIVERGENCE",
         )
 
-        alert_id = generate_alert_id("order-flow", canonical_sym, variant="bull-absorb")
+        alert_id = generate_alert_id(canonical_sym, "ORDER_FLOW_DIVERGENCE", variant="bull-absorb")
         alerts.append(
             AutoAlert(
                 alert_id=alert_id,
@@ -256,7 +256,7 @@ def detect_order_flow_divergence(ctx: DetectionContext) -> list[AutoAlert]:
             alert_type="ORDER_FLOW_DIVERGENCE",
         )
 
-        alert_id = generate_alert_id("order-flow", canonical_sym, variant="bear-exhaust")
+        alert_id = generate_alert_id(canonical_sym, "ORDER_FLOW_DIVERGENCE", variant="bear-exhaust")
         alerts.append(
             AutoAlert(
                 alert_id=alert_id,

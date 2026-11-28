@@ -61,7 +61,10 @@ class SectorRRGPoint:
 
 NSE_SECTORS: dict[str, str] = {
     "BANK": "^NSEBANK",
+    "CAPITAL_MARKETS": "^CNXFIN",
+    "FIN_SERV": "^CNXFIN",
     "IT": "^CNXIT",
+    "FINTECH": "^CNXIT",
     "PHARMA": "^CNXPHARMA",
     "AUTO": "^CNXAUTO",
     "FMCG": "^CNXFMCG",
@@ -92,11 +95,9 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "KPITTECH": "IT",
     "TATAELXSI": "IT",
     "CYIENT": "IT",
-    "ETERNAL": "IT",
     "NAUKRI": "IT",
     "MAPMYINDIA": "IT",
     "DIXON": "IT",
-    "POLICYBZR": "IT",
     "AFFLE": "IT",
     "BSOFT": "IT",
     "HAPPSTMNDS": "IT",
@@ -113,7 +114,16 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "ZENSARTECH": "IT",
     "KAYNES": "IT",
     "SYRMA": "IT",
-    # Private Banks, NBFCs & Capital Markets
+    "SAGILITY": "IT",
+    "PGEL": "IT",
+    # Fintech & Consumer Internet Platforms
+    "POLICYBZR": "FINTECH",
+    "PAYTM": "FINTECH",
+    "ETERNAL": "FINTECH",
+    "SWIGGY": "FINTECH",
+    "NYKAA": "FINTECH",
+    "CARTRADE": "FINTECH",
+    # Private Banks
     "HDFCBANK": "BANK",
     "ICICIBANK": "BANK",
     "KOTAKBANK": "BANK",
@@ -123,18 +133,53 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "BANDHANBNK": "BANK",
     "AUBANK": "BANK",
     "IDFCFIRSTB": "BANK",
-    "BAJFINANCE": "BANK",
-    "BAJAJFINSV": "BANK",
-    "CHOLAFIN": "BANK",
-    "MUTHOOTFIN": "BANK",
-    "SHRIRAMFIN": "BANK",
-    "JIOFIN": "BANK",
-    "BSE": "BANK",
-    "MCX": "BANK",
-    "ANGELONE": "BANK",
-    "CDSL": "BANK",
-    "CAMS": "BANK",
-    "HDFCAMC": "BANK",
+    "RBLBANK": "BANK",
+    "YESBANK": "BANK",
+    "UJJIVANSFB": "BANK",
+    # Financial Services, NBFCs & Insurance
+    "BAJFINANCE": "FIN_SERV",
+    "BAJAJFINSV": "FIN_SERV",
+    "BAJAJHLDNG": "FIN_SERV",
+    "CHOLAFIN": "FIN_SERV",
+    "MUTHOOTFIN": "FIN_SERV",
+    "SHRIRAMFIN": "FIN_SERV",
+    "JIOFIN": "FIN_SERV",
+    "ABCAPITAL": "FIN_SERV",
+    "LTF": "FIN_SERV",
+    "LICHSGFIN": "FIN_SERV",
+    "MANAPPURAM": "FIN_SERV",
+    "PNBHOUSING": "FIN_SERV",
+    "SBICARD": "FIN_SERV",
+    "PFC": "FIN_SERV",
+    "RECLTD": "FIN_SERV",
+    "IREDA": "FIN_SERV",
+    "HUDCO": "FIN_SERV",
+    "HDFCLIFE": "FIN_SERV",
+    "SBILIFE": "FIN_SERV",
+    "ICICIGI": "FIN_SERV",
+    "ICICIPRULI": "FIN_SERV",
+    "LICI": "FIN_SERV",
+    "MFSL": "FIN_SERV",
+    "NIACL": "FIN_SERV",
+    "GICRE": "FIN_SERV",
+    "STARHEALTH": "FIN_SERV",
+    # Capital Markets, Exchanges, Depositories & AMCs
+    "BSE": "CAPITAL_MARKETS",
+    "MCX": "CAPITAL_MARKETS",
+    "CDSL": "CAPITAL_MARKETS",
+    "KFINTECH": "CAPITAL_MARKETS",
+    "ANANDRATHI": "CAPITAL_MARKETS",
+    "ANGELONE": "CAPITAL_MARKETS",
+    "360ONE": "CAPITAL_MARKETS",
+    "MOTILALOFS": "CAPITAL_MARKETS",
+    "CAMS": "CAPITAL_MARKETS",
+    "HDFCAMC": "CAPITAL_MARKETS",
+    "IEX": "CAPITAL_MARKETS",
+    "UTIAMC": "CAPITAL_MARKETS",
+    "NAM-INDIA": "CAPITAL_MARKETS",
+    "NUVAMA": "CAPITAL_MARKETS",
+    "ABSLAMC": "CAPITAL_MARKETS",
+    "PRUDENT": "CAPITAL_MARKETS",
     # PSU Banks
     "SBIN": "PSU_BANK",
     "BANKBARODA": "PSU_BANK",
@@ -142,6 +187,12 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "PNB": "PSU_BANK",
     "UNIONBANK": "PSU_BANK",
     "INDIANB": "PSU_BANK",
+    "BANKINDIA": "PSU_BANK",
+    "MAHABANK": "PSU_BANK",
+    "IOB": "PSU_BANK",
+    "CENTRALBK": "PSU_BANK",
+    "UCOBANK": "PSU_BANK",
+    "PSB": "PSU_BANK",
     # Pharma & Healthcare
     "SUNPHARMA": "PHARMA",
     "DRREDDY": "PHARMA",
@@ -248,7 +299,7 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "VEDL": "METAL",
     "NATIONALUM": "METAL",
     "HINDZINC": "METAL",
-    "APLLTD": "METAL",
+    "APLLTD": "PHARMA",
     "RATNAMANI": "METAL",
     "JINDALSAW": "METAL",
     "GALLANTT": "METAL",
@@ -282,16 +333,13 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "OIL": "ENERGY",
     "SUZLON": "ENERGY",
     "INOXWIND": "ENERGY",
-    "IREDA": "ENERGY",
-    "PFC": "ENERGY",
-    "REC": "ENERGY",
     "NHPC": "ENERGY",
     "SJVN": "ENERGY",
     "TORNTPOWER": "ENERGY",
     "PREMIERENE": "ENERGY",
     "WAAREEENER": "ENERGY",
     "SWANCORP": "ENERGY",
-    "GUJGASLTD": "ENERGY",
+    "GUJENERGY": "ENERGY",
     # Railways, Metros & Wagons (Mapped to INFRA parent index)
     "TITAGARH": "INFRA",
     "TEXRAIL": "INFRA",
@@ -412,7 +460,10 @@ STOCK_SECTOR_MAP: dict[str, str] = {
 
 SECTOR_CONSTITUENTS: dict[str, list[str]] = {
     "IT": ["INFY", "TCS", "COFORGE", "PERSISTENT", "HCLTECH", "DIXON"],
-    "BANK": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "BAJFINANCE"],
+    "FINTECH": ["POLICYBZR", "PAYTM", "ETERNAL", "SWIGGY", "NYKAA"],
+    "BANK": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK"],
+    "CAPITAL_MARKETS": ["BSE", "MCX", "CDSL", "KFINTECH", "ANANDRATHI", "ANGELONE", "360ONE"],
+    "FIN_SERV": ["BAJFINANCE", "HDFCLIFE", "SBILIFE", "ICICIGI", "SHRIRAMFIN", "CHOLAFIN"],
     "PSU_BANK": ["SBIN", "BANKBARODA", "PNB", "CANBK"],
     "AUTO": ["M&M", "TATAMOTORS", "BAJAJ-AUTO", "MARUTI", "HEROMOTOCO"],
     "PHARMA": ["SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN"],
@@ -426,7 +477,10 @@ SECTOR_CONSTITUENTS: dict[str, list[str]] = {
 
 SECTOR_DRIVERS: dict[str, list[str]] = {
     "IT": ["US Tech Demand", "Fed Rate Policy", "Cloud / Enterprise AI Migration"],
+    "FINTECH": ["Digital Penetration", "Unit Economics & Take-Rates", "Platform ARPU Growth"],
     "BANK": ["Credit Growth (>14% YoY)", "NIM Normalization", "FII Sector Allocation"],
+    "CAPITAL_MARKETS": ["Derivative Turnover & Retail SIPs", "MCX/BSE Volumes", "Wealth AUM Flows"],
+    "FIN_SERV": ["NBFC Cost of Funds", "VNB Insurance Margins", "Credit Cycle Expansion"],
     "PSU_BANK": ["NPA Cleanups", "High RoA (>1.1%)", "Capex Disbursals"],
     "AUTO": ["Festive Channel Filling", "PV & 2W Volume Rebound", "EV Fleet Expansion"],
     "PHARMA": [
@@ -452,7 +506,10 @@ SECTOR_DRIVERS: dict[str, list[str]] = {
 
 SECTOR_PROXY_STOCKS: dict[str, str] = {
     "IT": "INFY",
+    "FINTECH": "POLICYBZR",
     "BANK": "HDFCBANK",
+    "CAPITAL_MARKETS": "BSE",
+    "FIN_SERV": "HDFCLIFE",
     "PSU_BANK": "SBIN",
     "AUTO": "M&M",
     "PHARMA": "SUNPHARMA",
@@ -463,6 +520,100 @@ SECTOR_PROXY_STOCKS: dict[str, str] = {
     "INFRA": "LT",
     "BROAD_MARKET": "RELIANCE",
 }
+
+
+def _sync_stock_sector_map_from_universe() -> None:
+    """Hydrate missing canonical symbols in STOCK_SECTOR_MAP from analysis.universe SSOT."""
+    try:
+        from analysis.universe import _STOCK_TO_SECTOR
+
+        psu_syms = {
+            "SBIN",
+            "BANKBARODA",
+            "CANBK",
+            "PNB",
+            "UNIONBANK",
+            "INDIANB",
+            "BANKINDIA",
+            "MAHABANK",
+            "IOB",
+            "CENTRALBK",
+            "UCOBANK",
+            "PSB",
+        }
+        fin_serv_syms = {
+            "BAJFINANCE",
+            "BAJAJFINSV",
+            "BAJAJHLDNG",
+            "CHOLAFIN",
+            "MUTHOOTFIN",
+            "SHRIRAMFIN",
+            "JIOFIN",
+            "ABCAPITAL",
+            "LTF",
+            "LICHSGFIN",
+            "MANAPPURAM",
+            "PNBHOUSING",
+            "SBICARD",
+            "PFC",
+            "RECLTD",
+            "IREDA",
+            "HUDCO",
+        }
+        disallowed = {
+            "INFOSYS",
+            "ZOMATO",
+            "CENTURYTEX",
+            "UNOINDA",
+            "CEINFO",
+            "SWANENERGY",
+            "JUPITERWAG",
+            "KALPATPOWR",
+            "HITACHI",
+            "GSHIP",
+            "KBL",
+        }
+        taxonomy_to_rrg = {
+            "capital_markets": "CAPITAL_MARKETS",
+            "insurance": "FIN_SERV",
+            "fintech_internet": "FINTECH",
+            "it": "IT",
+            "auto": "AUTO",
+            "defence": "INFRA",
+            "energy": "ENERGY",
+            "metals": "METAL",
+            "pharma": "PHARMA",
+            "fmcg": "FMCG",
+            "realty": "REALTY",
+            "infra": "INFRA",
+            "chemicals": "PHARMA",
+            "telecom": "INFRA",
+            "railways": "INFRA",
+            "commodity": "METAL",
+            "currency": "BROAD_MARKET",
+            "etf": "BROAD_MARKET",
+            "crypto": "BROAD_MARKET",
+            "index": "BROAD_MARKET",
+            "broad_market": "BROAD_MARKET",
+        }
+        for sym, (sec_id, _) in _STOCK_TO_SECTOR.items():
+            if not sym or sym in disallowed or sym in STOCK_SECTOR_MAP:
+                continue
+            if sec_id == "banking":
+                mapped = (
+                    "PSU_BANK"
+                    if sym in psu_syms
+                    else ("FIN_SERV" if sym in fin_serv_syms else "BANK")
+                )
+            else:
+                mapped = taxonomy_to_rrg.get(sec_id, "BROAD_MARKET")
+            if mapped != "BROAD_MARKET":
+                STOCK_SECTOR_MAP[sym] = mapped
+    except Exception as exc:
+        logger.debug("[analysis.sector_rotation] Universe sync skipped: %s", exc)
+
+
+_sync_stock_sector_map_from_universe()
 
 
 def _classify_quadrant(rs_ratio: float, rs_momentum: float) -> str:
@@ -580,7 +731,11 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
         sector_snaps = {}
 
     for sector_name, symbol in NSE_SECTORS.items():
-        snap = sector_snaps.get(sector_name)
+        snap = (
+            sector_snaps.get(sector_name)
+            or (sector_snaps.get("FIN_SERV") if sector_name == "CAPITAL_MARKETS" else None)
+            or (sector_snaps.get("IT") if sector_name == "FINTECH" else None)
+        )
         day_change = snap.change_pct if snap else 0.0
         proxy_sym = SECTOR_PROXY_STOCKS.get(sector_name, "INFY")
         constituents = SECTOR_CONSTITUENTS.get(sector_name, [proxy_sym])
@@ -733,7 +888,10 @@ def get_stock_tailwind(
             sec_id, _ = get_stock_sector(clean_sym)
             taxonomy_map = {
                 "banking": "BANK",
+                "capital_markets": "CAPITAL_MARKETS",
+                "insurance": "FIN_SERV",
                 "it": "IT",
+                "fintech_internet": "FINTECH",
                 "auto": "AUTO",
                 "defence": "INFRA",
                 "energy": "ENERGY",
@@ -748,6 +906,8 @@ def get_stock_tailwind(
                 "commodity": "METAL",
                 "currency": "BROAD_MARKET",
                 "etf": "BROAD_MARKET",
+                "crypto": "BROAD_MARKET",
+                "index": "BROAD_MARKET",
                 "broad_market": "BROAD_MARKET",
             }
             sector = taxonomy_map.get(sec_id, "BROAD_MARKET")
@@ -759,6 +919,10 @@ def get_stock_tailwind(
     else:
         matrix = {p.sector: p for p in get_sector_rrg_matrix()}
     sector_point = matrix.get(sector)
+    if not sector_point and sector in ("CAPITAL_MARKETS", "FIN_SERV"):
+        sector_point = matrix.get("FIN_SERV") or matrix.get("BANK")
+    elif not sector_point and sector == "FINTECH":
+        sector_point = matrix.get("IT")
 
     if not sector_point and matrix:
         # Fallback to BROAD_MARKET point, or nearest valid sector point in matrix

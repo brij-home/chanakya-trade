@@ -294,24 +294,8 @@ def fetch_live_underlying_spot(underlying_symbol: str) -> Optional[float]:
 
 
 def extract_dte(alert: Any) -> Optional[int]:
-    """Extracts Days to Expiry (DTE) from alert metadata or calculates from expiry date."""
-    metrics = _safe_get(alert, "metrics", {}) or {}
-    if isinstance(metrics, dict) and "dte" in metrics and metrics["dte"] is not None:
-        try:
-            return int(metrics["dte"])
-        except (ValueError, TypeError) as e_suppressed:
-            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
-    if hasattr(alert, "dte") and getattr(alert, "dte") is not None:
-        try:
-            return int(getattr(alert, "dte"))
-        except (ValueError, TypeError) as e_suppressed:
-            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
-    exp_details = _safe_get(alert, "expiry_details", {}) or {}
-    if isinstance(exp_details, dict) and exp_details.get("dte") is not None:
-        try:
-            return int(exp_details["dte"])
-        except (ValueError, TypeError) as e_suppressed:
-            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
+    """Extracts Days to Expiry (DTE) from non-past expiry_date first, then explicit metadata."""
+    expired_dte_fallback: Optional[int] = None
     exp_date = _safe_get(alert, "expiry_date", "") or ""
     if exp_date:
         try:
@@ -336,12 +320,33 @@ def extract_dte(alert: Any) -> Optional[int]:
                                 f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}"
                             )
                     now_date = ref_date or datetime.now(IST).date()
-                    return max(0, (exp_dt - now_date).days)
+                    delta_days = (exp_dt - now_date).days
+                    if delta_days >= 0:
+                        return delta_days
+                    expired_dte_fallback = 0
+                    break
                 except ValueError:
                     continue
         except Exception as e_suppressed:
             logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
-    return None
+    if hasattr(alert, "dte") and getattr(alert, "dte") is not None:
+        try:
+            return int(getattr(alert, "dte"))
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
+    metrics = _safe_get(alert, "metrics", {}) or {}
+    if isinstance(metrics, dict) and "dte" in metrics and metrics["dte"] is not None:
+        try:
+            return int(metrics["dte"])
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
+    exp_details = _safe_get(alert, "expiry_details", {}) or {}
+    if isinstance(exp_details, dict) and exp_details.get("dte") is not None:
+        try:
+            return int(exp_details["dte"])
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
+    return expired_dte_fallback
 
 
 def evaluate_synthetic_spot_sl(
@@ -427,10 +432,10 @@ def evaluate_synthetic_spot_sl(
     opt_type = str(_safe_get(alert, "option_type", "") or "").upper()
     is_bullish = (opt_type == "CE") or (direction in ("BULLISH", "BUY", "LONG"))
 
-    # Noise buffer: 0.10% for index benchmarks (absorbs 1-min spread/wicks), 0.05% for equities
+    # Noise buffer: 0.12% for index benchmarks (absorbs 1-min spread/wicks), 0.08% for equities
     clean_und = canonical_alert_symbol(und_sym or "")
     is_index = clean_und in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-    buffer_multiplier = 0.0010 if is_index else 0.0005
+    buffer_multiplier = 0.0012 if is_index else 0.0008
     noise_buffer = spot_anchor * buffer_multiplier
 
     if is_bullish:
@@ -447,13 +452,13 @@ def evaluate_synthetic_spot_sl(
         spot_breached = live_spot > (spot_anchor + noise_buffer)
 
     # Option breakeven absorption shield:
-    # If the option premium is still holding at or above breakeven (current_option_ltp >= opt_entry * 0.98),
-    # do NOT invalidate on a shallow spot breach (< 0.20% beyond anchor) because the option order flow
+    # If the option premium is still holding healthy (current_option_ltp >= opt_entry * 0.96),
+    # do NOT invalidate on a shallow spot breach (< 0.25% beyond anchor) because the option order flow
     # is absorbing the temporary spot wick with positive institutional delta.
     is_option_healthy = (
-        current_option_ltp > 0 and opt_entry > 0 and current_option_ltp >= (opt_entry * 0.98)
+        current_option_ltp > 0 and opt_entry > 0 and current_option_ltp >= (opt_entry * 0.96)
     )
-    if spot_breached and is_option_healthy and abs(spot_distance_pct) < 0.20:
+    if spot_breached and is_option_healthy and abs(spot_distance_pct) < 0.25:
         spot_breached = False
         spot_is_holding = True
         logger.info(
@@ -589,9 +594,9 @@ def evaluate_synthetic_spot_sl(
     # Case 2: De-risked / Breakeven Gate (Enforced regardless of nominal SL)
     if has_derisked and opt_entry > 0 and current_option_ltp < (opt_entry * 0.98):
         reason = (
-            f"Breakeven Protection Triggered: De-risked trade fell below entry "
+            f"Breakeven Protection Triggered: De-risked trade fell below entry buffer "
             f"(Option LTP ₹{current_option_ltp:.1f} < Entry ₹{opt_entry:.1f}, Drawdown -{opt_drawdown * 100:.1f}%). "
-            f"Ratcheted breakeven stop enforced to prevent profitable setup from decaying into loss."
+            f"Protection floor enforced before initial SL breach."
         )
         logger.info(f"[SyntheticSL] {reason}")
         return SyntheticSLEvaluation(
@@ -634,8 +639,39 @@ def evaluate_synthetic_spot_sl(
             underlying_symbol=und_sym,
         )
 
+    init_sl_raw = _safe_get(alert, "initial_stop_loss")
+    is_trailed_sl = False
+    try:
+        # Only disable freak-wick shielding when SL has genuinely trailed to breakeven/profit
+        # (or explicit de-risk milestone), never merely on an early COMPRESS_STALL_RISK step below entry.
+        if opt_entry > 0 and nominal_sl >= (opt_entry - 0.5):
+            is_trailed_sl = True
+        elif (
+            has_derisked
+            and init_sl_raw is not None
+            and float(init_sl_raw) > 0
+            and nominal_sl > float(init_sl_raw) + 0.05
+        ):
+            is_trailed_sl = True
+    except (ValueError, TypeError) as e_trailed:
+        logger.debug(f"[engine.synthetic_sl] Non-fatal trailed-SL check skipped: {e_trailed}")
+
     # Case 4: Nominal Option SL Hit while spot is holding
     if option_sl_hit and spot_is_holding:
+        # Strict Trailed / De-risked SL Gate: NEVER freak-wick-shield a trailed profit or breakeven stop!
+        # Defer cleanly to AlertEvaluator so Trailing Breakeven / Runner Stop exits trigger immediately.
+        if has_derisked or is_trailed_sl:
+            return SyntheticSLEvaluation(
+                is_invalidated=False,
+                rejection_reason=None,
+                is_freak_wick_shielded=False,
+                shield_reason=None,
+                live_spot=live_spot,
+                spot_anchor=spot_anchor,
+                spot_distance_pct=round(spot_distance_pct, 2),
+                option_drawdown_pct=round(opt_drawdown * 100.0, 2),
+                underlying_symbol=und_sym,
+            )
         # Strict 0-DTE Gate: If nominal SL is breached on 0-DTE, even if drawdown is below threshold,
         # any drop > 3% below nominal SL fails closed immediately
         if is_0dte and (current_option_ltp < (nominal_sl * 0.97) or opt_drawdown >= 0.18):

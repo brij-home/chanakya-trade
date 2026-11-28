@@ -28,12 +28,12 @@ _FEATURE_CACHE_LOCK = threading.Lock()
 _FEATURE_CACHE: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
 _MAX_FEATURE_CACHE = 1024
 
-# Representative free-float constituent weight priors (read-only predictor context, never order sizing)
+# Representative free-float constituent weight priors (SSOT across feature_bus, market_internals, index_contagion)
 INDEX_CONSTITUENT_WEIGHTS: dict[str, dict[str, float]] = {
     "NIFTY": {
         "HDFCBANK": 0.125,
-        "ICICIBANK": 0.085,
         "RELIANCE": 0.088,
+        "ICICIBANK": 0.085,
         "INFY": 0.058,
         "BHARTIARTL": 0.044,
         "LT": 0.042,
@@ -44,25 +44,43 @@ INDEX_CONSTITUENT_WEIGHTS: dict[str, dict[str, float]] = {
     },
     "BANKNIFTY": {
         "HDFCBANK": 0.285,
-        "ICICIBANK": 0.245,
-        "SBIN": 0.110,
-        "KOTAKBANK": 0.095,
+        "ICICIBANK": 0.240,
+        "SBIN": 0.105,
         "AXISBANK": 0.095,
+        "KOTAKBANK": 0.090,
         "INDUSINDBK": 0.045,
     },
     "MIDCPNIFTY": {
-        "MAXHEALTH": 0.218,
-        "PERSISTENT": 0.212,
-        "COFORGE": 0.196,
-        "DIXON": 0.190,
-        "FEDERALBNK": 0.184,
+        "PERSISTENT": 0.078,
+        "FEDERALBNK": 0.069,
+        "DIXON": 0.064,
+        "POLYCAB": 0.061,
+        "COFORGE": 0.058,
+        "AUBANK": 0.055,
+        "HDFCAMC": 0.052,
+        "ASHOKLEY": 0.049,
+        "MAXHEALTH": 0.047,
+        "CONCOR": 0.044,
     },
     "SENSEX": {
-        "HDFCBANK": 0.292,
-        "RELIANCE": 0.250,
-        "ICICIBANK": 0.199,
-        "INFY": 0.152,
-        "TCS": 0.107,
+        "HDFCBANK": 0.148,
+        "RELIANCE": 0.122,
+        "ICICIBANK": 0.105,
+        "INFY": 0.072,
+        "TCS": 0.052,
+        "LT": 0.049,
+        "BHARTIARTL": 0.045,
+        "SBIN": 0.039,
+        "AXISBANK": 0.038,
+        "KOTAKBANK": 0.032,
+    },
+    "FINNIFTY": {
+        "HDFCBANK": 0.280,
+        "ICICIBANK": 0.220,
+        "BAJFINANCE": 0.095,
+        "SBIN": 0.075,
+        "AXISBANK": 0.070,
+        "KOTAKBANK": 0.065,
     },
 }
 
@@ -183,15 +201,35 @@ def compute_shared_features(
     vol_ma20 = float(vol.rolling(20, min_periods=5).mean().iloc[-1])
     vol_ratio = (float(vol.iloc[-1]) / vol_ma20) if vol_ma20 > 0 else 0.0
 
+    # Time-of-Day Normalized RVOL (TOD-RVOL): compares latest bar against prior sessions'
+    # same (hour, minute) volume baseline when multi-day intraday timestamps exist.
+    tod_rvol = vol_ratio
+    if hasattr(df_intraday.index, "time") and hasattr(df_intraday.index, "date") and len(vol) >= 2:
+        try:
+            cur_ts = df_intraday.index[-1]
+            cur_date = cur_ts.date()
+            cur_time = cur_ts.time()
+            same_tod = vol[
+                (df_intraday.index.time == cur_time) & (df_intraday.index.date < cur_date)
+            ]
+            same_tod_pos = same_tod[same_tod > 0]
+            if len(same_tod_pos) >= 1:
+                tod_base = float(same_tod_pos.median())
+                if tod_base > 0:
+                    tod_rvol = float(vol.iloc[-1]) / tod_base
+        except Exception:
+            tod_rvol = vol_ratio
+    eff_vol_ratio = max(vol_ratio, tod_rvol)
+
     # Universal STALK -> PRIMED -> IGNITED -> EXTENDED timing hint
     ema_dist_atr = abs(last_close - ema_20) / atr_14
     if ema_dist_atr > 1.75:
         pre_breakout_stage = "EXTENDED"
-    elif (squeeze_on or nr7) and ema_dist_atr <= 0.60 and vol_ratio < 1.3:
+    elif (squeeze_on or nr7) and ema_dist_atr <= 0.60 and eff_vol_ratio < 1.3:
         pre_breakout_stage = "STALK"
-    elif (squeeze_on or nr7 or ema_dist_atr <= 0.45) and vol_ratio >= 1.15:
+    elif (squeeze_on or nr7 or ema_dist_atr <= 0.45) and eff_vol_ratio >= 1.15:
         pre_breakout_stage = "PRIMED"
-    elif vol_ratio >= 1.50 and ema_dist_atr <= 1.35:
+    elif eff_vol_ratio >= 1.50 and ema_dist_atr <= 1.35:
         pre_breakout_stage = "IGNITED"
     else:
         pre_breakout_stage = "STALK" if ema_dist_atr <= 0.80 else "NEUTRAL"
@@ -212,6 +250,7 @@ def compute_shared_features(
         "kc_squeeze_on": squeeze_on,
         "nr7": nr7,
         "vol_ratio": round(vol_ratio, 3),
+        "tod_rvol": round(tod_rvol, 3),
         "ema20_dist_atr": round(ema_dist_atr, 3),
         "pre_breakout_stage": pre_breakout_stage,
     }
@@ -306,6 +345,44 @@ def compute_constituent_lead_lag(
         "bullish_vwap_weight_pct": round(bull_pct, 1),
         "bearish_vwap_weight_pct": round(bear_pct, 1),
         "lead_bias": bias,
+    }
+
+
+def evaluate_index_constituent_confluence(
+    index_symbol: str,
+    direction: str,
+    quotes_map: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Evaluate whether index heavyweight constituents lead or oppose a directional thesis."""
+    ll = compute_constituent_lead_lag(index_symbol, quotes_map=quotes_map)
+    if ll.get("status") != "AVAILABLE":
+        return {
+            **ll,
+            "aligned": False,
+            "strongly_aligned": False,
+            "opposed": False,
+        }
+
+    is_bull = str(direction or "BULLISH").upper() in ("BULLISH", "BUY", "LONG", "CE")
+    lb = ll.get("lead_bias", "NEUTRAL")
+    w_imp = float(ll.get("weighted_impulse_pct", 0.0) or 0.0)
+    bull_w = float(ll.get("bullish_vwap_weight_pct", 0.0) or 0.0)
+    bear_w = float(ll.get("bearish_vwap_weight_pct", 0.0) or 0.0)
+
+    if is_bull:
+        aligned = lb == "BULLISH_LEAD" or (w_imp >= 0.20 and bull_w >= 60.0)
+        strongly_aligned = lb == "BULLISH_LEAD" and w_imp >= 0.35 and bull_w >= 65.0
+        opposed = lb == "BEARISH_LEAD" and w_imp <= -0.30 and bear_w >= 65.0
+    else:
+        aligned = lb == "BEARISH_LEAD" or (w_imp <= -0.20 and bear_w >= 60.0)
+        strongly_aligned = lb == "BEARISH_LEAD" and w_imp <= -0.35 and bear_w >= 65.0
+        opposed = lb == "BULLISH_LEAD" and w_imp >= 0.30 and bull_w >= 65.0
+
+    return {
+        **ll,
+        "aligned": aligned,
+        "strongly_aligned": strongly_aligned,
+        "opposed": opposed,
     }
 
 
