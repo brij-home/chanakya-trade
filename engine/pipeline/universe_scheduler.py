@@ -25,13 +25,52 @@ DEFAULT_WATCHED_INDICES: tuple[str, ...] = (
 )
 
 
+def _extract_15m_impulse_pct(
+    symbol: str,
+    quote: Any,
+    ohlcv_map: Optional[dict[str, Any]] = None,
+) -> float:
+    """Measure recent 15m (3 x 5m bars) absolute price acceleration to catch mid-session reversals."""
+    is_d = isinstance(quote, dict)
+    q_imp = abs(
+        float(
+            (
+                quote.get("chg_15m") or quote.get("accel_15m_pct")
+                if is_d
+                else (getattr(quote, "chg_15m", 0.0) or getattr(quote, "accel_15m_pct", 0.0))
+            )
+            or 0.0
+        )
+    )
+    if q_imp > 0 or not ohlcv_map:
+        return q_imp
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    df = None
+    for k in (f"{clean}:5m", clean, symbol):
+        cand = ohlcv_map.get(k)
+        if cand is not None:
+            df = cand
+            break
+    if df is not None and len(df) >= 4:
+        try:
+            col = "close" if "close" in df.columns else "Close"
+            c_now = float(df[col].iloc[-1] or 0.0)
+            c_prev = float(df[col].iloc[-4] or 0.0)
+            if c_prev > 0 and c_now > 0:
+                return abs((c_now - c_prev) / c_prev * 100.0)
+        except Exception as e_imp:
+            logger.debug(f"[UniverseScheduler] 15m impulse calc skipped for {clean}: {e_imp}")
+    return 0.0
+
+
 def score_symbol_velocity(
     symbol: str,
     quotes_map: dict[str, Any],
     *,
     lot_size: Optional[int] = None,
+    ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> float:
-    """Rank equity/F&O symbol priority from live price change, turnover & TOD RVOL."""
+    """Rank equity/F&O symbol priority from day change, 15m impulse, turnover & TOD RVOL."""
     clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
     q = quotes_map.get(f"NSE:{clean}") or quotes_map.get(f"BSE:{clean}") or quotes_map.get(symbol)
     if not q:
@@ -39,6 +78,8 @@ def score_symbol_velocity(
 
     is_d = isinstance(q, dict)
     chg = abs(float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0))
+    imp_15m = _extract_15m_impulse_pct(symbol, q, ohlcv_map=ohlcv_map)
+    effective_move = max(chg, imp_15m * 1.6)
     vol = float((q.get("volume") if is_d else getattr(q, "volume", 0.0)) or 0.0)
     ltp = float(
         (
@@ -76,9 +117,9 @@ def score_symbol_velocity(
     is_liquid = (
         (vol > 300_000) or (turnover_cr >= 10.0) or (is_fno and (vol / max(1, lot_sz) >= 60))
     )
-    rvol_boost = 1.4 if (rvol_p >= 1.75 and chg >= 0.40) else 1.0
+    rvol_boost = 1.4 if (rvol_p >= 1.75 and effective_move >= 0.40) else 1.0
     drive_boost = 1.0
-    if chg >= 0.50 and ltp > 0:
+    if effective_move >= 0.50 and ltp > 0:
         open_p = float((q.get("open") if is_d else getattr(q, "open", 0.0)) or 0.0)
         high_p = float((q.get("high") if is_d else getattr(q, "high", 0.0)) or 0.0)
         low_p = float((q.get("low") if is_d else getattr(q, "low", 0.0)) or 0.0)
@@ -95,8 +136,10 @@ def score_symbol_velocity(
                     drive_boost *= 1.15
             if (day_rng / ltp) * 100.0 >= 1.5 and rvol_p >= 1.5:
                 drive_boost *= 1.20
+    if imp_15m >= 0.75:
+        drive_boost *= 1.25
 
-    return chg * (1.5 if is_liquid else 1.0) * rvol_boost * drive_boost
+    return effective_move * (1.5 if is_liquid else 1.0) * rvol_boost * drive_boost
 
 
 def identify_early_fno_movers(
@@ -105,8 +148,9 @@ def identify_early_fno_movers(
     *,
     top_n: int = 60,
     min_move_pct: float = 0.5,
+    ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> list[str]:
-    """Zero-chain full-F&O pre-filter surfacing opening drives & early velocity movers."""
+    """Zero-chain full-F&O pre-filter surfacing opening drives & mid-session 15m reversals."""
     policy = get_discovery_policy()
     filtered: list[str] = []
     for sym in equities:
@@ -125,7 +169,7 @@ def identify_early_fno_movers(
     for sym in filtered:
         clean = sym.upper().replace("NSE:", "").replace("BSE:", "").strip()
         q = quotes_map.get(f"NSE:{clean}") or quotes_map.get(f"BSE:{clean}") or quotes_map.get(sym)
-        score = score_symbol_velocity(sym, quotes_map)
+        score = score_symbol_velocity(sym, quotes_map, ohlcv_map=ohlcv_map)
         chg = (
             abs(
                 float(
@@ -136,7 +180,8 @@ def identify_early_fno_movers(
             if q
             else 0.0
         )
-        if chg >= float(min_move_pct):
+        imp_15m = _extract_15m_impulse_pct(sym, q, ohlcv_map=ohlcv_map) if q else 0.0
+        if chg >= float(min_move_pct) or imp_15m >= float(min_move_pct):
             active_movers.append((score, sym))
         else:
             quiet_pool.append((score, sym))

@@ -20315,7 +20315,7 @@ class AutoAlertEngine:
         if hasattr(self, "_cached_pre_inflection") and self._cached_pre_inflection:
             ts, alerts = self._cached_pre_inflection
 
-            if (now_ts - ts) < 300.0:
+            if (now_ts - ts) < 120.0:
                 return list(alerts)
 
         from engine.alert_identity import canonical_alert_symbol
@@ -21472,38 +21472,11 @@ class AutoAlertEngine:
             eq_list = [s for s in self.watched_equities if s not in targets]
 
             if quotes_map:
+                from engine.pipeline.universe_scheduler import identify_early_fno_movers
 
-                def _mover_velocity_score(sym: str) -> float:
-
-                    q = (
-                        quotes_map.get(f"NSE:{sym}")
-                        or quotes_map.get(f"BSE:{sym}")
-                        or quotes_map.get(sym)
-                    )
-
-                    if not q:
-                        return 0.0
-
-                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
-
-                    vol = float(getattr(q, "volume", 0.0) or 0.0)
-                    rvol_q = float(
-                        getattr(q, "rvol", 0.0)
-                        or getattr(q, "bar_rvol", 0.0)
-                        or getattr(q, "volume_surge", 0.0)
-                        or 1.0
-                    )
-                    early_rvol_mult = (
-                        (1.0 + min(2.0, max(0.0, rvol_q - 1.0))) if chg >= 0.40 else 1.0
-                    )
-
-                    return (
-                        chg
-                        * (2.0 if vol > 1000000 else (1.5 if vol > 250000 else 1.0))
-                        * early_rvol_mult
-                    )
-
-                eq_list.sort(key=_mover_velocity_score, reverse=True)
+                eq_list = identify_early_fno_movers(
+                    eq_list, quotes_map=quotes_map, top_n=len(eq_list)
+                )
 
             targets.extend(eq_list)
 
@@ -25630,7 +25603,7 @@ class AutoAlertEngine:
 
             _shutdown_executor_nonblocking(executor)
 
-        # Phase 2 Shadow Staging Pass: update WATCH -> ARMED -> TRIGGERED radar across Index + Top Stock F&O
+        # Phase 2 Armed Level State Machine Pass: pre-arm WATCH -> ARMED -> TRIGGERED setups across Index + Top F&O
         if not is_test:
             try:
                 from engine.level_state_machine import armed_radar
@@ -25644,20 +25617,93 @@ class AutoAlertEngine:
                                 ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"),
                             )
                         )
-                        + list(active_cycle_targets[:15] if active_cycle_targets else [])
+                        + list(active_cycle_targets[:20] if active_cycle_targets else [])
                     )
                 )
                 shadow_ohlcv: dict[str, Any] = {}
                 for s_key, s_df in ohlcv_map.items():
                     if isinstance(s_key, str) and s_key.endswith(":5m"):
                         shadow_ohlcv[s_key[:-3]] = s_df
+                for s_sym in shadow_syms:
+                    c_sym = canonical_alert_symbol(s_sym).upper()
+                    if c_sym not in shadow_ohlcv:
+                        ex_sym = "BSE" if c_sym in ("SENSEX", "BANKEX") else "NSE"
+                        df_cached = self._get_shared_intraday_df(
+                            c_sym,
+                            ex_sym,
+                            interval="5m",
+                            days=2,
+                            min_bars=12,
+                            is_test_env=True,
+                        )
+                        if df_cached is not None and not df_cached.empty:
+                            shadow_ohlcv[c_sym] = df_cached
                 if shadow_ohlcv:
-                    armed_radar.evaluate_universe(
+                    armed_states = armed_radar.evaluate_universe(
                         shadow_syms,
                         ohlcv_5m_map=shadow_ohlcv,
                         quotes_map=quotes_map,
                         promote_tbt=True,
                     )
+                    now_arm = datetime.now(IST)
+                    for st in armed_states:
+                        if st.stage not in ("ARMED", "TRIGGERED"):
+                            continue
+                        if not st.stop_loss or not st.target_1 or st.spot <= 0:
+                            continue
+                        seg_arm = "FNO_INDEX" if st.asset_class == "INDEX" else "FNO_STOCK"
+                        exch_arm = "BFO" if st.symbol in ("SENSEX", "BANKEX") else "NFO"
+                        dir_slug = "bull" if st.direction == "BULLISH" else "bear"
+                        anc_slug = re.sub(r"[^a-z0-9]+", "-", st.anchor_name.lower()).strip("-")
+                        aid_arm = generate_alert_id(
+                            st.symbol,
+                            "LEVEL_ARMED_TRIGGER",
+                            session_date=now_arm.date(),
+                            variant=f"{anc_slug}-{dir_slug}",
+                        )
+                        arm_alert = AutoAlert(
+                            alert_id=aid_arm,
+                            alert_type="LEVEL_ARMED_TRIGGER",
+                            stage="IGNITED" if st.stage == "TRIGGERED" else "PRIMED",
+                            symbol=st.symbol,
+                            exchange=exch_arm,
+                            segment=seg_arm,
+                            direction=st.direction,
+                            headline=(
+                                f"{st.symbol} {'TRIGGERED' if st.stage == 'TRIGGERED' else 'ARMED Pre-Breakout'} "
+                                f"@ {st.anchor_name} ₹{st.anchor_price:,.1f}"
+                            ),
+                            summary=(
+                                f"Causal {st.direction} level setup near {st.anchor_name} "
+                                f"(dist={st.distance_atr:.2f} ATR). {', '.join(st.confirmation_reasons[:3])}"
+                            ),
+                            ltp=float(st.spot),
+                            trigger_level=float(st.anchor_price),
+                            stop_loss=float(st.stop_loss),
+                            initial_stop_loss=float(st.stop_loss),
+                            target_level=float(st.target_1),
+                            no_chase_boundary=float(st.no_chase_boundary)
+                            if st.no_chase_boundary is not None
+                            else None,
+                            confidence=84 if st.stage == "TRIGGERED" else 76,
+                            created_at=now_arm.strftime("%Y-%m-%d %H:%M:%S IST"),
+                            triggered_at=now_arm.strftime("%Y-%m-%d %H:%M:%S IST")
+                            if st.stage == "TRIGGERED"
+                            else None,
+                            is_live=True,
+                            environment="LIVE",
+                            metrics={
+                                "anchor_name": st.anchor_name,
+                                "anchor_price": st.anchor_price,
+                                "distance_atr": st.distance_atr,
+                                "extension_atr": st.extension_atr,
+                                "lead_time_sec": st.lead_time_sec,
+                                "tbt_scout_promoted": st.tbt_scout_promoted,
+                                "signals": list(st.confirmation_reasons),
+                            },
+                        )
+                        if self.record_alert(arm_alert):
+                            results.append(arm_alert)
             except Exception as e_arm:
                 logger.debug(f"[AutoAlertEngine] Armed radar shadow pass note: {e_arm}")
 

@@ -344,13 +344,21 @@ class DetectorCircuitBreaker:
         if today_consecutive_losses >= 5 or (expectancy < -0.60 and today_consecutive_losses >= 3):
             status: DetectorStatus = "HALTED"
             multiplier = 0.0
-        elif (
+        elif has_verified_performance_provenance and (
             consecutive_losses >= 3
             or today_consecutive_losses >= 2
             or expectancy < 0.0
-            or (has_verified_performance_provenance and kelly <= 0.0)
-            or (expectancy < -0.60 and today_consecutive_losses < 3)
+            or kelly <= 0.0
+            or expectancy < -0.60
         ):
+            status = "PROBATION"
+            multiplier = 0.75
+        elif not has_verified_performance_provenance and (
+            today_consecutive_losses >= 2 or (expectancy < -0.55 and count >= 10)
+        ):
+            # Forward-path terminal logs intentionally exclude partial/T1+ winners (SAFETY_CONTRACTS #18).
+            # Apply probation only on same-day intraday losing streaks or severe unscaled drawdown
+            # so censored historical negative expectancy does not permanently mute healthy detectors.
             status = "PROBATION"
             multiplier = 0.75
         elif has_verified_performance_provenance and expectancy >= 0.20 and win_rate >= 0.40:

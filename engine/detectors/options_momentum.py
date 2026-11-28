@@ -363,6 +363,165 @@ def detect_options_momentum_breakouts(
         from engine.position_sizer import get_lot_size
 
         try:
+            # ── Spot-First Pre-Filter Funnel (compute 5m/VWAP/RVOL BEFORE cold REST option-chain calls) ──
+            df_5m = None
+            if not is_test_env:
+                try:
+                    from engine.market_matrix import get_market_matrix
+
+                    mm = get_market_matrix()
+                    df_5m = mm.get_candles_df(clean_sym, timeframe="5m", limit=80)
+                except Exception:
+                    df_5m = None
+
+            if df_5m is None or len(df_5m) < 6:
+                try:
+                    from market.history import get_ohlcv
+
+                    df_5m = get_ohlcv(clean_sym, exchange=exch, interval="5minute", days=2)
+                    if df_5m is not None and len(df_5m) >= 6 and not is_test_env:
+                        try:
+                            from engine.market_matrix import get_market_matrix
+
+                            get_market_matrix().seed_historical_candles(clean_sym, "5m", df_5m)
+                        except Exception as e_om5:
+                            logger.debug(
+                                f"[OptionsMomentum] MarketMatrix 5m seed skipped for {clean_sym}: {e_om5}"
+                            )
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+
+            if df_5m is not None and len(df_5m) >= 1:
+                try:
+                    last_c = float(df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0)))
+                    if last_c > 0 and abs(last_c - spot) / max(1.0, spot) > 0.15:
+                        df_5m = None
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+
+            if (not spot_vwap or spot_vwap <= 0) and df_5m is not None and len(df_5m) >= 2:
+                try:
+                    df_vw = df_5m
+                    if hasattr(df_5m.index, "date"):
+                        sub_today = df_5m[df_5m.index.date == now_dt.date()]
+                        if len(sub_today) >= 2:
+                            df_vw = sub_today
+                        else:
+                            last_sess = df_5m.index.date[-1]
+                            sub_last = df_5m[df_5m.index.date == last_sess]
+                            if len(sub_last) >= 2:
+                                df_vw = sub_last
+                    vols = df_vw["volume"].values
+                    highs = (
+                        df_vw["high"].values if "high" in df_vw.columns else df_vw["High"].values
+                    )
+                    lows = df_vw["low"].values if "low" in df_vw.columns else df_vw["Low"].values
+                    closes = (
+                        df_vw["close"].values if "close" in df_vw.columns else df_vw["Close"].values
+                    )
+                    cum_vol = np.cumsum(vols)
+                    if cum_vol[-1] > 0:
+                        typical_price = (highs + lows + closes) / 3.0
+                        cum_pv = np.cumsum(typical_price * vols)
+                        spot_vwap = float(cum_pv[-1] / cum_vol[-1])
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+            if not spot_vwap or spot_vwap <= 0:
+                try:
+                    from market.quotes import get_computed_vwap
+
+                    spot_vwap = float(get_computed_vwap(clean_sym, exchange=exch) or 0.0)
+                except Exception:
+                    spot_vwap = spot_vwap or 0.0
+
+            spot_rvol: float = 0.0
+            spot_atr: Optional[float] = None
+            if df_5m is not None and len(df_5m) >= 5:
+                try:
+                    _col_v = (
+                        "volume"
+                        if "volume" in df_5m.columns
+                        else ("Volume" if "Volume" in df_5m.columns else None)
+                    )
+                    if _col_v:
+                        _vols = df_5m[_col_v].astype(float)
+                        _last_v = float(_vols.iloc[-1] or 0.0)
+                        _med_v = float(_vols.iloc[:-1].median() or 0.0)
+                        if _med_v > 0 and _last_v > 0:
+                            spot_rvol = round(min(15.0, _last_v / _med_v), 2)
+                except Exception:
+                    spot_rvol = 0.0
+
+                try:
+                    _col_h = "high" if "high" in df_5m.columns else "High"
+                    _col_l = "low" if "low" in df_5m.columns else "Low"
+                    _col_c = "close" if "close" in df_5m.columns else "Close"
+                    _h_s = df_5m[_col_h].astype(float)
+                    _l_s = df_5m[_col_l].astype(float)
+                    _c_s = df_5m[_col_c].astype(float)
+                    _prev_c = _c_s.shift(1).fillna(_c_s)
+                    _tr = (
+                        (_h_s - _l_s)
+                        .combine((_h_s - _prev_c).abs(), max)
+                        .combine((_l_s - _prev_c).abs(), max)
+                    )
+                    _avg_5m_tr = float(_tr.tail(min(14, len(_tr))).mean() or 0.0)
+                    if _avg_5m_tr > 0:
+                        spot_atr = round(_avg_5m_tr * float(np.sqrt(75.0)), 2)
+                except Exception:
+                    spot_atr = None
+
+            upper_wick_ratio = 0.0
+            lower_wick_ratio = 0.0
+            candle_range = 0.0
+            if df_5m is not None and len(df_5m) >= 1:
+                try:
+                    last_bar = df_5m.iloc[-1]
+                    b_high = float(last_bar.get("high", last_bar.get("High", 0.0)))
+                    b_low = float(last_bar.get("low", last_bar.get("Low", 0.0)))
+                    b_open = float(last_bar.get("open", last_bar.get("Open", 0.0)))
+                    b_close = float(last_bar.get("close", last_bar.get("Close", 0.0)))
+                    candle_range = max(0.01, b_high - b_low)
+                    upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
+                    lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+
+            has_prewarmed_chain = bool(
+                chains_map is not None and (chains_map.get(clean_sym) or chains_map.get(sym))
+            )
+            if not is_idx and not is_comm and not is_test_env and not has_prewarmed_chain:
+                if (
+                    0 < spot_rvol < 0.70
+                    and abs(spot_change_pct) < 1.2
+                    and not (is_bull_drive or is_bear_drive)
+                ):
+                    logger.debug(
+                        f"[OptionsBreakout] Spot-first skip {clean_sym} before chain fetch: low RVOL {spot_rvol:.2f}x"
+                    )
+                    return None
+                if (
+                    spot_vwap > 0
+                    and not (is_bull_drive or is_bear_drive)
+                    and abs(spot_change_pct) < 1.5
+                    and (
+                        (spot_change_pct >= 0.35 and spot < spot_vwap * 0.996)
+                        or (spot_change_pct <= -0.35 and spot > spot_vwap * 1.004)
+                    )
+                ):
+                    logger.debug(
+                        f"[OptionsBreakout] Spot-first skip {clean_sym} before chain fetch: fighting VWAP ({spot:.1f} vs {spot_vwap:.1f})"
+                    )
+                    return None
+
             # Institutional Single-Stock Expiry Protection:
             # Under SEBI regulations, single-stock options are physically settled.
             # In settlement week (DTE <= 4), automatically route stock options to Next-Month
@@ -490,144 +649,6 @@ def detect_options_momentum_breakouts(
                     return prem_score + oi_score + turnover - (dist_p * 250.0)
 
                 atm_contracts.sort(key=_stock_strike_score, reverse=True)
-
-            # ── Underlying Price Action & SMC Due Diligence ──
-            is_test_env = (
-                (os.environ.get("CHANAKYA_TESTING") == "1")
-                or (os.environ.get("DEPLOY_MODE") == "test")
-                or ("PYTEST_CURRENT_TEST" in os.environ)
-            )
-            df_5m = None
-            if not is_test_env:
-                try:
-                    from engine.market_matrix import get_market_matrix
-
-                    mm = get_market_matrix()
-                    df_5m = mm.get_candles_df(clean_sym, timeframe="5m", limit=80)
-                except Exception:
-                    df_5m = None
-
-            if df_5m is None or len(df_5m) < 6:
-                try:
-                    from market.history import get_ohlcv
-
-                    df_5m = get_ohlcv(clean_sym, exchange=exch, interval="5minute", days=2)
-                    if df_5m is not None and len(df_5m) >= 6 and not is_test_env:
-                        try:
-                            from engine.market_matrix import get_market_matrix
-
-                            get_market_matrix().seed_historical_candles(clean_sym, "5m", df_5m)
-                        except Exception as e_om5:
-                            logger.debug(
-                                f"[OptionsMomentum] MarketMatrix 5m seed skipped for {clean_sym}: {e_om5}"
-                            )
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-
-            if df_5m is not None and len(df_5m) >= 1:
-                try:
-                    last_c = float(df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0)))
-                    if last_c > 0 and abs(last_c - spot) / max(1.0, spot) > 0.15:
-                        df_5m = None
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-
-            if (not spot_vwap or spot_vwap <= 0) and df_5m is not None and len(df_5m) >= 2:
-                try:
-                    # Single-session intraday VWAP: never mix yesterday's bars with today's bars
-                    df_vw = df_5m
-                    if hasattr(df_5m.index, "date"):
-                        sub_today = df_5m[df_5m.index.date == now_dt.date()]
-                        if len(sub_today) >= 2:
-                            df_vw = sub_today
-                        else:
-                            last_sess = df_5m.index.date[-1]
-                            sub_last = df_5m[df_5m.index.date == last_sess]
-                            if len(sub_last) >= 2:
-                                df_vw = sub_last
-                    vols = df_vw["volume"].values
-                    highs = (
-                        df_vw["high"].values if "high" in df_vw.columns else df_vw["High"].values
-                    )
-                    lows = df_vw["low"].values if "low" in df_vw.columns else df_vw["Low"].values
-                    closes = (
-                        df_vw["close"].values if "close" in df_vw.columns else df_vw["Close"].values
-                    )
-                    cum_vol = np.cumsum(vols)
-                    if cum_vol[-1] > 0:
-                        typical_price = (highs + lows + closes) / 3.0
-                        cum_pv = np.cumsum(typical_price * vols)
-                        spot_vwap = float(cum_pv[-1] / cum_vol[-1])
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-            if not spot_vwap or spot_vwap <= 0:
-                try:
-                    from market.quotes import get_computed_vwap
-
-                    spot_vwap = float(get_computed_vwap(clean_sym, exchange=exch) or 0.0)
-                except Exception:
-                    spot_vwap = spot_vwap or 0.0
-
-            spot_rvol: float = 0.0
-            spot_atr: Optional[float] = None
-            if df_5m is not None and len(df_5m) >= 5:
-                try:
-                    _col_v = (
-                        "volume"
-                        if "volume" in df_5m.columns
-                        else ("Volume" if "Volume" in df_5m.columns else None)
-                    )
-                    if _col_v:
-                        _vols = df_5m[_col_v].astype(float)
-                        _last_v = float(_vols.iloc[-1] or 0.0)
-                        _med_v = float(_vols.iloc[:-1].median() or 0.0)
-                        if _med_v > 0 and _last_v > 0:
-                            spot_rvol = round(min(15.0, _last_v / _med_v), 2)
-                except Exception:
-                    spot_rvol = 0.0
-
-                try:
-                    _col_h = "high" if "high" in df_5m.columns else "High"
-                    _col_l = "low" if "low" in df_5m.columns else "Low"
-                    _col_c = "close" if "close" in df_5m.columns else "Close"
-                    _h_s = df_5m[_col_h].astype(float)
-                    _l_s = df_5m[_col_l].astype(float)
-                    _c_s = df_5m[_col_c].astype(float)
-                    _prev_c = _c_s.shift(1).fillna(_c_s)
-                    _tr = (
-                        (_h_s - _l_s)
-                        .combine((_h_s - _prev_c).abs(), max)
-                        .combine((_l_s - _prev_c).abs(), max)
-                    )
-                    _avg_5m_tr = float(_tr.tail(min(14, len(_tr))).mean() or 0.0)
-                    if _avg_5m_tr > 0:
-                        spot_atr = round(_avg_5m_tr * float(np.sqrt(75.0)), 2)
-                except Exception:
-                    spot_atr = None
-
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-            candle_range = 0.0
-            if df_5m is not None and len(df_5m) >= 1:
-                try:
-                    last_bar = df_5m.iloc[-1]
-                    b_high = float(last_bar.get("high", last_bar.get("High", 0.0)))
-                    b_low = float(last_bar.get("low", last_bar.get("Low", 0.0)))
-                    b_open = float(last_bar.get("open", last_bar.get("Open", 0.0)))
-                    b_close = float(last_bar.get("close", last_bar.get("Close", 0.0)))
-                    candle_range = max(0.01, b_high - b_low)
-                    upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
-                    lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
-                    )
 
             # ── Institutional Daily Levels & Central Pivot Range (CPR) ───────────
             from engine.daily_levels import get_daily_levels, evaluate_cpr_gate

@@ -473,3 +473,144 @@ def test_ws_subscription_purpose_distinguishes_fno_from_cash_context(monkeypatch
     purposes = mgr.reconcile_subscription_purposes()
     assert purposes["NSE:RELIANCE-EQ"] == "FNO_STOCK"
     assert purposes["NSE:MODISONLTD-BE"] == "CONTEXT_CASH"
+
+
+def test_censored_forward_path_moderate_loss_avoids_probation_blackout(tmp_path) -> None:
+    """Censored ALERT_FORWARD_PATH_TERMINAL (-0.31R) must not mute Telegram via PROBATION without same-day streaks."""
+    from datetime import datetime
+    from engine.detector_circuit_breaker import DetectorCircuitBreaker
+
+    cb = DetectorCircuitBreaker(
+        ledger_file=tmp_path / "cb_censor.json", rolling_window=20, min_samples=5
+    )
+    # Record 5 historical-dated outcomes on prior days: 2 wins (+1.1R), 3 losses (-1.0R) -> E = -0.16R
+    for i, r in enumerate([1.1, -1.0, -1.0, 1.1, -1.0]):
+        cb.record_outcome(
+            f"hist-{i}",
+            "NIFTY",
+            "OPTIONS_MOMENTUM",
+            "WIN" if r > 0 else "LOSS",
+            r,
+            provenance="ALERT_FORWARD_PATH_TERMINAL",
+        )
+    # Force prior-day timestamps so today_consecutive_losses == 0
+    with cb._lock:
+        for row in cb._history["OPTIONS_MOMENTUM"]:
+            row.timestamp = "2026-11-27 10:00:00 IST"
+        cb._save_unlocked()
+
+    m = cb.get_metrics("OPTIONS_MOMENTUM")
+    assert m.status == "NORMAL"
+    assert m.confidence_multiplier == 1.0
+
+    # Today's 2 consecutive intraday losses MUST still trigger PROBATION protective throttle
+    today_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    for j in range(2):
+        cb.record_outcome(
+            f"today-{j}",
+            "NIFTY",
+            "OPTIONS_MOMENTUM",
+            "LOSS",
+            -1.0,
+            provenance="ALERT_FORWARD_PATH_TERMINAL",
+        )
+        with cb._lock:
+            cb._history["OPTIONS_MOMENTUM"][-1].timestamp = today_str
+    m_today = cb.get_metrics("OPTIONS_MOMENTUM")
+    assert m_today.status == "PROBATION"
+    assert m_today.confidence_multiplier == 0.75
+
+
+def test_identify_early_fno_movers_captures_mid_session_15m_reversal() -> None:
+    """Mid-day reversal near 0% day-change but >=1.3% 15m impulse must rank ahead of sleepy drift."""
+    from engine.pipeline.universe_scheduler import identify_early_fno_movers
+
+    idx = pd.date_range("2026-11-28 09:15", periods=6, freq="5min")
+    df_rev = pd.DataFrame(
+        {
+            "open": [101.5] * 6,
+            "high": [101.8] * 6,
+            "low": [99.8] * 6,
+            "close": [101.4, 101.3, 101.2, 100.8, 100.2, 99.7],
+            "volume": [10000] * 6,
+        },
+        index=idx,
+    )
+    quotes = {
+        "NSE:ADANIENSOL": SimpleNamespace(
+            change_pct=-0.10,
+            open=101.5,
+            high=101.8,
+            low=99.6,
+            last_price=99.7,
+            volume=600000,
+            rvol=1.6,
+        ),
+        "NSE:DRIFT": SimpleNamespace(
+            change_pct=0.55,
+            open=100.0,
+            high=100.7,
+            low=99.8,
+            last_price=100.3,
+            volume=400000,
+            rvol=1.1,
+        ),
+    }
+    with patch("engine.position_sizer.get_lot_size", return_value=250):
+        ranked = identify_early_fno_movers(
+            ["DRIFT", "ADANIENSOL"], quotes, top_n=2, ohlcv_map={"ADANIENSOL:5m": df_rev}
+        )
+    assert ranked[0] == "ADANIENSOL"
+
+
+def test_options_momentum_spot_first_funnel_skips_chain_on_vwap_fight(monkeypatch) -> None:
+    """In live runtime without pre-warmed chain, fading against VWAP must return before REST option chain."""
+    from engine.detectors.options_momentum import detect_options_momentum_breakouts
+
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    idx = pd.date_range("2026-11-28 09:15", periods=8, freq="5min")
+    df_5m = pd.DataFrame(
+        {
+            "open": [100.0] * 8,
+            "high": [102.0] * 8,
+            "low": [99.0] * 8,
+            "close": [100.5] * 8,
+            "volume": [10000.0] * 8,
+        },
+        index=idx,
+    )
+    chain_calls: list[str] = []
+
+    def _spy_chain(sym, *args, **kwargs):
+        chain_calls.append(sym)
+        return []
+
+    quotes = {
+        "NSE:INFY": SimpleNamespace(
+            last_price=100.5,
+            vwap=102.0,  # Bullish day chg (+0.6%) yet price < VWAP * 0.996 (fading below VWAP)
+            change_pct=0.60,
+            open=100.0,
+            high=102.0,
+            low=99.8,
+            volume=500000,
+        )
+    }
+    with (
+        patch("engine.alert_preferences.alert_preferences.is_segment_allowed", return_value=True),
+        patch("market.calendar.is_market_open", return_value=True),
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.options.get_options_chain", side_effect=_spy_chain),
+    ):
+        res = detect_options_momentum_breakouts(
+            targets=["INFY"],
+            watched_indices=(),
+            batch_quotes=quotes,
+            now_dt=datetime(2026, 11, 28, 10, 30, tzinfo=IST),
+            chains_map={},
+        )
+    assert res == []
+    assert chain_calls == []
