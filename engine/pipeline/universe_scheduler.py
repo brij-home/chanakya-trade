@@ -25,24 +25,22 @@ DEFAULT_WATCHED_INDICES: tuple[str, ...] = (
 )
 
 
-def _extract_15m_impulse_pct(
+def _extract_signed_15m_impulse_pct(
     symbol: str,
     quote: Any,
     ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> float:
-    """Measure recent 15m (3 x 5m bars) absolute price acceleration to catch mid-session reversals."""
+    """Measure recent signed 15m (3 x 5m bars) price move % to catch bull & bear reversals."""
     is_d = isinstance(quote, dict)
-    q_imp = abs(
-        float(
-            (
-                quote.get("chg_15m") or quote.get("accel_15m_pct")
-                if is_d
-                else (getattr(quote, "chg_15m", 0.0) or getattr(quote, "accel_15m_pct", 0.0))
-            )
-            or 0.0
+    q_imp = float(
+        (
+            quote.get("chg_15m") or quote.get("accel_15m_pct")
+            if is_d
+            else (getattr(quote, "chg_15m", 0.0) or getattr(quote, "accel_15m_pct", 0.0))
         )
+        or 0.0
     )
-    if q_imp > 0 or not ohlcv_map:
+    if abs(q_imp) > 0 or not ohlcv_map:
         return q_imp
     clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
     df = None
@@ -57,7 +55,7 @@ def _extract_15m_impulse_pct(
             c_now = float(df[col].iloc[-1] or 0.0)
             c_prev = float(df[col].iloc[-4] or 0.0)
             if c_prev > 0 and c_now > 0:
-                return abs((c_now - c_prev) / c_prev * 100.0)
+                return (c_now - c_prev) / c_prev * 100.0
         except Exception as e_imp:
             logger.debug(f"[UniverseScheduler] 15m impulse calc skipped for {clean}: {e_imp}")
     return 0.0
@@ -70,15 +68,17 @@ def score_symbol_velocity(
     lot_size: Optional[int] = None,
     ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> float:
-    """Rank equity/F&O symbol priority from day change, 15m impulse, turnover & TOD RVOL."""
+    """Rank equity/F&O symbol priority symmetrically from day change, signed 15m impulse & TOD RVOL."""
     clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
     q = quotes_map.get(f"NSE:{clean}") or quotes_map.get(f"BSE:{clean}") or quotes_map.get(symbol)
     if not q:
         return 0.0
 
     is_d = isinstance(q, dict)
-    chg = abs(float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0))
-    imp_15m = _extract_15m_impulse_pct(symbol, q, ohlcv_map=ohlcv_map)
+    raw_chg = float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0)
+    chg = abs(raw_chg)
+    signed_15m = _extract_signed_15m_impulse_pct(symbol, q, ohlcv_map=ohlcv_map)
+    imp_15m = abs(signed_15m)
     effective_move = max(chg, imp_15m * 1.6)
     vol = float((q.get("volume") if is_d else getattr(q, "volume", 0.0)) or 0.0)
     ltp = float(
@@ -119,15 +119,16 @@ def score_symbol_velocity(
     )
     rvol_boost = 1.4 if (rvol_p >= 1.75 and effective_move >= 0.40) else 1.0
     drive_boost = 1.0
+    # Use active 15m impulse sign during intraday reversals so both bull V-reversals and bear fades qualify
+    active_dir = signed_15m if imp_15m >= 0.50 else raw_chg
     if effective_move >= 0.50 and ltp > 0:
         open_p = float((q.get("open") if is_d else getattr(q, "open", 0.0)) or 0.0)
         high_p = float((q.get("high") if is_d else getattr(q, "high", 0.0)) or 0.0)
         low_p = float((q.get("low") if is_d else getattr(q, "low", 0.0)) or 0.0)
-        raw_chg = float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0)
         day_rng = high_p - low_p
         if day_rng > 0:
             close_pos = (ltp - low_p) / day_rng
-            if (raw_chg > 0 and close_pos >= 0.72) or (raw_chg < 0 and close_pos <= 0.28):
+            if (active_dir > 0 and close_pos >= 0.72) or (active_dir < 0 and close_pos <= 0.28):
                 drive_boost *= 1.30
             if open_p > 0:
                 if (raw_chg > 0 and (open_p - low_p) / ltp <= 0.004) or (
@@ -180,7 +181,7 @@ def identify_early_fno_movers(
             if q
             else 0.0
         )
-        imp_15m = _extract_15m_impulse_pct(sym, q, ohlcv_map=ohlcv_map) if q else 0.0
+        imp_15m = abs(_extract_signed_15m_impulse_pct(sym, q, ohlcv_map=ohlcv_map)) if q else 0.0
         if chg >= float(min_move_pct) or imp_15m >= float(min_move_pct):
             active_movers.append((score, sym))
         else:
@@ -192,11 +193,71 @@ def identify_early_fno_movers(
     return ranked[: max(1, int(top_n))]
 
 
+def identify_coiling_fno_candidates(
+    equities: Sequence[str],
+    quotes_map: Optional[dict[str, Any]],
+    *,
+    top_n: int = 40,
+    max_range_pct: float = 1.8,
+    max_abs_chg: float = 1.4,
+) -> list[str]:
+    """Select tight-range liquid F&O names suited for pre-inflection dryups & non-directional coils."""
+    policy = get_discovery_policy()
+    filtered: list[str] = []
+    for sym in equities:
+        clean = sym.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        if not clean:
+            continue
+        if policy.fno_only and not allows_context_symbol(sym if ":" in sym else f"NSE:{clean}"):
+            continue
+        filtered.append(sym)
+    if not quotes_map:
+        return filtered[: max(1, int(top_n))]
+
+    tight_coils: list[tuple[float, str]] = []
+    fallback_pool: list[tuple[float, str]] = []
+    for sym in filtered:
+        clean = sym.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        q = quotes_map.get(f"NSE:{clean}") or quotes_map.get(f"BSE:{clean}") or quotes_map.get(sym)
+        if not q:
+            continue
+        is_d = isinstance(q, dict)
+        ltp = float(
+            (
+                (q.get("last_price") or q.get("ltp"))
+                if is_d
+                else (getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0))
+            )
+            or 0.0
+        )
+        high_p = float((q.get("high") if is_d else getattr(q, "high", 0.0)) or 0.0)
+        low_p = float((q.get("low") if is_d else getattr(q, "low", 0.0)) or 0.0)
+        vol = float((q.get("volume") if is_d else getattr(q, "volume", 0.0)) or 0.0)
+        abs_chg = abs(
+            float((q.get("change_pct") if is_d else getattr(q, "change_pct", 0.0)) or 0.0)
+        )
+        rng_pct = ((high_p - low_p) / ltp * 100.0) if (ltp > 0 and high_p >= low_p) else 99.0
+        turnover_cr = (ltp * vol) / 1e7 if (ltp > 0 and vol > 0) else 0.0
+        liq_weight = min(3.0, 1.0 + turnover_cr / 25.0)
+        # Tighter compression & higher liquidity rank higher; already extended >max_abs_chg goes to fallback
+        if abs_chg <= max_abs_chg and rng_pct <= max_range_pct and ltp > 0:
+            compression_score = liq_weight / max(0.20, rng_pct)
+            tight_coils.append((compression_score, sym))
+        else:
+            fallback_pool.append((turnover_cr, sym))
+
+    tight_coils.sort(key=lambda x: x[0], reverse=True)
+    fallback_pool.sort(key=lambda x: x[0], reverse=True)
+    combined = [s for _, s in tight_coils] + [s for _, s in fallback_pool]
+    return combined[: max(1, int(top_n))]
+
+
 def prioritize_equities_by_velocity(
     equities: Sequence[str],
     quotes_map: dict[str, Any],
     *,
     rotate_tbt: bool = False,
+    ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> list[str]:
     """Sort watched equities strictly honoring config.discovery_policy & velocity rank."""
     policy = get_discovery_policy()
@@ -213,7 +274,7 @@ def prioritize_equities_by_velocity(
 
     scored = sorted(
         filtered,
-        key=lambda s: score_symbol_velocity(s, quotes_map),
+        key=lambda s: score_symbol_velocity(s, quotes_map, ohlcv_map=ohlcv_map),
         reverse=True,
     )
     if rotate_tbt and scored:

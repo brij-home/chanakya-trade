@@ -522,27 +522,49 @@ def test_censored_forward_path_moderate_loss_avoids_probation_blackout(tmp_path)
 
 
 def test_identify_early_fno_movers_captures_mid_session_15m_reversal() -> None:
-    """Mid-day reversal near 0% day-change but >=1.3% 15m impulse must rank ahead of sleepy drift."""
-    from engine.pipeline.universe_scheduler import identify_early_fno_movers
+    """Both bearish top-fades and bullish V-reversals with >=1.3% 15m impulse rank symmetrically; coils isolate low-range F&O stocks."""
+    from engine.pipeline.universe_scheduler import (
+        identify_coiling_fno_candidates,
+        identify_early_fno_movers,
+    )
 
     idx = pd.date_range("2026-11-28 09:15", periods=6, freq="5min")
-    df_rev = pd.DataFrame(
+    df_bear = pd.DataFrame(
         {
             "open": [101.5] * 6,
             "high": [101.8] * 6,
-            "low": [99.8] * 6,
-            "close": [101.4, 101.3, 101.2, 100.8, 100.2, 99.7],
+            "low": [99.6] * 6,
+            "close": [101.4, 101.3, 101.2, 100.8, 100.2, 99.6],
+            "volume": [10000] * 6,
+        },
+        index=idx,
+    )
+    df_bull = pd.DataFrame(
+        {
+            "open": [98.5] * 6,
+            "high": [100.4] * 6,
+            "low": [98.2] * 6,
+            "close": [98.6, 98.7, 98.8, 99.2, 99.8, 100.4],
             "volume": [10000] * 6,
         },
         index=idx,
     )
     quotes = {
         "NSE:ADANIENSOL": SimpleNamespace(
-            change_pct=-0.10,
-            open=101.5,
+            change_pct=0.20,
+            open=101.0,
             high=101.8,
             low=99.6,
             last_price=99.7,
+            volume=600000,
+            rvol=1.6,
+        ),
+        "NSE:VREVERSAL": SimpleNamespace(
+            change_pct=-0.20,
+            open=99.0,
+            high=100.4,
+            low=98.2,
+            last_price=100.3,
             volume=600000,
             rvol=1.6,
         ),
@@ -555,12 +577,35 @@ def test_identify_early_fno_movers_captures_mid_session_15m_reversal() -> None:
             volume=400000,
             rvol=1.1,
         ),
+        "NSE:EXTENDED": SimpleNamespace(
+            change_pct=4.80,
+            open=100.0,
+            high=105.0,
+            low=99.9,
+            last_price=104.8,
+            volume=900000,
+            rvol=1.8,
+        ),
+        "NSE:TIGHTCOIL": SimpleNamespace(
+            change_pct=0.25,
+            open=500.0,
+            high=502.0,
+            low=499.5,
+            last_price=501.0,
+            volume=800000,
+            rvol=0.9,
+        ),
     }
     with patch("engine.position_sizer.get_lot_size", return_value=250):
         ranked = identify_early_fno_movers(
-            ["DRIFT", "ADANIENSOL"], quotes, top_n=2, ohlcv_map={"ADANIENSOL:5m": df_rev}
+            ["DRIFT", "ADANIENSOL", "VREVERSAL"],
+            quotes,
+            top_n=3,
+            ohlcv_map={"ADANIENSOL:5m": df_bear, "VREVERSAL:5m": df_bull},
         )
-    assert ranked[0] == "ADANIENSOL"
+        coils = identify_coiling_fno_candidates(["EXTENDED", "TIGHTCOIL"], quotes, top_n=2)
+    assert set(ranked[:2]) == {"ADANIENSOL", "VREVERSAL"}
+    assert coils[0] == "TIGHTCOIL"
 
 
 def test_options_momentum_spot_first_funnel_skips_chain_on_vwap_fight(monkeypatch) -> None:

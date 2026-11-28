@@ -19015,6 +19015,28 @@ class AutoAlertEngine:
 
         return targets[:max_total_targets]
 
+    def _get_ram_5m_ohlcv_map(self, symbols: list[str]) -> dict[str, Any]:
+        """Collect available 5m candle tails strictly from in-RAM MarketMatrix (zero IO/REST)."""
+        if (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or os.environ.get("DEPLOY_MODE") == "test"
+            or "PYTEST_CURRENT_TEST" in os.environ
+        ):
+            return {}
+        out: dict[str, Any] = {}
+        try:
+            from engine.market_matrix import get_market_matrix
+
+            mm = get_market_matrix()
+            for sym in symbols:
+                clean = canonical_alert_symbol(sym).upper()
+                df = mm.get_candles_df(clean, timeframe="5m", limit=6, fallback_to_warehouse=False)
+                if df is not None and len(df) >= 4:
+                    out[f"{clean}:5m"] = df
+        except Exception as e_mm:
+            logger.debug(f"[AutoAlertEngine] RAM 5m hydration skipped: {e_mm}")
+        return out
+
     def _select_early_mover_targets(
         self,
         quotes_map: Optional[dict[str, Any]],
@@ -19031,8 +19053,9 @@ class AutoAlertEngine:
         if quotes_map:
             from engine.pipeline.universe_scheduler import identify_early_fno_movers
 
+            ram_5m = self._get_ram_5m_ohlcv_map(eq_cands)
             ranked_eq = identify_early_fno_movers(
-                eq_cands, quotes_map=quotes_map, top_n=max_pool_depth
+                eq_cands, quotes_map=quotes_map, top_n=max_pool_depth, ohlcv_map=ram_5m
             )
             cycle_n = int(getattr(self, counter_attr, 0) or 0)
             setattr(self, counter_attr, cycle_n + 1)
@@ -20339,18 +20362,26 @@ class AutoAlertEngine:
         else:
             eq_cands = list(self.watched_equities)
             if quotes_map and len(eq_cands) > 40:
-                from engine.pipeline.universe_scheduler import identify_early_fno_movers
+                from engine.pipeline.universe_scheduler import (
+                    identify_coiling_fno_candidates,
+                    identify_early_fno_movers,
+                )
 
-                ranked_eq = identify_early_fno_movers(eq_cands, quotes_map=quotes_map, top_n=120)
+                coilers = identify_coiling_fno_candidates(eq_cands, quotes_map=quotes_map, top_n=35)
+                ram_5m = self._get_ram_5m_ohlcv_map(eq_cands)
+                movers = identify_early_fno_movers(
+                    eq_cands, quotes_map=quotes_map, top_n=90, ohlcv_map=ram_5m
+                )
+                merged_cands = list(dict.fromkeys(coilers + movers))
                 cycle_n = int(getattr(self, "_dryup_cycle_counter", 0) or 0)
                 self._dryup_cycle_counter = cycle_n + 1
                 target_list = self._select_staggered_targets(
-                    ranked_eq,
+                    merged_cands,
                     cycle_step=cycle_n,
                     base_targets=[],
                     max_total_targets=65,
                     anchor_count=35,
-                    max_pool_depth=120,
+                    max_pool_depth=125,
                 )
             else:
                 target_list = eq_cands[:65]
@@ -21475,7 +21506,10 @@ class AutoAlertEngine:
                 from engine.pipeline.universe_scheduler import identify_early_fno_movers
 
                 eq_list = identify_early_fno_movers(
-                    eq_list, quotes_map=quotes_map, top_n=len(eq_list)
+                    eq_list,
+                    quotes_map=quotes_map,
+                    top_n=len(eq_list),
+                    ohlcv_map=self._get_ram_5m_ohlcv_map(eq_list),
                 )
 
             targets.extend(eq_list)
@@ -25059,10 +25093,12 @@ class AutoAlertEngine:
             try:
                 from engine.pipeline.universe_scheduler import prioritize_equities_by_velocity
 
+                eq_watched_list = list(self.watched_equities)
                 self._prioritized_equities = prioritize_equities_by_velocity(
-                    list(self.watched_equities),
+                    eq_watched_list,
                     quotes_map,
                     rotate_tbt=True,
+                    ohlcv_map=self._get_ram_5m_ohlcv_map(eq_watched_list),
                 )
             except Exception as e_sort:
                 logger.debug(f"[AutoAlertEngine] Dynamic equity prioritization skipped: {e_sort}")
